@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ltx-core-mlx"
+version = "0.1.0"
+description = "LTX-2.3 model library ported to MLX for Apple Silicon"
+readme = "../../README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "dgrauet" }]
+keywords = ["mlx", "video-generation", "diffusion", "apple-silicon", "ltx"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "mlx>=0.31.0",
+    "mlx-lm>=0.31.0",
+    "safetensors>=0.4.0",
+    "huggingface-hub>=0.26.0",
+    "numpy>=1.26.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ltx_core_mlx"]

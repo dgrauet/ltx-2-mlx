@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ltx-pipelines-mlx"
+version = "0.1.0"
+description = "Generation pipelines for LTX-2.3 on MLX"
+readme = "../../README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "dgrauet" }]
+keywords = ["mlx", "video-generation", "diffusion", "apple-silicon", "ltx"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "ltx-core-mlx",
+    "pillow>=10.4.0",
+    "tqdm>=4.66.0",
+]
+
+[project.scripts]
+ltx-2-mlx = "ltx_pipelines_mlx.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ltx_pipelines_mlx"]

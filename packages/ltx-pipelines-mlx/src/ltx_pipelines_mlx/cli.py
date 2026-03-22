@@ -1,0 +1,515 @@
+"""Command-line interface for ltx-2-mlx.
+
+Usage:
+    ltx-2-mlx generate --prompt "a cat walking" --output out.mp4
+    ltx-2-mlx generate --prompt "animate this" --image photo.jpg -o anim.mp4
+    ltx-2-mlx generate --prompt "a scene" --two-stage -o hires.mp4
+    ltx-2-mlx generate --prompt "a scene" --hq --stage1-steps 20 -o hq.mp4
+    ltx-2-mlx a2v --prompt "music video" --audio music.wav -o a2v.mp4
+    ltx-2-mlx retake --prompt "new scene" --video source.mp4 --start 1 --end 3 -o retake.mp4
+    ltx-2-mlx extend --prompt "continue" --video source.mp4 --extend-frames 2 -o extended.mp4
+    ltx-2-mlx keyframe --prompt "transition" --start img1.png --end img2.png -o kf.mp4
+    ltx-2-mlx enhance --prompt "a cat walking" --mode t2v
+    ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-distilled-q8
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+
+DEFAULT_MODEL = "dgrauet/ltx-2.3-mlx-distilled-q8"
+DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
+
+
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    """Add arguments shared across all generation subcommands."""
+    parser.add_argument("--prompt", "-p", required=True, help="Text prompt")
+    parser.add_argument("--output", "-o", required=True, help="Output video path (.mp4)")
+    parser.add_argument(
+        "--model", "-m", default=DEFAULT_MODEL, help=f"Model weights (HF repo or path, default: {DEFAULT_MODEL})"
+    )
+    parser.add_argument(
+        "--gemma", default=DEFAULT_GEMMA, help=f"Gemma model for text encoding (default: {DEFAULT_GEMMA})"
+    )
+    parser.add_argument("--height", "-H", type=int, default=480, help="Video height (default: 480)")
+    parser.add_argument("--width", "-W", type=int, default=704, help="Video width (default: 704)")
+    parser.add_argument("--frames", "-f", type=int, default=97, help="Number of frames (default: 97)")
+    parser.add_argument("--seed", "-s", type=int, default=-1, help="Random seed (-1 = random)")
+    parser.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 8)")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress progress output")
+
+
+def main() -> None:
+    """Entry point for the ltx-2-mlx CLI."""
+    parser = argparse.ArgumentParser(
+        prog="ltx-2-mlx",
+        description="LTX-2.3 video generation on Apple Silicon (MLX)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+examples:
+  ltx-2-mlx generate --prompt "a sunset" --output sunset.mp4
+  ltx-2-mlx generate --prompt "animate" --image photo.jpg -o anim.mp4
+  ltx-2-mlx generate --prompt "a scene" --two-stage -o hires.mp4
+  ltx-2-mlx a2v --prompt "music video" --audio music.wav -o a2v.mp4
+  ltx-2-mlx retake --prompt "new scene" --video source.mp4 --start 1 --end 3 -o out.mp4
+  ltx-2-mlx extend --prompt "continue" --video source.mp4 --extend-frames 2 -o out.mp4
+  ltx-2-mlx keyframe --prompt "transition" --start img1.png --end img2.png -o out.mp4
+  ltx-2-mlx enhance --prompt "a cat walking" --mode t2v
+  ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-distilled-q4
+""",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # --- generate (T2V / I2V / two-stage / HQ) ---
+    gen = sub.add_parser("generate", help="Generate video from text (T2V) or image (I2V)")
+    _add_common_args(gen)
+    gen.add_argument("--image", "-i", default=None, help="Reference image for I2V (optional)")
+    gen.add_argument("--two-stage", action="store_true", help="Two-stage pipeline (half-res + upscale + refine)")
+    gen.add_argument("--hq", action="store_true", help="HQ pipeline (res_2s sampler + upscale + refine)")
+    gen.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps for two-stage/HQ mode")
+    gen.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 steps for two-stage/HQ mode")
+    gen.add_argument("--enhance-prompt", action="store_true", help="Enhance prompt using Gemma before generation")
+
+    # --- a2v (Audio-to-Video) ---
+    a2v = sub.add_parser("a2v", help="Generate video from audio + text prompt")
+    _add_common_args(a2v)
+    a2v.add_argument("--audio", "-a", required=True, help="Input audio file (WAV/MP3/etc.)")
+    a2v.add_argument("--fps", type=float, default=24.0, help="Frame rate (default: 24)")
+    a2v.add_argument("--audio-start", type=float, default=0.0, help="Audio start time in seconds (default: 0)")
+    a2v.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
+    a2v.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
+
+    # --- retake ---
+    ret = sub.add_parser("retake", help="Regenerate a time segment of an existing video")
+    _add_common_args(ret)
+    ret.add_argument("--video", "-v", required=True, help="Source video file")
+    ret.add_argument("--start", type=int, required=True, help="Start latent frame index (inclusive)")
+    ret.add_argument("--end", type=int, required=True, help="End latent frame index (exclusive)")
+
+    # --- extend ---
+    ext = sub.add_parser("extend", help="Add frames before or after an existing video")
+    _add_common_args(ext)
+    ext.add_argument("--video", "-v", required=True, help="Source video file")
+    ext.add_argument("--extend-frames", type=int, required=True, help="Number of latent frames to add")
+    ext.add_argument("--direction", choices=["before", "after"], default="after", help="Direction (default: after)")
+
+    # --- keyframe ---
+    kf = sub.add_parser("keyframe", help="Interpolate between keyframe images")
+    _add_common_args(kf)
+    kf.add_argument("--start", required=True, help="Start keyframe image path")
+    kf.add_argument("--end", required=True, help="End keyframe image path")
+    kf.add_argument("--fps", type=float, default=24.0, help="Frame rate (default: 24)")
+
+    # --- enhance ---
+    enh = sub.add_parser("enhance", help="Enhance a prompt using Gemma (no video generation)")
+    enh.add_argument("--prompt", "-p", required=True, help="Prompt to enhance")
+    enh.add_argument("--mode", choices=["t2v", "i2v"], default="t2v", help="Prompt mode (default: t2v)")
+    enh.add_argument("--gemma", default=DEFAULT_GEMMA, help=f"Gemma model (default: {DEFAULT_GEMMA})")
+    enh.add_argument("--seed", "-s", type=int, default=10, help="Random seed (default: 10)")
+
+    # --- info ---
+    info = sub.add_parser("info", help="Show model info and memory estimate")
+    info.add_argument("--model", "-m", default=DEFAULT_MODEL, help="Model weights (HF repo or path)")
+
+    args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(1)
+
+    # Resolve seed=-1 to a random value
+    if hasattr(args, "seed") and args.seed < 0:
+        import random
+
+        args.seed = random.randint(0, 2**31 - 1)
+
+    commands = {
+        "generate": _cmd_generate,
+        "a2v": _cmd_a2v,
+        "retake": _cmd_retake,
+        "extend": _cmd_extend,
+        "keyframe": _cmd_keyframe,
+        "enhance": _cmd_enhance,
+        "info": _cmd_info,
+    }
+    commands[args.command](args)
+
+
+# =============================================================================
+# Generate (T2V / I2V / Two-stage / HQ)
+# =============================================================================
+
+
+def _cmd_generate(args: argparse.Namespace) -> None:
+    """Generate a video from a text prompt (and optionally a reference image)."""
+    t0 = time.time()
+
+    prompt = _maybe_enhance_prompt(args)
+
+    if args.hq:
+        from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline
+
+        if not args.quiet:
+            print("Mode: HQ Two-Stage (res_2s)")
+
+        pipe = TwoStageHQPipeline(model_dir=args.model, low_memory=True)
+        pipe.generate_and_save(
+            prompt=prompt,
+            output_path=args.output,
+            height=args.height,
+            width=args.width,
+            num_frames=args.frames,
+            seed=args.seed,
+            stage1_steps=args.stage1_steps or 20,
+            stage2_steps=args.stage2_steps,
+            image=args.image,
+        )
+
+    elif args.two_stage:
+        from ltx_pipelines_mlx.ti2vid_two_stages import TwoStagePipeline
+
+        if not args.quiet:
+            print("Mode: Two-Stage")
+
+        pipe = TwoStagePipeline(model_dir=args.model, low_memory=True)
+        pipe.generate_and_save(
+            prompt=prompt,
+            output_path=args.output,
+            height=args.height,
+            width=args.width,
+            num_frames=args.frames,
+            seed=args.seed,
+            stage1_steps=args.stage1_steps,
+            stage2_steps=args.stage2_steps,
+        )
+
+    elif args.image:
+        from ltx_pipelines_mlx.ti2vid_one_stage import ImageToVideoPipeline
+
+        if not args.quiet:
+            print("Mode: Image-to-Video")
+            print(f"Image: {args.image}")
+
+        pipe = ImageToVideoPipeline(model_dir=args.model, gemma_model_id=args.gemma)
+        pipe.generate_and_save(
+            prompt=prompt,
+            output_path=args.output,
+            image=args.image,
+            height=args.height,
+            width=args.width,
+            num_frames=args.frames,
+            seed=args.seed,
+            num_steps=args.steps,
+        )
+
+    else:
+        from ltx_pipelines_mlx.ti2vid_one_stage import TextToVideoPipeline
+
+        if not args.quiet:
+            print("Mode: Text-to-Video")
+
+        pipe = TextToVideoPipeline(model_dir=args.model, gemma_model_id=args.gemma)
+        pipe.generate_and_save(
+            prompt=prompt,
+            output_path=args.output,
+            height=args.height,
+            width=args.width,
+            num_frames=args.frames,
+            seed=args.seed,
+            num_steps=args.steps,
+        )
+
+    _print_result(args.output, t0, args.quiet)
+
+
+# =============================================================================
+# Audio-to-Video
+# =============================================================================
+
+
+def _cmd_a2v(args: argparse.Namespace) -> None:
+    """Generate video from audio + text prompt."""
+    t0 = time.time()
+
+    from ltx_pipelines_mlx.a2vid_two_stage import AudioToVideoPipeline
+
+    if not args.quiet:
+        print("Mode: Audio-to-Video")
+        print(f"Audio: {args.audio}")
+
+    pipe = AudioToVideoPipeline(model_dir=args.model, gemma_model_id=args.gemma)
+    pipe.generate_and_save(
+        prompt=args.prompt,
+        output_path=args.output,
+        audio_path=args.audio,
+        height=args.height,
+        width=args.width,
+        num_frames=args.frames,
+        fps=args.fps,
+        seed=args.seed,
+        stage1_steps=args.stage1_steps,
+        stage2_steps=args.stage2_steps,
+        audio_start_time=args.audio_start,
+    )
+
+    _print_result(args.output, t0, args.quiet)
+
+
+# =============================================================================
+# Retake
+# =============================================================================
+
+
+def _cmd_retake(args: argparse.Namespace) -> None:
+    """Regenerate a time segment of an existing video."""
+    t0 = time.time()
+
+    from ltx_pipelines_mlx.retake import RetakePipeline
+
+    if not args.quiet:
+        print("Mode: Retake")
+        print(f"Video: {args.video}, frames {args.start}-{args.end}")
+
+    pipe = RetakePipeline(model_dir=args.model, gemma_model_id=args.gemma)
+    video_latent, audio_latent = pipe.retake_from_video(
+        prompt=args.prompt,
+        video_path=args.video,
+        start_frame=args.start,
+        end_frame=args.end,
+        seed=args.seed,
+        num_steps=args.steps,
+    )
+
+    _decode_and_save(pipe, video_latent, audio_latent, args)
+    _print_result(args.output, t0, args.quiet)
+
+
+# =============================================================================
+# Extend
+# =============================================================================
+
+
+def _cmd_extend(args: argparse.Namespace) -> None:
+    """Add frames before or after an existing video."""
+    t0 = time.time()
+
+    from ltx_pipelines_mlx.extend import ExtendPipeline
+
+    if not args.quiet:
+        print(f"Mode: Extend ({args.direction})")
+        print(f"Video: {args.video}, +{args.extend_frames} latent frames")
+
+    pipe = ExtendPipeline(model_dir=args.model, gemma_model_id=args.gemma)
+    video_latent, audio_latent = pipe.extend_from_video(
+        prompt=args.prompt,
+        video_path=args.video,
+        extend_frames=args.extend_frames,
+        direction=args.direction,
+        seed=args.seed,
+        num_steps=args.steps,
+    )
+
+    _decode_and_save(pipe, video_latent, audio_latent, args)
+    _print_result(args.output, t0, args.quiet)
+
+
+# =============================================================================
+# Keyframe interpolation
+# =============================================================================
+
+
+def _cmd_keyframe(args: argparse.Namespace) -> None:
+    """Interpolate between two keyframe images."""
+    t0 = time.time()
+
+    from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
+    from ltx_core_mlx.utils.image import prepare_image_for_encoding
+    from ltx_core_mlx.utils.memory import aggressive_cleanup
+    from ltx_core_mlx.utils.weights import load_split_safetensors
+    from ltx_pipelines_mlx.keyframe_interpolation import KeyframeInterpolationPipeline
+    from ltx_pipelines_mlx.ti2vid_one_stage import TextToVideoPipeline
+
+    if not args.quiet:
+        print("Mode: Keyframe Interpolation")
+        print(f"Start: {args.start}, End: {args.end}")
+
+    model_dir = TextToVideoPipeline._resolve_model_dir(args.model)
+
+    # Encode keyframe images
+    from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
+
+    vae_encoder = VideoEncoder()
+    enc_weights = load_split_safetensors(model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
+    enc_weights = {
+        k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
+        for k, v in enc_weights.items()
+    }
+    vae_encoder.load_weights(list(enc_weights.items()))
+
+    lat_start = vae_encoder.encode(prepare_image_for_encoding(args.start, args.height, args.width)[:, :, None, :, :])
+    lat_end = vae_encoder.encode(prepare_image_for_encoding(args.end, args.height, args.width)[:, :, None, :, :])
+    del vae_encoder, enc_weights
+    aggressive_cleanup()
+
+    if not args.quiet:
+        print(f"Keyframes encoded: {lat_start.shape}")
+
+    # Compute pixel frame indices
+    F, _, _ = compute_video_latent_shape(args.frames, args.height, args.width)
+    last_pixel_frame = args.frames - 1
+
+    # Interpolate
+    pipe = KeyframeInterpolationPipeline(model_dir=args.model, gemma_model_id=args.gemma)
+    video_latent, audio_latent = pipe.interpolate(
+        prompt=args.prompt,
+        keyframe_latents=[lat_start, lat_end],
+        keyframe_indices=[0, last_pixel_frame],
+        height=args.height,
+        width=args.width,
+        num_frames=args.frames,
+        fps=args.fps,
+        seed=args.seed,
+        num_steps=args.steps,
+    )
+
+    _decode_and_save(pipe, video_latent, audio_latent, args)
+    _print_result(args.output, t0, args.quiet)
+
+
+# =============================================================================
+# Shared helpers
+# =============================================================================
+
+
+def _decode_and_save(
+    pipe: object,
+    video_latent: object,
+    audio_latent: object,
+    args: argparse.Namespace,
+) -> None:
+    """Decode latents and save to file."""
+    import tempfile
+    from pathlib import Path
+
+    from ltx_core_mlx.utils.memory import aggressive_cleanup
+
+    if hasattr(pipe, "low_memory") and pipe.low_memory:
+        pipe.dit = None
+        pipe.text_encoder = None
+        pipe.feature_extractor = None
+        pipe._loaded = False
+        aggressive_cleanup()
+
+    assert pipe.audio_decoder is not None
+    assert pipe.vocoder is not None
+    mel = pipe.audio_decoder.decode(audio_latent)
+    waveform = pipe.vocoder(mel)
+    aggressive_cleanup()
+
+    audio_path = tempfile.mktemp(suffix=".wav")
+    pipe._save_waveform(waveform, audio_path, sample_rate=48000)
+
+    assert pipe.vae_decoder is not None
+    pipe.vae_decoder.decode_and_stream(video_latent, args.output, fps=24.0, audio_path=audio_path)
+    Path(audio_path).unlink(missing_ok=True)
+    aggressive_cleanup()
+
+
+def _maybe_enhance_prompt(args: argparse.Namespace) -> str:
+    """Enhance prompt if --enhance-prompt is set."""
+    prompt = args.prompt
+    if not getattr(args, "enhance_prompt", False):
+        return prompt
+
+    from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+    from ltx_core_mlx.utils.memory import aggressive_cleanup
+
+    if not args.quiet:
+        print("Enhancing prompt...")
+    gemma = GemmaLanguageModel()
+    gemma.load(args.gemma)
+    if getattr(args, "image", None):
+        prompt = gemma.enhance_i2v(prompt, seed=args.seed)
+    else:
+        prompt = gemma.enhance_t2v(prompt, seed=args.seed)
+    if not args.quiet:
+        print(f"Enhanced: {prompt[:200]}...")
+    del gemma
+    aggressive_cleanup()
+    return prompt
+
+
+def _print_result(output: str, t0: float, quiet: bool) -> None:
+    """Print generation result."""
+    elapsed = time.time() - t0
+    if not quiet:
+        print(f"\nSaved to: {output}")
+        print(f"Time: {elapsed:.1f}s")
+
+
+def _cmd_enhance(args: argparse.Namespace) -> None:
+    """Enhance a prompt using Gemma."""
+    from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+
+    print("Loading Gemma...")
+    gemma = GemmaLanguageModel()
+    gemma.load(args.gemma)
+
+    if args.mode == "t2v":
+        enhanced = gemma.enhance_t2v(args.prompt, seed=args.seed)
+    else:
+        enhanced = gemma.enhance_i2v(args.prompt, seed=args.seed)
+
+    print(f"\nOriginal: {args.prompt}")
+    print(f"\nEnhanced: {enhanced}")
+
+
+def _cmd_info(args: argparse.Namespace) -> None:
+    """Show model info and memory estimate."""
+    from pathlib import Path
+
+    from huggingface_hub import snapshot_download
+
+    model_dir = Path(args.model)
+    if not model_dir.exists():
+        try:
+            model_dir = Path(snapshot_download(args.model))
+        except Exception as e:
+            print(f"Could not find or download model: {args.model}")
+            print(f"  {e}")
+            sys.exit(1)
+
+    print(f"Model: {args.model}")
+    print(f"Path:  {model_dir}")
+    print()
+
+    safetensor_files = sorted(model_dir.glob("*.safetensors"))
+    if not safetensor_files:
+        print("  No .safetensors files found.")
+        return
+
+    total_bytes = 0
+    for f in safetensor_files:
+        size = f.stat().st_size
+        total_bytes += size
+        print(f"  {f.name:<45s} {size / 1024**2:>8.1f} MB")
+
+    total_mb = total_bytes / 1024**2
+    total_gb = total_mb / 1024
+    print(f"  {'─' * 55}")
+    print(f"  {'Total':<45s} {total_mb:>8.1f} MB ({total_gb:.1f} GB)")
+    print(f"  Estimated RAM: ~{total_gb * 1.3:.0f} GB (model + inference overhead)")
+
+    json_files = sorted(model_dir.glob("*.json"))
+    if json_files:
+        print(f"\n  Config files: {', '.join(f.name for f in json_files)}")
+
+    upsampler_files = [f for f in safetensor_files if "upscaler" in f.name or "upsampler" in f.name]
+    if upsampler_files:
+        print(f"\n  Upsamplers: {', '.join(f.stem for f in upsampler_files)}")
+
+
+if __name__ == "__main__":
+    main()

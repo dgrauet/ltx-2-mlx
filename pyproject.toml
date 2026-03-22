@@ -1,0 +1,82 @@
+[project]
+name = "ltx-2-mlx"
+version = "0.1.0"
+description = "Pure MLX port of LTX-2 for Apple Silicon — inference, pipelines, and training"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "dgrauet" }]
+keywords = ["mlx", "video-generation", "diffusion", "apple-silicon", "ltx"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "ltx-core-mlx",
+    "ltx-pipelines-mlx",
+]
+
+[project.optional-dependencies]
+trainer = ["ltx-trainer-mlx"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.7.0",
+]
+all = ["ltx-2-mlx[trainer,dev]"]
+
+[project.urls]
+Homepage = "https://github.com/dgrauet/ltx-2-mlx"
+Repository = "https://github.com/dgrauet/ltx-2-mlx"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+ltx-core-mlx = { workspace = true }
+ltx-pipelines-mlx = { workspace = true }
+ltx-trainer-mlx = { workspace = true }
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "TC",    # flake8-type-checking
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B905",   # zip without strict
+    "N806",   # uppercase variable names (standard for tensor dims B, C, H, W, T, F, N)
+    "RUF005", # iterable unpacking vs concatenation
+    "RUF007", # pairwise vs zip (explicit zip is clearer for sigma pairs)
+    "RUF059", # unused unpacked variables (standard for tensor shape destructuring B, C, H, W)
+    "SIM108", # ternary operator
+    "TCH",    # type-checking imports (not worth the complexity for this project)
+    "UP007",  # X | Y union syntax (keep Optional for clarity)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ltx_core_mlx", "ltx_pipelines_mlx", "ltx_trainer_mlx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests that require model weights (deselect with '-m \"not slow\"')",
+]

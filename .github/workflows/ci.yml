@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check packages/ tests/
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: format --check packages/ tests/
+
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate Python syntax
+        run: |
+          python -c "
+          import ast, sys, glob
+          files = glob.glob('packages/**/src/**/*.py', recursive=True) + glob.glob('tests/**/*.py', recursive=True)
+          ok = True
+          for f in sorted(set(files)):
+              try:
+                  with open(f) as fh: ast.parse(fh.read())
+              except SyntaxError as e:
+                  print(f'FAIL: {f}: {e}'); ok = False
+          print(f'{len(files)} files checked')
+          if not ok: sys.exit(1)
+          "
+
+  test:
+    runs-on: macos-14
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-extras
+      - run: uv run pytest tests/ -v -m "not slow" --tb=short

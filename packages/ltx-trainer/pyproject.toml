@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ltx-trainer-mlx"
+version = "0.1.0"
+description = "LTX-2 training toolkit ported to MLX for Apple Silicon"
+readme = "../../README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "dgrauet" }]
+keywords = ["mlx", "video-generation", "diffusion", "apple-silicon", "ltx", "training"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "ltx-core-mlx",
+    "mlx>=0.31.0",
+    "pydantic>=2.0.0",
+    "safetensors>=0.4.0",
+    "numpy>=1.26.0",
+    "tqdm>=4.65.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+wandb = ["wandb>=0.16.0"]
+hub = ["huggingface-hub>=0.26.0"]
+all = ["ltx-trainer-mlx[wandb,hub]"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ltx_trainer_mlx"]
