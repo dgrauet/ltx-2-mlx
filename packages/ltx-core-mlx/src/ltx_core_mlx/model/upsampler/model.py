@@ -398,9 +398,11 @@ def upsample_video(
     Returns:
         Upsampled and re-normalized latent (B, C, F, H*2, W*2).
     """
-    m = mean.reshape(1, -1, 1, 1, 1)
-    s = std.reshape(1, -1, 1, 1, 1)
-    latent = latent * s + m  # un_normalize
-    latent = upsampler(latent)
-    latent = (latent - m) / s  # normalize
-    return latent
+    # NOTE: The reference wraps with un_normalize/normalize using
+    # per_channel_statistics. However, the MLX-converted upsampler weights
+    # appear to expect normalized latents directly. Applying normalization
+    # wrapping produces severe grid artifacts. This needs investigation
+    # in mlx-forge to determine if the conversion already accounts for
+    # the statistics. For now, skip normalization — validated by
+    # test-transition-7 producing correct output without it.
+    return upsampler(latent)
