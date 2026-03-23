@@ -283,22 +283,28 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
                 aggressive_cleanup()
 
         video_embeds, audio_embeds = self._encode_text(prompt)
+        mx.eval(video_embeds, audio_embeds)
+        aggressive_cleanup()  # Free Gemma graph before second encode
 
         # Default guider params matching reference LTX_2_3_PARAMS
+        # Reference LTX_2_3_PARAMS defaults for guidance.
+        # NOTE: stg_scale and modality_scale set to 0/1 for now — STG guidance
+        # has a shape bug in the MLX attention path that needs separate investigation.
+        # CFG + rescale are the primary quality drivers.
         if video_guider_params is None:
             video_guider_params = MultiModalGuiderParams(
                 cfg_scale=3.0,
-                stg_scale=1.0,
+                stg_scale=0.0,
                 rescale_scale=0.7,
-                modality_scale=3.0,
+                modality_scale=1.0,
                 stg_blocks=[28],
             )
         if audio_guider_params is None:
             audio_guider_params = MultiModalGuiderParams(
                 cfg_scale=7.0,
-                stg_scale=1.0,
+                stg_scale=0.0,
                 rescale_scale=0.7,
-                modality_scale=3.0,
+                modality_scale=1.0,
                 stg_blocks=[28],
             )
 
@@ -306,8 +312,8 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
         from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
 
         neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
-
-        mx.eval(video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds)
+        mx.eval(neg_video_embeds, neg_audio_embeds)
+        aggressive_cleanup()
 
         # Free text encoder before loading transformer
         self.text_encoder = None
