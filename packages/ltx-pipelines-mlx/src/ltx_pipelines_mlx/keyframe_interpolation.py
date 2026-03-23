@@ -33,7 +33,7 @@ from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
-from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS
+from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS, ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_two_stages import TwoStagePipeline
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
 
@@ -269,8 +269,14 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
             )
             video_state_1 = kf_condition.apply(video_state_1, (F, H_half, W_half))
 
-        # Stage 1 denoising
-        sigmas_1 = DISTILLED_SIGMAS[: stage1_steps + 1] if stage1_steps else DISTILLED_SIGMAS
+        # Stage 1 sigma schedule: dev model uses LTX2Scheduler (dynamic schedule),
+        # distilled model uses predefined DISTILLED_SIGMAS.
+        if use_dev:
+            s1_steps = stage1_steps or 20  # Reference default for non-distilled
+            num_tokens = F * H_half * W_half
+            sigmas_1 = ltx2_schedule(s1_steps, num_tokens=num_tokens)
+        else:
+            sigmas_1 = DISTILLED_SIGMAS[: stage1_steps + 1] if stage1_steps else DISTILLED_SIGMAS
         x0_model = X0Model(self.dit)
 
         if cfg_scale != 1.0:
