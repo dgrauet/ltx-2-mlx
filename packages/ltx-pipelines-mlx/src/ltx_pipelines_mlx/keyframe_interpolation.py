@@ -24,15 +24,28 @@ from ltx_core_mlx.components.guiders import (
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
 from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState, create_initial_state, noise_latent_state
-from ltx_core_mlx.model.transformer.model import X0Model
+from ltx_core_mlx.loader.fuse_loras import apply_loras
+from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
+from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
+from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
 from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
 from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_core_mlx.utils.weights import load_split_safetensors
+from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS
 from ltx_pipelines_mlx.ti2vid_two_stages import TwoStagePipeline
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
+
+
+def _flatten_dict(d: dict, prefix: str, out: dict[str, mx.array]) -> None:
+    """Flatten a nested dict to dot-separated keys."""
+    for k, v in d.items():
+        full_key = f"{prefix}{k}" if prefix else k
+        if isinstance(v, dict):
+            _flatten_dict(v, f"{full_key}.", out)
+        else:
+            out[full_key] = v
 
 
 def _encode_keyframe(
@@ -55,25 +68,94 @@ def _encode_keyframe(
     img_tensor = prepare_image_for_encoding(image, height, width)
     # (1, 3, H, W) -> (1, 3, 1, H, W) for single-frame video encoding
     latent = vae_encoder.encode(img_tensor[:, :, None, :, :])
+    mx.eval(latent)  # Force evaluation to avoid graph buildup
     # (1, 128, 1, H', W') -> (1, H'*W', 128) tokens
     tokens = latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
     return tokens
+
+
+def _remap_lora_keys(lora_sd: dict[str, mx.array]) -> dict[str, mx.array]:
+    """Remap LoRA keys from ComfyUI/diffusion_model format to MLX model format.
+
+    Applies the LTXV_LORA_COMFY_RENAMING_MAP replacements to LoRA keys:
+    - ``diffusion_model.`` → ```` (strip prefix)
+    - ``.to_out.0.`` → ``.to_out.`` (no Sequential index)
+    - ``.ff.net.0.proj.`` → ``.ff.proj_in.`` (MLX naming)
+    - ``.ff.net.2.`` → ``.ff.proj_out.`` (MLX naming)
+    """
+    remapped: dict[str, mx.array] = {}
+    for key, value in lora_sd.items():
+        new_key = LTXV_LORA_COMFY_RENAMING_MAP.apply_to_key(key)
+        remapped[new_key] = value
+    return remapped
 
 
 class KeyframeInterpolationPipeline(TwoStagePipeline):
     """Two-stage keyframe interpolation pipeline.
 
     Stage 1: Generate at half resolution with keyframe conditioning + optional CFG.
-    Stage 2: Neural upscale 2x, re-apply keyframe conditioning at full resolution, refine.
-
-    Keyframe images are encoded by the VAE at each stage's resolution, matching
-    the reference implementation.
+             When ``dev_transformer`` is specified, uses the non-distilled model
+             for higher quality interpolation (matching the reference).
+    Stage 2: Neural upscale 2x, re-apply keyframe conditioning at full resolution,
+             refine with distilled model (dev + LoRA fusion, or standalone distilled).
 
     Args:
         model_dir: Path to model weights.
         gemma_model_id: Gemma model for text encoding.
         low_memory: Aggressive memory management.
+        dev_transformer: Filename of the dev (non-distilled) transformer weights
+            inside model_dir (e.g. ``transformer-dev.safetensors``). When provided,
+            stage 1 uses this model and stage 2 fuses the distilled LoRA on top.
+        distilled_lora: Filename of the distilled LoRA weights inside model_dir.
+            Required when ``dev_transformer`` is set.
+        distilled_lora_strength: Strength for the distilled LoRA fusion (default 1.0).
     """
+
+    def __init__(
+        self,
+        model_dir: str,
+        gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
+        low_memory: bool = True,
+        dev_transformer: str | None = None,
+        distilled_lora: str | None = None,
+        distilled_lora_strength: float = 1.0,
+    ):
+        super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
+        self._dev_transformer = dev_transformer
+        self._distilled_lora = distilled_lora
+        self._distilled_lora_strength = distilled_lora_strength
+
+    def _load_dev_transformer(self) -> LTXModel:
+        """Load the dev (non-distilled) transformer weights."""
+        assert self._dev_transformer is not None
+        dev_path = self.model_dir / self._dev_transformer
+        dit = LTXModel()
+        weights = load_split_safetensors(dev_path, prefix="transformer.")
+        apply_quantization(dit, weights)
+        dit.load_weights(list(weights.items()))
+        aggressive_cleanup()
+        return dit
+
+    def _fuse_distilled_lora(self, dit: LTXModel) -> None:
+        """Fuse distilled LoRA weights into a loaded transformer in-place."""
+        assert self._distilled_lora is not None
+        lora_path = self.model_dir / self._distilled_lora
+        lora_raw = dict(mx.load(str(lora_path)))
+        lora_remapped = _remap_lora_keys(lora_raw)
+
+        # Flatten model parameters to dot-separated keys using MLX tree_flatten
+        import mlx.utils
+
+        flat_params = mlx.utils.tree_flatten(dit.parameters())
+        flat_model = {k: v for k, v in flat_params if isinstance(v, mx.array)}
+
+        model_sd = StateDict(sd=flat_model, size=0, dtype=set())
+        lora_sd = StateDict(sd=lora_remapped, size=0, dtype=set())
+        lora_with_strength = LoraStateDictWithStrength(lora_sd, self._distilled_lora_strength)
+
+        fused = apply_loras(model_sd, [lora_with_strength])
+        dit.load_weights(list(fused.sd.items()))
+        aggressive_cleanup()
 
     def _load_vae_encoder(self) -> VideoEncoder:
         """Load VAE encoder for keyframe encoding."""
@@ -151,7 +233,16 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
         aggressive_cleanup()
 
         # --- Text encoding + load remaining models ---
-        video_embeds, audio_embeds = self._encode_text_and_load(prompt)
+        use_dev = self._dev_transformer is not None
+        if use_dev:
+            # Load text encoder + connector, encode, free, then load dev model
+            video_embeds, audio_embeds = self._encode_text_and_load(prompt)
+            # Replace the distilled transformer with the dev model for stage 1
+            self.dit = None
+            aggressive_cleanup()
+            self.dit = self._load_dev_transformer()
+        else:
+            video_embeds, audio_embeds = self._encode_text_and_load(prompt)
 
         assert self.dit is not None
         assert self.upsampler is not None
@@ -213,6 +304,10 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
 
         # Extract generated tokens (without appended keyframe tokens)
         gen_tokens_1 = output_1.video_latent[:, : F * H_half * W_half, :]
+
+        # --- Fuse distilled LoRA for stage 2 (if using dev model) ---
+        if use_dev and self._distilled_lora:
+            self._fuse_distilled_lora(self.dit)
 
         # --- Upscale ---
         video_half = self.video_patchifier.unpatchify(gen_tokens_1, (F, H_half, W_half))

@@ -78,6 +78,15 @@ class GemmaLanguageModel(nn.Module):
 
         return mx.array([padded_tokens]), mx.array([attention_mask])
 
+    @staticmethod
+    def _ensure_metal_headroom() -> None:
+        """Set Metal cache limit to leave headroom for the GPU watchdog."""
+        try:
+            mem_limit = mx.metal.device_info()["memory_size"]
+            mx.metal.set_cache_limit(int(mem_limit * 0.9))
+        except Exception:
+            pass
+
     def get_all_hidden_states(
         self,
         token_ids: mx.array,
@@ -99,6 +108,8 @@ class GemmaLanguageModel(nn.Module):
         """
         if self._model is None:
             raise RuntimeError("Model not loaded. Call load() first.")
+
+        self._ensure_metal_headroom()
 
         # Navigate to the inner model with embed_tokens and layers.
         inner = self._model
@@ -138,7 +149,7 @@ class GemmaLanguageModel(nn.Module):
         # single massive Metal command buffer that can exceed the macOS GPU
         # watchdog timeout (kIOGPUCommandBufferCallbackErrorImpactingInteractivity),
         # especially under thermal throttling after a prior long run.
-        eval_every = 8
+        eval_every = 4
         for i, layer in enumerate(inner.layers):
             h = layer(h, mask=combined_mask, cache=None)
             if isinstance(h, tuple):

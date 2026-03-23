@@ -185,32 +185,36 @@ def _fuse_delta_with_quantized(
     scales = model_sd.sd[scales_key] if scales_key else None
     biases = model_sd.sd.get(biases_key) if biases_key else None
 
+    # Infer quantization parameters BEFORE dequantizing.
+    # MLX packs N-bit values into 32-bit ints: pack_factor = 32 / bits.
+    # For a weight (O, packed) and scales (O, num_groups):
+    #   real_features = num_groups * group_size
+    #   packed_features = real_features / pack_factor
+    # So: pack_factor = real_features / packed_features
+    #     bits = 32 / pack_factor
+    in_features_packed = weight.shape[-1]
+    if scales is not None and scales.ndim > 1:
+        num_groups = scales.shape[1]
+        # Try group_size=64 (default), compute real features, check consistency
+        group_size = 64
+        in_features_real = num_groups * group_size
+        pack_factor = in_features_real / in_features_packed if in_features_packed > 0 else 4
+        bits = max(2, min(8, round(32 / pack_factor)))
+    else:
+        group_size = 64
+        bits = 8
+
     # Dequantize: reconstruct the float weight from quantized representation
     original = mx.dequantize(
         weight,
         scales=scales,
         biases=biases,
+        group_size=group_size,
+        bits=bits,
     ).astype(mx.float32)
 
     # Fuse
     new_weight = original + deltas.astype(mx.float32)
-
-    # Re-quantize with same parameters
-    # Infer group_size from scales shape: scales is (O, num_groups, 1),
-    # so group_size = in_features / num_groups
-    in_features_real = new_weight.shape[-1]
-    if scales is not None and scales.ndim > 1:
-        num_groups = scales.shape[1]
-        group_size = max(1, in_features_real // num_groups) if num_groups > 0 else 64
-    else:
-        group_size = 64
-    # Infer bits from packing ratio between quantized and dequantized
-    in_features_packed = weight.shape[-1]
-    if in_features_packed > 0 and in_features_real > 0:
-        pack_ratio = in_features_real / in_features_packed
-        bits = 4 if pack_ratio > 6 else 8
-    else:
-        bits = 8
 
     new_quantized, new_scales, new_biases = mx.quantize(new_weight, group_size=group_size, bits=bits)
 

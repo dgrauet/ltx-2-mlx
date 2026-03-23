@@ -104,6 +104,17 @@ examples:
     kf.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
     kf.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
     kf.add_argument("--cfg-scale", type=float, default=1.0, help="CFG guidance scale for stage 1 (1.0 = none)")
+    kf.add_argument(
+        "--dev-transformer",
+        default=None,
+        help="Dev (non-distilled) transformer filename for higher quality stage 1 (e.g. transformer-dev.safetensors)",
+    )
+    kf.add_argument(
+        "--distilled-lora",
+        default=None,
+        help="Distilled LoRA filename for stage 2 refinement (e.g. ltx-2.3-22b-distilled-lora-384.safetensors)",
+    )
+    kf.add_argument("--lora-strength", type=float, default=1.0, help="Distilled LoRA strength (default: 1.0)")
 
     # --- enhance ---
     enh = sub.add_parser("enhance", help="Enhance a prompt using Gemma (no video generation)")
@@ -335,7 +346,13 @@ def _cmd_keyframe(args: argparse.Namespace) -> None:
 
     last_pixel_frame = args.frames - 1
 
-    pipe = KeyframeInterpolationPipeline(model_dir=args.model, gemma_model_id=args.gemma)
+    pipe = KeyframeInterpolationPipeline(
+        model_dir=args.model,
+        gemma_model_id=args.gemma,
+        dev_transformer=args.dev_transformer,
+        distilled_lora=args.distilled_lora,
+        distilled_lora_strength=args.lora_strength,
+    )
     pipe.generate_and_save(
         prompt=args.prompt,
         output_path=args.output,

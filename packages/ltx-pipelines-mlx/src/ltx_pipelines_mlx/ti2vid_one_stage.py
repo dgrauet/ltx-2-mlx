@@ -113,7 +113,11 @@ class TextToVideoPipeline:
                 aggressive_cleanup()
 
             self.dit = LTXModel()
-            transformer_weights = load_split_safetensors(model_dir / "transformer.safetensors", prefix="transformer.")
+            transformer_path = model_dir / "transformer.safetensors"
+            if not transformer_path.exists():
+                # Fallback: try transformer-distilled.safetensors (mlx-forge dual-variant layout)
+                transformer_path = model_dir / "transformer-distilled.safetensors"
+            transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
             apply_quantization(self.dit, transformer_weights)
             self.dit.load_weights(list(transformer_weights.items()))
             aggressive_cleanup()
