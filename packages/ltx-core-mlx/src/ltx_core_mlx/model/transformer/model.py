@@ -52,7 +52,7 @@ class LTXModelConfig:
     ff_mult: float = 4.0
     timestep_embedding_dim: int = 256
     timestep_scale_multiplier: float = 1000.0
-    av_ca_timestep_scale_multiplier: float = 1000.0
+    av_ca_timestep_scale_multiplier: float = 1.0
     rope_theta: float = 10000.0
     rope_type: str = "split"
     positional_embedding_max_pos: tuple[int, ...] = (20, 2048, 2048)
