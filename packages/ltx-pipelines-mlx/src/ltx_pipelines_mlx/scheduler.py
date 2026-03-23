@@ -109,18 +109,21 @@ def ltx2_schedule(
     b = base_shift - mm * _BASE_SHIFT_ANCHOR
     sigma_shift = num_tokens * mm + b
 
-    sigmas = np.where(
-        sigmas != 0,
-        math.exp(sigma_shift) / (math.exp(sigma_shift) + (1.0 / sigmas - 1.0)),
-        0.0,
-    )
+    # Shift non-zero sigmas; avoid 1/0 for the terminal zero entry
+    nonzero = sigmas != 0
+    shifted = np.empty_like(sigmas)
+    shifted[~nonzero] = 0.0
+    shifted[nonzero] = math.exp(sigma_shift) / (math.exp(sigma_shift) + (1.0 / sigmas[nonzero] - 1.0))
+    sigmas = shifted
 
     if stretch:
         non_zero = sigmas != 0
         non_zero_sigmas = sigmas[non_zero]
-        one_minus_z = 1.0 - non_zero_sigmas
-        scale_factor = one_minus_z[-1] / (1.0 - terminal)
-        stretched = 1.0 - (one_minus_z / scale_factor)
-        sigmas[non_zero] = stretched
+        if len(non_zero_sigmas) > 0:
+            one_minus_z = 1.0 - non_zero_sigmas
+            scale_factor = one_minus_z[-1] / (1.0 - terminal)
+            if scale_factor != 0:
+                stretched = 1.0 - (one_minus_z / scale_factor)
+                sigmas[non_zero] = stretched
 
     return sigmas.tolist()
