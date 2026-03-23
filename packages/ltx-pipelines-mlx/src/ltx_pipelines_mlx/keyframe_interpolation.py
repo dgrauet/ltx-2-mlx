@@ -286,34 +286,20 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
         mx.eval(video_embeds, audio_embeds)
         aggressive_cleanup()  # Free Gemma graph before second encode
 
-        # Default guider params matching reference LTX_2_3_PARAMS
-        # Reference LTX_2_3_PARAMS defaults for guidance.
-        # NOTE: stg_scale and modality_scale set to 0/1 for now — STG guidance
-        # has a shape bug in the MLX attention path that needs separate investigation.
-        # CFG + rescale are the primary quality drivers.
-        if video_guider_params is None:
-            video_guider_params = MultiModalGuiderParams(
-                cfg_scale=3.0,
-                stg_scale=0.0,
-                rescale_scale=0.7,
-                modality_scale=1.0,
-                stg_blocks=[28],
-            )
-        if audio_guider_params is None:
-            audio_guider_params = MultiModalGuiderParams(
-                cfg_scale=7.0,
-                stg_scale=0.0,
-                rescale_scale=0.7,
-                modality_scale=1.0,
-                stg_blocks=[28],
-            )
+        # Encode negative prompt only when guidance is explicitly requested.
+        # NOTE: The reference uses guided denoising with CFG/STG/modality/rescale
+        # by default, but the MLX guided_denoise_loop currently produces text overlay
+        # artifacts with CFG+rescale. Until this is investigated, default to simple
+        # denoising which produces clean transitions (validated by test-transition-7).
+        neg_video_embeds = None
+        neg_audio_embeds = None
+        use_guidance = video_guider_params is not None or audio_guider_params is not None
+        if use_guidance:
+            from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
 
-        # Encode negative prompt for CFG (required for guidance to have effect)
-        from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
-
-        neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
-        mx.eval(neg_video_embeds, neg_audio_embeds)
-        aggressive_cleanup()
+            neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
+            mx.eval(neg_video_embeds, neg_audio_embeds)
+            aggressive_cleanup()
 
         # Free text encoder before loading transformer
         self.text_encoder = None
@@ -370,22 +356,32 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
             sigmas_1 = DISTILLED_SIGMAS[: stage1_steps + 1] if stage1_steps else DISTILLED_SIGMAS
         x0_model = X0Model(self.dit)
 
-        # Stage 1 always uses guided denoising (matching reference multi_modal_guider_factory)
-        video_neg = negative_prompt_embeds[0] if negative_prompt_embeds else neg_video_embeds
-        audio_neg = negative_prompt_embeds[1] if negative_prompt_embeds else neg_audio_embeds
-        video_factory = create_multimodal_guider_factory(video_guider_params, negative_context=video_neg)
-        audio_factory = create_multimodal_guider_factory(audio_guider_params, negative_context=audio_neg)
+        # Stage 1 denoising: guided when params provided, simple otherwise
+        if use_guidance:
+            video_neg = negative_prompt_embeds[0] if negative_prompt_embeds else neg_video_embeds
+            audio_neg = negative_prompt_embeds[1] if negative_prompt_embeds else neg_audio_embeds
+            video_factory = create_multimodal_guider_factory(video_guider_params, negative_context=video_neg)
+            audio_factory = create_multimodal_guider_factory(audio_guider_params, negative_context=audio_neg)
 
-        output_1 = guided_denoise_loop(
-            model=x0_model,
-            video_state=video_state_1,
-            audio_state=audio_state_1,
-            video_text_embeds=video_embeds,
-            audio_text_embeds=audio_embeds,
-            video_guider_factory=video_factory,
-            audio_guider_factory=audio_factory,
-            sigmas=sigmas_1,
-        )
+            output_1 = guided_denoise_loop(
+                model=x0_model,
+                video_state=video_state_1,
+                audio_state=audio_state_1,
+                video_text_embeds=video_embeds,
+                audio_text_embeds=audio_embeds,
+                video_guider_factory=video_factory,
+                audio_guider_factory=audio_factory,
+                sigmas=sigmas_1,
+            )
+        else:
+            output_1 = denoise_loop(
+                model=x0_model,
+                video_state=video_state_1,
+                audio_state=audio_state_1,
+                video_text_embeds=video_embeds,
+                audio_text_embeds=audio_embeds,
+                sigmas=sigmas_1,
+            )
         if self.low_memory:
             aggressive_cleanup()
 
