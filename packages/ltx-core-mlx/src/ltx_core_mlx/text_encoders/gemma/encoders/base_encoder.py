@@ -82,8 +82,8 @@ class GemmaLanguageModel(nn.Module):
     def _ensure_metal_headroom() -> None:
         """Set Metal cache limit to leave headroom for the GPU watchdog."""
         try:
-            mem_limit = mx.metal.device_info()["memory_size"]
-            mx.metal.set_cache_limit(int(mem_limit * 0.9))
+            mem_limit = mx.device_info()["memory_size"]
+            mx.set_cache_limit(int(mem_limit * 0.9))
         except Exception:
             pass
 

@@ -23,7 +23,7 @@ def get_memory_stats() -> dict[str, float]:
     """
     to_gb = 1 / (1024**3)
     return {
-        "active_gb": mx.metal.get_active_memory() * to_gb,
-        "peak_gb": mx.metal.get_peak_memory() * to_gb,
-        "cache_gb": mx.metal.get_cache_memory() * to_gb,
+        "active_gb": mx.get_active_memory() * to_gb,
+        "peak_gb": mx.get_peak_memory() * to_gb,
+        "cache_gb": mx.get_cache_memory() * to_gb,
     }
