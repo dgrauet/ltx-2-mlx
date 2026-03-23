@@ -251,7 +251,18 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
                 aggressive_cleanup()
 
         video_embeds, audio_embeds = self._encode_text(prompt)
+
+        # Encode negative prompt for CFG (required for guidance to have effect)
+        neg_video_embeds = None
+        neg_audio_embeds = None
+        if cfg_scale != 1.0:
+            from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
+
+            neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
+
         mx.eval(video_embeds, audio_embeds)
+        if neg_video_embeds is not None:
+            mx.eval(neg_video_embeds, neg_audio_embeds)
 
         # Free text encoder before loading transformer
         self.text_encoder = None
@@ -310,8 +321,9 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
         x0_model = X0Model(self.dit)
 
         if cfg_scale != 1.0:
-            video_neg = negative_prompt_embeds[0] if negative_prompt_embeds else None
-            audio_neg = negative_prompt_embeds[1] if negative_prompt_embeds else None
+            # Use explicitly provided negative embeds, or the auto-encoded DEFAULT_NEGATIVE_PROMPT
+            video_neg = negative_prompt_embeds[0] if negative_prompt_embeds else neg_video_embeds
+            audio_neg = negative_prompt_embeds[1] if negative_prompt_embeds else neg_audio_embeds
             guider_params = MultiModalGuiderParams(cfg_scale=cfg_scale)
             video_factory = create_multimodal_guider_factory(guider_params, negative_context=video_neg)
             audio_factory = create_multimodal_guider_factory(guider_params, negative_context=audio_neg)
