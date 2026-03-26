@@ -329,9 +329,7 @@ class BasicAVTransformerBlock(nn.Module):
             * av_v_gate_a2v
         )
         if perturbations is not None and perturbations.any_in_batch(PerturbationType.SKIP_A2V_CROSS_ATTN, block_idx):
-            a2v_mask = perturbations.mask_like(
-                PerturbationType.SKIP_A2V_CROSS_ATTN, block_idx, video_hidden[:, :1, :1, None]
-            )
+            a2v_mask = perturbations.mask_like(PerturbationType.SKIP_A2V_CROSS_ATTN, block_idx, video_hidden)
             a2v_out = a2v_out * a2v_mask
         video_hidden = video_hidden + a2v_out
 
@@ -348,9 +346,7 @@ class BasicAVTransformerBlock(nn.Module):
             * av_a_gate_v2a
         )
         if perturbations is not None and perturbations.any_in_batch(PerturbationType.SKIP_V2A_CROSS_ATTN, block_idx):
-            v2a_mask = perturbations.mask_like(
-                PerturbationType.SKIP_V2A_CROSS_ATTN, block_idx, audio_hidden[:, :1, :1, None]
-            )
+            v2a_mask = perturbations.mask_like(PerturbationType.SKIP_V2A_CROSS_ATTN, block_idx, audio_hidden)
             v2a_out = v2a_out * v2a_mask
         audio_hidden = audio_hidden + v2a_out
 
