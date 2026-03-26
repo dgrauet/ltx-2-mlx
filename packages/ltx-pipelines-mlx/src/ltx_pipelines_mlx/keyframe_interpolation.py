@@ -213,23 +213,25 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
         """
-        # Compute half-res dims that are VAE-encoder compatible:
-        # - Must be divisible by 64 for even latent dims (space-to-depth needs stride=2)
-        half_h = (height // 2) // 64 * 64
-        half_w = (width // 2) // 64 * 64
-
-        # Compute the actual upscaled resolution (upsampler doubles spatial latent dims).
-        # This determines the full-res keyframe encoding resolution.
+        # Compute half-res latent dimensions (matching reference: height//2, width//2
+        # with integer division by spatial compression factor 32).
+        half_h, half_w = height // 2, width // 2
         F_half, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
+
+        # VAE-compatible encoding resolution (latent dims * 32, always 32-aligned)
+        enc_h_half = H_half * 32
+        enc_w_half = W_half * 32
+
+        # Upscaled resolution (upsampler doubles spatial latent dims)
         H_up, W_up = H_half * 2, W_half * 2
-        up_h, up_w = H_up * 32, W_up * 32  # pixel resolution after upscaling
+        up_h, up_w = H_up * 32, W_up * 32
 
         # --- Encode keyframes at both resolutions ---
         vae_encoder = self._load_vae_encoder()
 
         kf_tokens_half = []
         for img in keyframe_images:
-            tokens = _encode_keyframe(vae_encoder, img, half_h, half_w)
+            tokens = _encode_keyframe(vae_encoder, img, enc_h_half, enc_w_half)
             kf_tokens_half.append(tokens)
 
         kf_tokens_full = []
