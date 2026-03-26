@@ -130,7 +130,7 @@ class AudioAttnBlock(nn.Module):
 
     def __init__(self, channels: int):
         super().__init__()
-        self.norm = nn.GroupNorm(32, channels)
+        self.norm = nn.GroupNorm(32, channels, pytorch_compatible=True)
         self.q = WrappedConv2d(channels, channels, 1, padding=0)
         self.k = WrappedConv2d(channels, channels, 1, padding=0)
         self.v = WrappedConv2d(channels, channels, 1, padding=0)
