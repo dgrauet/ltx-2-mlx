@@ -2,14 +2,23 @@
 
 Ported from ltx-pipelines/src/ltx_pipelines/ic_lora.py
 
-Generates video conditioned on a reference video (e.g., depth maps, poses,
-edges) using IC-LoRA style reference latent conditioning.
+Two-stage video generation pipeline with In-Context (IC) LoRA support.
+Allows conditioning the generated video on control signals such as depth maps,
+human pose, or image edges via the video_conditioning parameter.
+The specific IC-LoRA model should be provided via the loras parameter.
+Stage 1 generates video at half of the target resolution, then Stage 2 upsamples
+by 2x and refines with additional denoising steps for higher quality output.
+Both stages use distilled models for efficiency.
 """
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import mlx.core as mx
-from PIL import Image
+import numpy as np
+from safetensors import safe_open
 
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
 from ltx_core_mlx.conditioning.types.attention_strength_wrapper import (
@@ -36,45 +45,86 @@ from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
 from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_core_mlx.utils.weights import load_split_safetensors
+from ltx_core_mlx.utils.video import load_video_frames
+from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS
 from ltx_pipelines_mlx.ti2vid_one_stage import TextToVideoPipeline
 from ltx_pipelines_mlx.utils.samplers import denoise_loop
+
+logger = logging.getLogger(__name__)
 
 
 class ICLoraPipeline(TextToVideoPipeline):
     """Two-stage video generation pipeline with IC-LoRA reference conditioning.
 
     Conditions the generated video on a reference video (e.g., depth, pose, edges)
-    via VideoConditionByReferenceLatent. Stage 1 generates at half resolution,
-    then Stage 2 upscales and refines.
+    via VideoConditionByReferenceLatent. Stage 1 generates at half resolution with
+    the IC-LoRA fused into the transformer, then Stage 2 upscales and refines
+    without the LoRA (clean distilled model).
 
     Args:
         model_dir: Path to model weights or HuggingFace repo ID.
+        lora_paths: List of (lora_path, strength) tuples for IC-LoRA weights.
         low_memory: Aggressive memory management.
-        reference_downscale_factor: Target/reference resolution ratio.
-            Use 2 if IC-LoRA was trained with half-resolution references.
     """
 
     def __init__(
         self,
         model_dir: str,
+        lora_paths: list[tuple[str, float]] | None = None,
         gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
         low_memory: bool = True,
-        reference_downscale_factor: int = 1,
     ):
         super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
         self.vae_encoder: VideoEncoder | None = None
         self.upsampler: LatentUpsampler | None = None
-        self.reference_downscale_factor = reference_downscale_factor
+
+        # Resolve LoRA paths (download from HuggingFace if needed)
+        self._lora_paths = [(_resolve_lora_path(p), s) for p, s in (lora_paths or [])]
+
+        # Read reference downscale factor from LoRA metadata.
+        # IC-LoRAs trained with low-resolution reference videos store this factor
+        # so inference can resize reference videos to match training conditions.
+        self.reference_downscale_factor = 1
+        for lora_path, _ in self._lora_paths:
+            scale = _read_lora_reference_downscale_factor(lora_path)
+            if scale != 1:
+                if self.reference_downscale_factor not in (1, scale):
+                    raise ValueError(
+                        f"Conflicting reference_downscale_factor values in LoRAs: "
+                        f"already have {self.reference_downscale_factor}, but {lora_path} "
+                        f"specifies {scale}. Cannot combine LoRAs with different reference scales."
+                    )
+                self.reference_downscale_factor = scale
 
     def load(self) -> None:
-        """Load all components including VAE encoder and upsampler."""
-        super().load()
+        """Load generation components: DiT, VAE encoder, upsampler.
 
+        Does NOT load decoders (VAE decoder, audio decoder, vocoder) to save
+        memory. Those are loaded on-demand in generate_and_save().
+        """
+        if self._loaded:
+            return
+
+        model_dir = self.model_dir
+
+        # DiT (largest component)
+        if self.dit is None:
+            from ltx_core_mlx.model.transformer.model import LTXModel
+
+            self.dit = LTXModel()
+            transformer_path = model_dir / "transformer.safetensors"
+            if not transformer_path.exists():
+                transformer_path = model_dir / "transformer-distilled.safetensors"
+            transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
+            apply_quantization(self.dit, transformer_weights)
+            self.dit.load_weights(list(transformer_weights.items()))
+            aggressive_cleanup()
+
+        # VAE encoder (for encoding control videos and I2V images)
         if self.vae_encoder is None:
             self.vae_encoder = VideoEncoder()
-            enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
+            enc_weights = load_split_safetensors(model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
             enc_weights = {
                 k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
                 for k, v in enc_weights.items()
@@ -82,12 +132,13 @@ class ICLoraPipeline(TextToVideoPipeline):
             self.vae_encoder.load_weights(list(enc_weights.items()))
             aggressive_cleanup()
 
+        # Upsampler (for Stage 2)
         if self.upsampler is None:
             import json
 
             name = "spatial_upscaler_x2_v1_1"
-            config_path = self.model_dir / f"{name}_config.json"
-            weights_path = self.model_dir / f"{name}.safetensors"
+            config_path = model_dir / f"{name}_config.json"
+            weights_path = model_dir / f"{name}.safetensors"
             if config_path.exists():
                 config = json.loads(config_path.read_text()).get("config", {})
                 self.upsampler = LatentUpsampler.from_config(config)
@@ -98,99 +149,282 @@ class ICLoraPipeline(TextToVideoPipeline):
                 self.upsampler.load_weights(list(weights.items()))
             aggressive_cleanup()
 
-    def load_lora(
-        self,
-        lora_path: str,
-        strength: float = 1.0,
-    ) -> None:
-        """Load and fuse LoRA weights into the transformer.
+        self._loaded = True
 
-        Must be called after load(). Dequantizes affected weights, fuses the
-        LoRA delta, and re-quantizes.
+    def _load_decoders(self) -> None:
+        """Load VAE decoder, audio decoder, and vocoder for output decoding."""
+        from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
+        from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
+        from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder
 
-        Args:
-            lora_path: Path to a safetensors file with LoRA weights (ComfyUI format).
-            strength: LoRA strength multiplier. Default 1.0.
+        model_dir = self.model_dir
+
+        if self.vae_decoder is None:
+            self.vae_decoder = VideoDecoder()
+            vae_weights = load_split_safetensors(model_dir / "vae_decoder.safetensors", prefix="vae_decoder.")
+            self.vae_decoder.load_weights(list(vae_weights.items()))
+            aggressive_cleanup()
+
+        if self.audio_decoder is None:
+            self.audio_decoder = AudioVAEDecoder()
+            audio_weights = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.decoder.")
+            all_audio = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.")
+            for k, v in all_audio.items():
+                if k.startswith("per_channel_statistics."):
+                    audio_weights[k] = v
+            from ltx_core_mlx.utils.weights import remap_audio_vae_keys
+
+            audio_weights = remap_audio_vae_keys(audio_weights)
+            self.audio_decoder.load_weights(list(audio_weights.items()))
+            aggressive_cleanup()
+
+        if self.vocoder is None:
+            self.vocoder = VocoderWithBWE()
+            vocoder_weights = load_split_safetensors(model_dir / "vocoder.safetensors", prefix="vocoder.")
+            self.vocoder.load_weights(list(vocoder_weights.items()))
+            aggressive_cleanup()
+
+    def _load_text_encoder(self) -> None:
+        """Load Gemma text encoder and feature extractor connector."""
+        from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+        from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
+
+        if self.text_encoder is None:
+            self.text_encoder = GemmaLanguageModel()
+            self.text_encoder.load(self._gemma_model_id)
+            aggressive_cleanup()
+
+        if self.feature_extractor is None:
+            self.feature_extractor = GemmaFeaturesExtractorV2()
+            connector_weights = load_split_safetensors(self.model_dir / "connector.safetensors", prefix="connector.")
+            self.feature_extractor.connector.load_weights(list(connector_weights.items()))
+            aggressive_cleanup()
+
+    def _fuse_loras(self) -> None:
+        """Fuse all LoRA weights into the transformer.
+
+        Reads LoRA files, applies ComfyUI key remapping, fuses deltas into
+        model weights, and re-quantizes.
         """
-        self.load()
+        if not self._lora_paths:
+            return
+
         assert self.dit is not None
 
-        # Flatten nested parameter dicts/lists to dot-separated keys
-        def _flatten(prefix: str, d: dict | list) -> dict[str, mx.array]:
-            result: dict[str, mx.array] = {}
-            items = enumerate(d) if isinstance(d, list) else d.items()
-            for k, v in items:
-                key = f"{prefix}.{k}" if prefix else str(k)
-                if isinstance(v, dict | list):
-                    result.update(_flatten(key, v))
-                else:
-                    result[key] = v
-            return result
+        import mlx.utils
 
-        model_weights = _flatten("", dict(self.dit.parameters()))
+        model_weights = dict(mlx.utils.tree_flatten(self.dit.parameters()))
         model_sd = StateDict(sd=model_weights, size=0, dtype=set())
 
-        # Load LoRA with ComfyUI key remapping
         loader = SafetensorsStateDictLoader()
-        lora_sd = loader.load(lora_path, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
+        lora_sds = []
+        for lora_path, strength in self._lora_paths:
+            lora_sd = loader.load(lora_path, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
+            lora_sds.append(LoraStateDictWithStrength(state_dict=lora_sd, strength=strength))
+            logger.info(f"Loaded LoRA: {lora_path} (strength={strength})")
 
-        # Fuse
-        fused_sd = apply_loras(
-            model_sd=model_sd,
-            lora_sd_and_strengths=[LoraStateDictWithStrength(state_dict=lora_sd, strength=strength)],
-        )
-
-        # Load fused weights back into model
-        from ltx_core_mlx.utils.weights import apply_quantization
+        fused_sd = apply_loras(model_sd=model_sd, lora_sd_and_strengths=lora_sds)
 
         apply_quantization(self.dit, fused_sd.sd)
         self.dit.load_weights(list(fused_sd.sd.items()))
         aggressive_cleanup()
 
+        logger.info(f"Fused {len(self._lora_paths)} LoRA(s) into transformer")
+
+    def _reload_clean_transformer(self) -> None:
+        """Reload the transformer without LoRA for Stage 2.
+
+        The reference implementation uses separate ModelLedgers for Stage 1
+        (with LoRA) and Stage 2 (clean distilled). We achieve the same by
+        discarding the fused transformer and reloading from disk.
+        """
+        from ltx_core_mlx.model.transformer.model import LTXModel
+
+        self.dit = None
+        aggressive_cleanup()
+
+        self.dit = LTXModel()
+        transformer_path = self.model_dir / "transformer.safetensors"
+        if not transformer_path.exists():
+            transformer_path = self.model_dir / "transformer-distilled.safetensors"
+        transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
+        apply_quantization(self.dit, transformer_weights)
+        self.dit.load_weights(list(transformer_weights.items()))
+        aggressive_cleanup()
+        logger.info("Reloaded clean transformer for Stage 2")
+
+    def _create_conditionings(
+        self,
+        images: list[tuple[str, int, float]] | None,
+        video_conditioning: list[tuple[str, float]],
+        height: int,
+        width: int,
+        num_frames: int,
+        conditioning_attention_strength: float = 1.0,
+        conditioning_attention_mask: mx.array | None = None,
+    ) -> list[object]:
+        """Create conditioning items for video generation.
+
+        Builds image conditionings (I2V) and IC-LoRA reference video conditionings.
+        Matches the reference implementation's _create_conditionings().
+
+        Args:
+            images: Optional list of (image_path, frame_index, strength) for I2V.
+            video_conditioning: List of (video_path, strength) for IC-LoRA reference.
+            height: Stage output height (pixels).
+            width: Stage output width (pixels).
+            num_frames: Number of pixel frames.
+            conditioning_attention_strength: Scalar attention weight in [0, 1].
+            conditioning_attention_mask: Optional pixel-space mask (1, 1, F, H, W).
+
+        Returns:
+            List of conditioning items. IC-LoRA conditionings are appended last.
+        """
+        assert self.vae_encoder is not None
+
+        conditionings: list[object] = []
+
+        # Image conditionings (I2V)
+        if images:
+            for img_path, frame_idx, strength in images:
+                img_tensor = prepare_image_for_encoding(img_path, height, width)
+                img_tensor = img_tensor[:, :, None, :, :]
+                img_latent = self.vae_encoder.encode(img_tensor)
+                img_tokens = img_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
+                conditionings.append(
+                    VideoConditionByLatentIndex(
+                        frame_indices=[frame_idx],
+                        clean_latent=img_tokens,
+                        strength=strength,
+                    )
+                )
+
+        # IC-LoRA reference video conditionings
+        scale = self.reference_downscale_factor
+        if scale != 1 and (height % scale != 0 or width % scale != 0):
+            raise ValueError(
+                f"Output dimensions ({height}x{width}) must be divisible by reference_downscale_factor ({scale})"
+            )
+        # Compute VAE-compatible reference resolution: the VAE encoder requires
+        # spatial dims divisible by 32. Derive from latent shape (same approach
+        # as keyframe pipeline half-resolution).
+        _, ref_H_lat, ref_W_lat = compute_video_latent_shape(num_frames, height // scale, width // scale)
+        ref_height = ref_H_lat * 32
+        ref_width = ref_W_lat * 32
+
+        for video_path, strength in video_conditioning:
+            # Load video at scaled-down resolution (if scale > 1)
+            video = load_video_frames(video_path, ref_height, ref_width, num_frames)
+            # Normalize to [-1, 1] for VAE encoding
+            video = (video * 2.0 - 1.0).astype(mx.bfloat16)
+            encoded_video = self.vae_encoder.encode(video)
+            mx.eval(encoded_video)
+
+            # Derive reference latent dims
+            ref_F = encoded_video.shape[2]
+            ref_H = encoded_video.shape[3]
+            ref_W = encoded_video.shape[4]
+            ref_positions = compute_video_positions(ref_F, ref_H, ref_W)
+
+            # Patchify reference to tokens
+            ref_tokens = encoded_video.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
+
+            # Build attention mask for ConditioningItemAttentionStrengthWrapper
+            if conditioning_attention_mask is not None:
+                latent_mask = _downsample_mask_to_latent(
+                    mask=conditioning_attention_mask,
+                    target_f=ref_F,
+                    target_h=ref_H,
+                    target_w=ref_W,
+                )
+                attn_mask = latent_mask * conditioning_attention_strength
+            elif conditioning_attention_strength < 1.0:
+                attn_mask = conditioning_attention_strength
+            else:
+                attn_mask = None
+
+            cond = VideoConditionByReferenceLatent(
+                reference_latent=ref_tokens,
+                reference_positions=ref_positions,
+                downscale_factor=scale,
+                strength=strength,
+            )
+            if attn_mask is not None:
+                cond = ConditioningItemAttentionStrengthWrapper(
+                    conditioning=cond,
+                    attention_mask=attn_mask,
+                )
+            conditionings.append(cond)
+
+        if video_conditioning:
+            logger.info(f"Added {len(video_conditioning)} video conditioning(s)")
+
+        return conditionings
+
     def generate(
         self,
         prompt: str,
-        reference_video_latent: mx.array,
+        video_conditioning: list[tuple[str, float]],
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
         seed: int = 42,
         stage1_steps: int | None = None,
         stage2_steps: int | None = None,
-        images: list[tuple[Image.Image | str, int, float]] | None = None,
+        images: list[tuple[str, int, float]] | None = None,
         conditioning_attention_strength: float = 1.0,
+        conditioning_attention_mask: mx.array | None = None,
         skip_stage_2: bool = False,
     ) -> tuple[mx.array, mx.array]:
         """Generate video with IC-LoRA reference conditioning.
 
         Args:
             prompt: Text prompt.
-            reference_video_latent: Encoded reference video latent from VAE encoder,
-                shape (1, C, F, H, W).
+            video_conditioning: List of (video_path, strength) tuples for IC-LoRA
+                reference video conditioning (e.g., depth maps, poses, edges).
             height: Output video height.
             width: Output video width.
             num_frames: Number of frames.
             seed: Random seed.
             stage1_steps: Denoising steps for stage 1.
             stage2_steps: Denoising steps for stage 2.
-            images: Optional list of (image, frame_index, strength) for I2V conditioning.
-            conditioning_attention_strength: Attention strength for reference conditioning.
-                0.0 = ignore, 1.0 = full conditioning. Default 1.0.
+            images: Optional list of (image_path, frame_index, strength) for I2V.
+            conditioning_attention_strength: Scale factor for IC-LoRA conditioning
+                attention. 0.0 = ignore, 1.0 = full conditioning. Default 1.0.
+            conditioning_attention_mask: Optional pixel-space mask (1, 1, F, H, W)
+                matching reference video dimensions. Values in [0, 1].
             skip_stage_2: Skip upscale + refine, output at half resolution.
 
         Returns:
             Tuple of (video_latent, audio_latent).
         """
+        if not (0.0 <= conditioning_attention_strength <= 1.0):
+            raise ValueError(
+                f"conditioning_attention_strength must be in [0.0, 1.0], got {conditioning_attention_strength}"
+            )
+
+        # Load text encoder, encode, free, then load generation components.
+        # Done manually instead of _encode_text_and_load() to avoid loading
+        # decoders (which we don't need until generate_and_save).
+        self._load_text_encoder()
+        video_embeds, audio_embeds = self._encode_text(prompt)
+        # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
+        mx.eval(video_embeds, audio_embeds)
+        if self.low_memory:
+            self.text_encoder = None
+            self.feature_extractor = None
+            aggressive_cleanup()
+
+        # Load DiT + VAE encoder + upsampler (no decoders)
         self.load()
+
         assert self.dit is not None
         assert self.vae_encoder is not None
 
-        # Text encoding
-        video_embeds, audio_embeds = self._encode_text(prompt)
-        if self.low_memory:
-            aggressive_cleanup()
+        # Fuse LoRA into transformer for Stage 1
+        self._fuse_loras()
 
-        # --- Stage 1: Half-resolution generation ---
+        # --- Stage 1: Half-resolution generation with IC-LoRA ---
         half_h, half_w = height // 2, width // 2
         F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
         video_shape = (1, F * H_half * W_half, 128)
@@ -203,51 +437,26 @@ class ICLoraPipeline(TextToVideoPipeline):
         video_state = create_initial_state(video_shape, seed, positions=video_positions_1)
         audio_state = create_initial_state(audio_shape, seed + 1, positions=audio_positions)
 
-        # Apply image conditioning (I2V) if provided
-        conditionings = []
-        if images:
-            for img, frame_idx, strength in images:
-                img_tensor = prepare_image_for_encoding(img, half_h, half_w)
-                img_tensor = img_tensor[:, :, None, :, :]
-                ref_latent = self.vae_encoder.encode(img_tensor)
-                ref_tokens = ref_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
-                conditionings.append(
-                    VideoConditionByLatentIndex(
-                        frame_indices=[frame_idx],
-                        clean_latent=ref_tokens,
-                        strength=strength,
-                    )
-                )
-        if conditionings:
-            video_state = apply_conditioning(video_state, conditionings, (F, H_half, W_half))
-
-        # Apply IC-LoRA reference video conditioning
-        scale = self.reference_downscale_factor
-
-        # Derive reference latent dims from the actual encoded shape (1, C, F', H', W')
-        ref_F = reference_video_latent.shape[2]
-        ref_H = reference_video_latent.shape[3]
-        ref_W = reference_video_latent.shape[4]
-        ref_positions = compute_video_positions(ref_F, ref_H, ref_W)
-
-        # Patchify reference to tokens
-        ref_tokens = reference_video_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
-
-        ref_cond = VideoConditionByReferenceLatent(
-            reference_latent=ref_tokens,
-            reference_positions=ref_positions,
-            downscale_factor=scale,
-            strength=1.0,
+        # Encode conditionings before denoising (reduce peak memory)
+        stage_1_conditionings = self._create_conditionings(
+            images=images,
+            video_conditioning=video_conditioning,
+            height=half_h,
+            width=half_w,
+            num_frames=num_frames,
+            conditioning_attention_strength=conditioning_attention_strength,
+            conditioning_attention_mask=conditioning_attention_mask,
         )
 
-        # Wrap with attention strength if needed
-        if conditioning_attention_strength < 1.0:
-            ref_cond = ConditioningItemAttentionStrengthWrapper(
-                conditioning=ref_cond,
-                attention_mask=conditioning_attention_strength,
-            )
+        # Apply image conditionings (replace tokens at frame index)
+        image_conds = [c for c in stage_1_conditionings if isinstance(c, VideoConditionByLatentIndex)]
+        if image_conds:
+            video_state = apply_conditioning(video_state, image_conds, (F, H_half, W_half))
 
-        video_state = ref_cond.apply(video_state, (F, H_half, W_half))
+        # Apply IC-LoRA reference conditionings (append tokens)
+        for cond in stage_1_conditionings:
+            if isinstance(cond, VideoConditionByReferenceLatent | ConditioningItemAttentionStrengthWrapper):
+                video_state = cond.apply(video_state, (F, H_half, W_half))
 
         # Denoise stage 1
         sigmas_1 = DISTILLED_SIGMAS[: stage1_steps + 1] if stage1_steps else DISTILLED_SIGMAS
@@ -272,13 +481,43 @@ class ICLoraPipeline(TextToVideoPipeline):
             audio_latent = self.audio_patchifier.unpatchify(output_1.audio_latent)
             return video_half, audio_latent
 
-        # --- Stage 2: Upscale + refine ---
+        # --- Stage 2: Upscale + refine (no IC-LoRA, clean distilled model) ---
+        # Upscale first (before reloading transformer to avoid peak memory)
         assert self.upsampler is not None
         video_upscaled = self.upsampler(video_half)
-        if self.low_memory:
-            aggressive_cleanup()
+        mx.eval(video_upscaled)
 
-        _, H_full, W_full = compute_video_latent_shape(num_frames, height, width)
+        # Derive full-resolution latent dims from the ACTUAL upscaled shape,
+        # not the target height/width (which may round differently).
+        # The upsampler doubles H_half and W_half, so H_full = H_half * 2.
+        H_full = H_half * 2
+        W_full = W_half * 2
+        enc_h_full = H_full * 32
+        enc_w_full = W_full * 32
+
+        # Encode I2V images at upscaled resolution (if any) before freeing encoder
+        conditionings_2 = []
+        if images:
+            for img_path, frame_idx, strength in images:
+                img_tensor = prepare_image_for_encoding(img_path, enc_h_full, enc_w_full)
+                img_tensor = img_tensor[:, :, None, :, :]
+                ref_latent = self.vae_encoder.encode(img_tensor)
+                ref_tokens = ref_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
+                conditionings_2.append(
+                    VideoConditionByLatentIndex(
+                        frame_indices=[frame_idx],
+                        clean_latent=ref_tokens,
+                        strength=strength,
+                    )
+                )
+
+        # Free VAE encoder + upsampler + fused DiT before loading clean transformer
+        if self.low_memory:
+            self.vae_encoder = None
+            self.upsampler = None
+        # Reload clean transformer without LoRA (matches reference: separate model ledgers)
+        self._reload_clean_transformer()
+
         video_tokens_up, _ = self.video_patchifier.patchify(video_upscaled)
 
         sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
@@ -298,20 +537,7 @@ class ICLoraPipeline(TextToVideoPipeline):
         )
 
         # Apply I2V conditioning at full resolution for stage 2
-        if images:
-            conditionings_2 = []
-            for img, frame_idx, strength in images:
-                img_tensor = prepare_image_for_encoding(img, height, width)
-                img_tensor = img_tensor[:, :, None, :, :]
-                ref_latent = self.vae_encoder.encode(img_tensor)
-                ref_tokens = ref_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
-                conditionings_2.append(
-                    VideoConditionByLatentIndex(
-                        frame_indices=[frame_idx],
-                        clean_latent=ref_tokens,
-                        strength=strength,
-                    )
-                )
+        if conditionings_2:
             video_state_2 = apply_conditioning(video_state_2, conditionings_2, (F, H_full, W_full))
 
         # Audio refined in stage 2
@@ -340,18 +566,226 @@ class ICLoraPipeline(TextToVideoPipeline):
 
         return video_latent, audio_latent
 
-    def encode_reference_video(
+    def generate_and_save(
         self,
-        video_frames: mx.array,
-    ) -> mx.array:
-        """Encode a reference video to latent space.
+        prompt: str,
+        output_path: str,
+        video_conditioning: list[tuple[str, float]],
+        height: int = 480,
+        width: int = 704,
+        num_frames: int = 97,
+        seed: int = 42,
+        stage1_steps: int | None = None,
+        stage2_steps: int | None = None,
+        images: list[tuple[str, int, float]] | None = None,
+        conditioning_attention_strength: float = 1.0,
+        skip_stage_2: bool = False,
+    ) -> str:
+        """Generate IC-LoRA conditioned video+audio and save to file.
 
         Args:
-            video_frames: Video tensor of shape (1, 3, F, H, W) in [0, 1].
+            prompt: Text prompt.
+            output_path: Path to output video file.
+            video_conditioning: List of (video_path, strength) for IC-LoRA reference.
+            height: Output video height.
+            width: Output video width.
+            num_frames: Number of frames.
+            seed: Random seed.
+            stage1_steps: Denoising steps for stage 1.
+            stage2_steps: Denoising steps for stage 2.
+            images: Optional list of (image_path, frame_index, strength) for I2V.
+            conditioning_attention_strength: Attention strength for conditioning.
+            skip_stage_2: Skip upscale + refine.
 
         Returns:
-            Encoded latent of shape (1, C, F', H', W').
+            Path to the output video file.
         """
-        self.load()
-        assert self.vae_encoder is not None
-        return self.vae_encoder.encode(video_frames)
+        video_latent, audio_latent = self.generate(
+            prompt=prompt,
+            video_conditioning=video_conditioning,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            seed=seed,
+            stage1_steps=stage1_steps,
+            stage2_steps=stage2_steps,
+            images=images,
+            conditioning_attention_strength=conditioning_attention_strength,
+            skip_stage_2=skip_stage_2,
+        )
+
+        # Free generation components to make room for decoders
+        if self.low_memory:
+            self.dit = None
+            self.text_encoder = None
+            self.feature_extractor = None
+            self.upsampler = None
+            self.vae_encoder = None
+            self._loaded = False
+            aggressive_cleanup()
+
+        # Load decoders on-demand (not loaded during generate to save memory)
+        self._load_decoders()
+
+        # Decode audio first (smaller)
+        assert self.audio_decoder is not None
+        assert self.vocoder is not None
+        mel = self.audio_decoder.decode(audio_latent)
+        waveform = self.vocoder(mel)
+        if self.low_memory:
+            aggressive_cleanup()
+
+        import tempfile
+
+        audio_path = tempfile.mktemp(suffix=".wav")
+        self._save_waveform(waveform, audio_path, sample_rate=48000)
+
+        # Decode video and stream to ffmpeg
+        assert self.vae_decoder is not None
+        self.vae_decoder.decode_and_stream(video_latent, output_path, fps=24.0, audio_path=audio_path)
+
+        Path(audio_path).unlink(missing_ok=True)
+        aggressive_cleanup()
+
+        return output_path
+
+
+def _resolve_lora_path(path: str) -> str:
+    """Resolve a LoRA path — download from HuggingFace if needed.
+
+    Supports:
+        - Local file paths: returned as-is if they exist.
+        - HuggingFace repo IDs: downloads the repo and finds the .safetensors file.
+          Example: "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control"
+
+    Args:
+        path: Local path or HuggingFace repo ID.
+
+    Returns:
+        Resolved local path to the .safetensors file.
+    """
+    local = Path(path)
+    if local.exists():
+        return str(local)
+
+    # Try HuggingFace download
+    from huggingface_hub import snapshot_download
+
+    logger.info(f"Downloading LoRA from HuggingFace: {path}")
+    repo_dir = Path(snapshot_download(path))
+
+    # Find the .safetensors file in the downloaded repo
+    safetensors_files = list(repo_dir.glob("*.safetensors"))
+    if not safetensors_files:
+        raise FileNotFoundError(f"No .safetensors files found in {repo_dir}")
+    if len(safetensors_files) > 1:
+        logger.warning(f"Multiple .safetensors files found, using first: {safetensors_files[0].name}")
+    return str(safetensors_files[0])
+
+
+def _read_lora_reference_downscale_factor(lora_path: str) -> int:
+    """Read reference_downscale_factor from LoRA safetensors metadata.
+
+    Some IC-LoRA models are trained with reference videos at lower resolution than
+    the target output. The downscale factor indicates the ratio between target and
+    reference resolutions (e.g., factor=2 means reference is half the resolution).
+
+    Args:
+        lora_path: Path to the LoRA .safetensors file.
+
+    Returns:
+        The reference downscale factor (1 if not specified in metadata).
+    """
+    try:
+        with safe_open(lora_path, framework="numpy") as f:
+            metadata = f.metadata() or {}
+            return int(metadata.get("reference_downscale_factor", 1))
+    except Exception as e:
+        logger.warning(f"Failed to read metadata from LoRA file '{lora_path}': {e}")
+        return 1
+
+
+def _downsample_mask_to_latent(
+    mask: mx.array,
+    target_f: int,
+    target_h: int,
+    target_w: int,
+) -> mx.array:
+    """Downsample a pixel-space mask to latent space using VAE scale factors.
+
+    Handles causal temporal downsampling: the first frame is kept separately
+    (temporal scale factor = 1 for the first frame), while the remaining
+    frames are downsampled by the VAE's temporal scale factor.
+
+    Args:
+        mask: Pixel-space mask of shape (B, 1, F_pixel, H_pixel, W_pixel).
+            Values in [0, 1].
+        target_f: Target latent temporal dim.
+        target_h: Target latent spatial height.
+        target_w: Target latent spatial width.
+
+    Returns:
+        Flattened latent-space mask of shape (B, F_lat * H_lat * W_lat).
+    """
+    # Use numpy for interpolation (MLX doesn't have F.interpolate with area mode)
+    mask_np = np.array(mask)
+    b, _, f_pix, h_pix, w_pix = mask_np.shape
+
+    # Step 1: Spatial downsampling via area interpolation per frame
+    from PIL import Image as PILImage
+
+    spatial_down = np.zeros((b, 1, f_pix, target_h, target_w), dtype=np.float32)
+    for bi in range(b):
+        for fi in range(f_pix):
+            frame = mask_np[bi, 0, fi]
+            img = PILImage.fromarray((frame * 255).astype(np.uint8))
+            img = img.resize((target_w, target_h), PILImage.Resampling.BOX)
+            spatial_down[bi, 0, fi] = np.array(img).astype(np.float32) / 255.0
+
+    # Step 2: Causal temporal downsampling
+    first_frame = spatial_down[:, :, :1, :, :]  # (B, 1, 1, H_lat, W_lat)
+
+    if f_pix > 1 and target_f > 1:
+        t = (f_pix - 1) // (target_f - 1)  # temporal downscale factor
+        assert (f_pix - 1) % (target_f - 1) == 0, (
+            f"Pixel frames ({f_pix}) not compatible with latent frames ({target_f}): "
+            f"(f_pix - 1) must be divisible by (target_f - 1)"
+        )
+        rest = spatial_down[:, :, 1:, :, :]  # (B, 1, f_pix-1, H, W)
+        # Reshape to groups and average
+        rest = rest.reshape(b, 1, target_f - 1, t, target_h, target_w)
+        rest = rest.mean(axis=3)  # (B, 1, target_f-1, H, W)
+        latent_mask = np.concatenate([first_frame, rest], axis=2)
+    else:
+        latent_mask = first_frame
+
+    # Flatten to (B, F_lat * H_lat * W_lat)
+    latent_mask = latent_mask.reshape(b, target_f * target_h * target_w)
+    return mx.array(latent_mask)
+
+
+def _load_mask_video(
+    mask_path: str,
+    height: int,
+    width: int,
+    num_frames: int,
+) -> mx.array:
+    """Load a mask video and return a pixel-space tensor of shape (1, 1, F, H, W).
+
+    The mask video is loaded, resized to (height, width), converted to
+    grayscale, and normalised to [0, 1].
+
+    Args:
+        mask_path: Path to the mask video file.
+        height: Target height in pixels.
+        width: Target width in pixels.
+        num_frames: Maximum number of frames to load.
+
+    Returns:
+        Tensor of shape (1, 1, F, H, W) with values in [0, 1].
+    """
+    # load_video_frames returns (1, 3, F, H, W) in [0, 1]
+    mask_video = load_video_frames(mask_path, height, width, num_frames)
+    # Take mean over channels for grayscale: (1, 3, F, H, W) -> (1, 1, F, H, W)
+    mask = mask_video.mean(axis=1, keepdims=True)
+    return mx.clip(mask, 0.0, 1.0)

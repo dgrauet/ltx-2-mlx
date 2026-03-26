@@ -9,6 +9,7 @@ Usage:
     ltx-2-mlx retake --prompt "new scene" --video source.mp4 --start 1 --end 3 -o retake.mp4
     ltx-2-mlx extend --prompt "continue" --video source.mp4 --extend-frames 2 -o extended.mp4
     ltx-2-mlx keyframe --prompt "transition" --start img1.png --end img2.png -o kf.mp4
+    ltx-2-mlx ic-lora --prompt "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 -o out.mp4
     ltx-2-mlx enhance --prompt "a cat walking" --mode t2v
     ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-distilled-q8
 """
@@ -56,6 +57,7 @@ examples:
   ltx-2-mlx retake --prompt "new scene" --video source.mp4 --start 1 --end 3 -o out.mp4
   ltx-2-mlx extend --prompt "continue" --video source.mp4 --extend-frames 2 -o out.mp4
   ltx-2-mlx keyframe --prompt "transition" --start img1.png --end img2.png -o out.mp4
+  ltx-2-mlx ic-lora --prompt "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 -o out.mp4
   ltx-2-mlx enhance --prompt "a cat walking" --mode t2v
   ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-distilled-q4
 """,
@@ -117,6 +119,40 @@ examples:
     )
     kf.add_argument("--lora-strength", type=float, default=1.0, help="Distilled LoRA strength (default: 1.0)")
 
+    # --- ic-lora ---
+    ic = sub.add_parser("ic-lora", help="Generate video with IC-LoRA control conditioning")
+    _add_common_args(ic)
+    ic.add_argument(
+        "--lora",
+        action="append",
+        nargs=2,
+        metavar=("PATH", "STRENGTH"),
+        required=True,
+        help=(
+            "IC-LoRA weights and strength (repeatable). PATH can be a local .safetensors file "
+            "or a HuggingFace repo ID (e.g. Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control). "
+            "Example: --lora Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control 1.0"
+        ),
+    )
+    ic.add_argument(
+        "--video-conditioning",
+        action="append",
+        nargs=2,
+        metavar=("PATH", "STRENGTH"),
+        required=True,
+        help="Reference control video and strength (repeatable). Example: --video-conditioning depth.mp4 1.0",
+    )
+    ic.add_argument("--image", "-i", default=None, help="Optional reference image for I2V conditioning")
+    ic.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
+    ic.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
+    ic.add_argument(
+        "--conditioning-strength",
+        type=float,
+        default=1.0,
+        help="IC-LoRA conditioning attention strength 0.0-1.0 (default: 1.0)",
+    )
+    ic.add_argument("--skip-stage-2", action="store_true", help="Skip stage 2 upsampling (half resolution output)")
+
     # --- enhance ---
     enh = sub.add_parser("enhance", help="Enhance a prompt using Gemma (no video generation)")
     enh.add_argument("--prompt", "-p", required=True, help="Prompt to enhance")
@@ -146,6 +182,7 @@ examples:
         "retake": _cmd_retake,
         "extend": _cmd_extend,
         "keyframe": _cmd_keyframe,
+        "ic-lora": _cmd_ic_lora,
         "enhance": _cmd_enhance,
         "info": _cmd_info,
     }
@@ -389,6 +426,59 @@ def _cmd_keyframe(args: argparse.Namespace) -> None:
         stage2_steps=args.stage2_steps,
         video_guider_params=video_gp,
         audio_guider_params=audio_gp,
+    )
+    _print_result(args.output, t0, args.quiet)
+
+
+# =============================================================================
+# IC-LoRA
+# =============================================================================
+
+
+def _cmd_ic_lora(args: argparse.Namespace) -> None:
+    """Generate video with IC-LoRA control conditioning."""
+    t0 = time.time()
+
+    from ltx_pipelines_mlx.ic_lora import ICLoraPipeline
+
+    # Parse --lora pairs into (path, strength) tuples
+    lora_paths = [(path, float(strength)) for path, strength in args.lora]
+
+    # Parse --video-conditioning pairs
+    video_conditioning = [(path, float(strength)) for path, strength in args.video_conditioning]
+
+    if not args.quiet:
+        print("Mode: IC-LoRA (two-stage)")
+        for path, strength in lora_paths:
+            print(f"  LoRA: {path} (strength={strength})")
+        for path, strength in video_conditioning:
+            print(f"  Control: {path} (strength={strength})")
+
+    pipe = ICLoraPipeline(
+        model_dir=args.model,
+        lora_paths=lora_paths,
+        gemma_model_id=args.gemma,
+        low_memory=True,
+    )
+
+    # Build image conditioning if provided
+    images = None
+    if args.image:
+        images = [(args.image, 0, 1.0)]
+
+    pipe.generate_and_save(
+        prompt=args.prompt,
+        output_path=args.output,
+        video_conditioning=video_conditioning,
+        height=args.height,
+        width=args.width,
+        num_frames=args.frames,
+        seed=args.seed,
+        stage1_steps=args.stage1_steps,
+        stage2_steps=args.stage2_steps,
+        images=images,
+        conditioning_attention_strength=args.conditioning_strength,
+        skip_stage_2=args.skip_stage_2,
     )
     _print_result(args.output, t0, args.quiet)
 
