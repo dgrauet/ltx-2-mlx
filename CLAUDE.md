@@ -194,6 +194,12 @@ Weights are pre-converted by [mlx-forge](https://github.com/dgrauet/mlx-forge) a
 
 **All weights must be in MLX format on disk.** If a weight file contains PyTorch-format tensors, fix it in mlx-forge — don't work around it here.
 
+### Config Corrections
+
+| Parameter | config.json | Actual | Evidence |
+|-----------|-------------|--------|----------|
+| `cross_attention_adaln` | `false` | **`true`** | Weights have 9 AdaLN params + `prompt_scale_shift_table` per block |
+
 ### Quantization
 
 - Only `nn.Linear` inside `transformer_blocks` → int8 (group_size=64)
@@ -210,6 +216,23 @@ Weights are pre-converted by [mlx-forge](https://github.com/dgrauet/mlx-forge) a
 | `vae_encoder.safetensors` | `vae_encoder.` | Video VAE encoder + per-channel stats |
 | `audio_vae.safetensors` | `audio_vae.` | Audio VAE decoder + per-channel stats |
 | `vocoder.safetensors` | `vocoder.` | Base vocoder + BWE generator + mel STFT |
+| `spatial_upscaler_x2_v1_1.safetensors` | N/A | 2x spatial upsampler |
+| `spatial_upscaler_x1_5_v1_0.safetensors` | N/A | 1.5x spatial upsampler |
+| `temporal_upscaler_x2_v1_0.safetensors` | N/A | 2x temporal upsampler |
+
+### Key Remapping (mlx-forge)
+
+Applied during weight conversion, not at load time:
+
+| PyTorch Key Pattern | MLX Key Pattern | Context |
+|---------------------|-----------------|---------|
+| `ff.net.0.proj.*` | `ff.proj_in.*` | Feed-forward input |
+| `ff.net.2.*` | `ff.proj_out.*` | Feed-forward output |
+| `attn.to_out.0.*` | `attn.to_out.*` | Main transformer attention (removes Sequential) |
+| `_mean_of_means` | `mean_of_means` | Audio VAE stats (MLX `_` prefix = private) |
+| `_std_of_means` | `std_of_means` | Audio VAE stats |
+
+Note: Connector attention **keeps** Sequential wrapping (`to_out.0.*` stays).
 
 ---
 
