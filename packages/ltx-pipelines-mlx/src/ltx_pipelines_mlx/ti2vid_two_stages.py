@@ -13,6 +13,7 @@ from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState, create_initial_state, noise_latent_state
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.model.upsampler import LatentUpsampler
+from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import load_split_safetensors
@@ -40,6 +41,22 @@ class TwoStagePipeline(TextToVideoPipeline):
     ):
         super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
         self.upsampler: LatentUpsampler | None = None
+
+    def _load_vae_encoder(self) -> VideoEncoder:
+        """Load VAE encoder (for per-channel normalization stats).
+
+        Returns:
+            Loaded VideoEncoder.
+        """
+        vae_encoder = VideoEncoder()
+        enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
+        # Remap underscore-prefixed per-channel stats keys (MLX treats _ as private)
+        enc_weights = {
+            k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
+            for k, v in enc_weights.items()
+        }
+        vae_encoder.load_weights(list(enc_weights.items()))
+        return vae_encoder
 
     def _load_upsampler(self, name: str = "spatial_upscaler_x2_v1_1") -> None:
         """Load upsampler from config and weights.
@@ -94,8 +111,12 @@ class TwoStagePipeline(TextToVideoPipeline):
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
         """
-        self.load()
+        # Encode text first, then load remaining components (DiT, VAE, etc.).
+        # In low_memory mode, _encode_text_and_load frees Gemma before loading DiT.
+        video_embeds, audio_embeds = self._encode_text_and_load(prompt)
         assert self.dit is not None
+        if self.upsampler is None:
+            self._load_upsampler()
         assert self.upsampler is not None
 
         # Stage 1: Generate at half resolution
@@ -104,10 +125,6 @@ class TwoStagePipeline(TextToVideoPipeline):
         video_shape = (1, F * H_half * W_half, 128)
         audio_T = compute_audio_token_count(num_frames)
         audio_shape = (1, audio_T, 128)
-
-        video_embeds, audio_embeds = self._encode_text(prompt)
-        if self.low_memory:
-            aggressive_cleanup()
 
         # Compute positions for RoPE (stage 1 — half resolution)
         video_positions_1 = compute_video_positions(F, H_half, W_half)
@@ -130,14 +147,28 @@ class TwoStagePipeline(TextToVideoPipeline):
         if self.low_memory:
             aggressive_cleanup()
 
-        # Unpatchify and upscale
+        # Unpatchify and upscale with denormalize/renormalize wrapping.
+        # The neural upsampler operates in un-normalized latent space.
+        # Without this, Stage 2 produces grid artifacts / garbage output.
         video_half = self.video_patchifier.unpatchify(output_1.video_latent, (F, H_half, W_half))
-        video_upscaled = self.upsampler(video_half)
+
+        vae_encoder = self._load_vae_encoder()
+        video_mlx = video_half.transpose(0, 2, 3, 4, 1)  # (B,C,F,H,W) -> (B,F,H,W,C)
+        video_denorm = vae_encoder.denormalize_latent(video_mlx)
+        video_denorm = video_denorm.transpose(0, 4, 1, 2, 3)  # back to (B,C,F,H,W)
+        video_upscaled = self.upsampler(video_denorm)
+        video_up_mlx = video_upscaled.transpose(0, 2, 3, 4, 1)  # (B,C,F,H,W) -> (B,F,H,W,C)
+        video_upscaled = vae_encoder.normalize_latent(video_up_mlx)
+        video_upscaled = video_upscaled.transpose(0, 4, 1, 2, 3)  # back to (B,C,F,H,W)
+        del vae_encoder
         if self.low_memory:
             aggressive_cleanup()
 
-        # Stage 2: Refine at full resolution
-        _, H_full, W_full = compute_video_latent_shape(num_frames, height, width)
+        # Stage 2: Refine at full resolution.
+        # Derive dims from actual upscaled shape, not target height/width,
+        # to avoid RoPE shape mismatch (H_half*2 may differ from H at target res).
+        H_full = H_half * 2
+        W_full = W_half * 2
         video_tokens, _ = self.video_patchifier.patchify(video_upscaled)
 
         # Start from upscaled + small noise

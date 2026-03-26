@@ -29,7 +29,7 @@ PROMPT_MAP = {
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_DIR = ROOT / "tests" / "fixtures" / "keyframe_pairs"
 OUTPUT_DIR = ROOT / "tests" / "outputs" / "keyframe_matrix"
-REPORT_PATH = ROOT / "docs" / "comparison" / "keyframe_divergences.md"
+REPORT_PATH = ROOT / "docs" / "keyframe-bugs.md"
 
 MODEL_ARGS = [
     "--model",

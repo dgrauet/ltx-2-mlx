@@ -57,13 +57,55 @@ class TwoStageHQPipeline(TextToVideoPipeline):
         self.upsampler: LatentUpsampler | None = None
 
     def load(self) -> None:
-        """Load all components including VAE encoder and upsampler."""
-        super().load()
+        """Load DiT + VAE encoder + upsampler (skip decoders for memory).
 
+        Decoders (VAE decoder, audio, vocoder) are loaded on-demand in
+        ``generate_and_save()`` after the transformer is freed. This keeps
+        peak memory under 32 GB on Apple Silicon.
+        """
+        if self._loaded:
+            return
+
+        model_dir = self.model_dir
+
+        # Text encoder + connector (loaded first, freed before DiT)
+        if self.text_encoder is None:
+            from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+
+            self.text_encoder = GemmaLanguageModel()
+            self.text_encoder.load(self._gemma_model_id)
+            aggressive_cleanup()
+
+        if self.feature_extractor is None:
+            from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
+
+            self.feature_extractor = GemmaFeaturesExtractorV2()
+            connector_weights = load_split_safetensors(model_dir / "connector.safetensors", prefix="connector.")
+            self.feature_extractor.connector.load_weights(list(connector_weights.items()))
+            aggressive_cleanup()
+
+        # DiT
+        if self.dit is None:
+            from ltx_core_mlx.model.transformer.model import LTXModel
+            from ltx_core_mlx.utils.weights import apply_quantization
+
+            if self.low_memory:
+                self.text_encoder = None
+                aggressive_cleanup()
+
+            self.dit = LTXModel()
+            transformer_path = model_dir / "transformer.safetensors"
+            if not transformer_path.exists():
+                transformer_path = model_dir / "transformer-distilled.safetensors"
+            transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
+            apply_quantization(self.dit, transformer_weights)
+            self.dit.load_weights(list(transformer_weights.items()))
+            aggressive_cleanup()
+
+        # VAE encoder (needed for I2V conditioning + denorm/renorm)
         if self.vae_encoder is None:
             self.vae_encoder = VideoEncoder()
-            enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
-            # Remap underscore-prefixed per-channel stats keys
+            enc_weights = load_split_safetensors(model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
             enc_weights = {
                 k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
                 for k, v in enc_weights.items()
@@ -71,12 +113,13 @@ class TwoStageHQPipeline(TextToVideoPipeline):
             self.vae_encoder.load_weights(list(enc_weights.items()))
             aggressive_cleanup()
 
+        # Upsampler
         if self.upsampler is None:
             import json
 
             name = "spatial_upscaler_x2_v1_1"
-            config_path = self.model_dir / f"{name}_config.json"
-            weights_path = self.model_dir / f"{name}.safetensors"
+            config_path = model_dir / f"{name}_config.json"
+            weights_path = model_dir / f"{name}.safetensors"
             if config_path.exists():
                 config = json.loads(config_path.read_text()).get("config", {})
                 self.upsampler = LatentUpsampler.from_config(config)
@@ -85,6 +128,41 @@ class TwoStageHQPipeline(TextToVideoPipeline):
             if weights_path.exists():
                 weights = load_split_safetensors(weights_path, prefix=f"{name}.")
                 self.upsampler.load_weights(list(weights.items()))
+            aggressive_cleanup()
+
+        self._loaded = True
+
+    def _load_decoders(self) -> None:
+        """Load decoders on-demand (VAE decoder, audio decoder, vocoder)."""
+        from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
+        from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
+        from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder
+
+        model_dir = self.model_dir
+
+        if self.vae_decoder is None:
+            self.vae_decoder = VideoDecoder()
+            vae_weights = load_split_safetensors(model_dir / "vae_decoder.safetensors", prefix="vae_decoder.")
+            self.vae_decoder.load_weights(list(vae_weights.items()))
+            aggressive_cleanup()
+
+        if self.audio_decoder is None:
+            from ltx_core_mlx.utils.weights import remap_audio_vae_keys
+
+            self.audio_decoder = AudioVAEDecoder()
+            audio_weights = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.decoder.")
+            all_audio = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.")
+            for k, v in all_audio.items():
+                if k.startswith("per_channel_statistics."):
+                    audio_weights[k] = v
+            audio_weights = remap_audio_vae_keys(audio_weights)
+            self.audio_decoder.load_weights(list(audio_weights.items()))
+            aggressive_cleanup()
+
+        if self.vocoder is None:
+            self.vocoder = VocoderWithBWE()
+            vocoder_weights = load_split_safetensors(model_dir / "vocoder.safetensors", prefix="vocoder.")
+            self.vocoder.load_weights(list(vocoder_weights.items()))
             aggressive_cleanup()
 
     def generate_hq(
@@ -113,9 +191,12 @@ class TwoStageHQPipeline(TextToVideoPipeline):
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
         """
-        self.load()
+        # Encode text first, then load remaining components (DiT, VAE encoder, etc.).
+        # In low_memory mode, _encode_text_and_load frees Gemma before loading DiT.
+        video_embeds, audio_embeds = self._encode_text_and_load(prompt)
         assert self.dit is not None
         assert self.upsampler is not None
+        assert self.vae_encoder is not None
 
         # Stage 1: Half-resolution generation with res_2s sampler
         half_h, half_w = height // 2, width // 2
@@ -124,10 +205,6 @@ class TwoStageHQPipeline(TextToVideoPipeline):
         video_shape = (1, num_tokens, 128)
         audio_T = compute_audio_token_count(num_frames)
         audio_shape = (1, audio_T, 128)
-
-        video_embeds, audio_embeds = self._encode_text(prompt)
-        if self.low_memory:
-            aggressive_cleanup()
 
         video_positions_1 = compute_video_positions(F, H_half, W_half)
         audio_positions = compute_audio_positions(audio_T)
@@ -162,14 +239,26 @@ class TwoStageHQPipeline(TextToVideoPipeline):
         if self.low_memory:
             aggressive_cleanup()
 
-        # Unpatchify and upscale
+        # Unpatchify and upscale with denormalize/renormalize wrapping.
+        # The neural upsampler operates in un-normalized latent space.
         video_half = self.video_patchifier.unpatchify(output_1.video_latent, (F, H_half, W_half))
-        video_upscaled = self.upsampler(video_half)
+
+        assert self.vae_encoder is not None
+        video_mlx = video_half.transpose(0, 2, 3, 4, 1)  # (B,C,F,H,W) -> (B,F,H,W,C)
+        video_denorm = self.vae_encoder.denormalize_latent(video_mlx)
+        video_denorm = video_denorm.transpose(0, 4, 1, 2, 3)  # back to (B,C,F,H,W)
+        video_upscaled = self.upsampler(video_denorm)
+        video_up_mlx = video_upscaled.transpose(0, 2, 3, 4, 1)  # (B,C,F,H,W) -> (B,F,H,W,C)
+        video_upscaled = self.vae_encoder.normalize_latent(video_up_mlx)
+        video_upscaled = video_upscaled.transpose(0, 4, 1, 2, 3)  # back to (B,C,F,H,W)
         if self.low_memory:
             aggressive_cleanup()
 
-        # Stage 2: Refine at full resolution with distilled schedule
-        _, H_full, W_full = compute_video_latent_shape(num_frames, height, width)
+        # Stage 2: Refine at full resolution with distilled schedule.
+        # Derive dims from actual upscaled shape, not target height/width,
+        # to avoid RoPE shape mismatch (H_half*2 may differ from H at target res).
+        H_full = H_half * 2
+        W_full = W_half * 2
         video_tokens_up, _ = self.video_patchifier.patchify(video_upscaled)
 
         sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
@@ -263,7 +352,7 @@ class TwoStageHQPipeline(TextToVideoPipeline):
             image=image,
         )
 
-        # Free transformer + text encoder to make room for VAE decode
+        # Free transformer + encoder to make room for decoders
         if self.low_memory:
             self.dit = None
             self.text_encoder = None
@@ -272,6 +361,9 @@ class TwoStageHQPipeline(TextToVideoPipeline):
             self.upsampler = None
             self._loaded = False
             aggressive_cleanup()
+
+        # Load decoders on-demand (not loaded during generate to save memory)
+        self._load_decoders()
 
         # Decode audio first (smaller)
         assert self.audio_decoder is not None
