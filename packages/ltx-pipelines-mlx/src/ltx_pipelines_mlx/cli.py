@@ -112,18 +112,23 @@ examples:
     # --- retake ---
     ret = sub.add_parser("retake", help="Regenerate a time segment of an existing video")
     _add_base_args(ret)
-    ret.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 8)")
     ret.add_argument("--video", "-v", required=True, help="Source video file")
     ret.add_argument("--start", type=int, required=True, help="Start latent frame index (inclusive)")
     ret.add_argument("--end", type=int, required=True, help="End latent frame index (exclusive)")
+    ret.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 30)")
+    ret.add_argument("--cfg-scale", type=float, default=None, help="CFG guidance scale (default: 3.0)")
+    ret.add_argument("--stg-scale", type=float, default=None, help="STG guidance scale (default: 0.0)")
+    ret.add_argument("--no-regen-audio", action="store_true", help="Preserve original audio (don't regenerate)")
 
     # --- extend ---
     ext = sub.add_parser("extend", help="Add frames before or after an existing video")
     _add_base_args(ext)
-    ext.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 8)")
     ext.add_argument("--video", "-v", required=True, help="Source video file")
     ext.add_argument("--extend-frames", type=int, required=True, help="Number of latent frames to add")
     ext.add_argument("--direction", choices=["before", "after"], default="after", help="Direction (default: after)")
+    ext.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 30)")
+    ext.add_argument("--cfg-scale", type=float, default=None, help="CFG guidance scale (default: 3.0)")
+    ext.add_argument("--stg-scale", type=float, default=None, help="STG guidance scale (default: 0.0)")
 
     # --- keyframe ---
     kf = sub.add_parser("keyframe", help="Interpolate between keyframe images")
@@ -374,14 +379,21 @@ def _cmd_retake(args: argparse.Namespace) -> None:
         print(f"Video: {args.video}, frames {args.start}-{args.end}")
 
     pipe = RetakePipeline(model_dir=args.model, gemma_model_id=args.gemma)
-    video_latent, audio_latent = pipe.retake_from_video(
+    kwargs: dict = dict(
         prompt=args.prompt,
         video_path=args.video,
         start_frame=args.start,
         end_frame=args.end,
         seed=args.seed,
-        num_steps=args.steps,
+        regenerate_audio=not args.no_regen_audio,
     )
+    if args.steps is not None:
+        kwargs["num_steps"] = args.steps
+    if args.cfg_scale is not None:
+        kwargs["cfg_scale"] = args.cfg_scale
+    if args.stg_scale is not None:
+        kwargs["stg_scale"] = args.stg_scale
+    video_latent, audio_latent = pipe.retake_from_video(**kwargs)
 
     _decode_and_save(pipe, video_latent, audio_latent, args)
     _print_result(args.output, t0, args.quiet)
@@ -403,14 +415,20 @@ def _cmd_extend(args: argparse.Namespace) -> None:
         print(f"Video: {args.video}, +{args.extend_frames} latent frames")
 
     pipe = ExtendPipeline(model_dir=args.model, gemma_model_id=args.gemma)
-    video_latent, audio_latent = pipe.extend_from_video(
+    kwargs: dict = dict(
         prompt=args.prompt,
         video_path=args.video,
         extend_frames=args.extend_frames,
         direction=args.direction,
         seed=args.seed,
-        num_steps=args.steps,
     )
+    if args.steps is not None:
+        kwargs["num_steps"] = args.steps
+    if args.cfg_scale is not None:
+        kwargs["cfg_scale"] = args.cfg_scale
+    if args.stg_scale is not None:
+        kwargs["stg_scale"] = args.stg_scale
+    video_latent, audio_latent = pipe.extend_from_video(**kwargs)
 
     _decode_and_save(pipe, video_latent, audio_latent, args)
     _print_result(args.output, t0, args.quiet)

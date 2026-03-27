@@ -1,6 +1,7 @@
 """Extend pipeline — add frames before or after an existing video.
 
-Ported from ltx-pipelines extend functionality.
+No direct Lightricks reference (custom MLX pipeline). Uses the dev model
+with CFG guidance for consistency with retake and two-stage pipelines.
 """
 
 from __future__ import annotations
@@ -9,28 +10,40 @@ from pathlib import Path
 
 import mlx.core as mx
 
+from ltx_core_mlx.components.guiders import (
+    MultiModalGuiderParams,
+    create_multimodal_guider_factory,
+)
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
-from ltx_core_mlx.conditioning.types.latent_cond import LatentState
+from ltx_core_mlx.conditioning.types.latent_cond import LatentState, noise_latent_state
 from ltx_core_mlx.model.audio_vae import AudioProcessor, AudioVAEEncoder, encode_audio
-from ltx_core_mlx.model.transformer.model import X0Model
+from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
 from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
 from ltx_core_mlx.utils.audio import load_audio
 from ltx_core_mlx.utils.ffmpeg import probe_video_info
 from ltx_core_mlx.utils.image import load_video_frames
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_core_mlx.utils.weights import load_split_safetensors, remap_audio_vae_keys
-from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS
+from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors, remap_audio_vae_keys
+from ltx_pipelines_mlx.scheduler import ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_one_stage import TextToVideoPipeline
-from ltx_pipelines_mlx.utils.samplers import denoise_loop
+from ltx_pipelines_mlx.utils.samplers import guided_denoise_loop
+
+# Reference defaults (LTX_2_3_PARAMS)
+DEFAULT_CFG_SCALE = 3.0
+DEFAULT_STG_SCALE = 0.0  # 32GB safe
 
 
 class ExtendPipeline(TextToVideoPipeline):
     """Extend pipeline: add frames before or after an existing video.
 
+    Uses the dev model with CFG guidance. Single-stage.
+
     Args:
         model_dir: Path to model weights.
+        gemma_model_id: Gemma model for text encoding.
         low_memory: Aggressive memory management.
+        dev_transformer: Dev transformer filename.
     """
 
     def __init__(
@@ -38,14 +51,32 @@ class ExtendPipeline(TextToVideoPipeline):
         model_dir: str,
         gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
         low_memory: bool = True,
+        dev_transformer: str = "transformer-dev.safetensors",
     ):
         super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
+        self._dev_transformer = dev_transformer
         self.vae_encoder: VideoEncoder | None = None
         self.audio_encoder: AudioVAEEncoder | None = None
         self.audio_processor: AudioProcessor | None = None
 
+    def _load_dev_transformer(self) -> LTXModel:
+        """Load the dev (non-distilled) transformer weights."""
+        dev_path = self.model_dir / self._dev_transformer
+        if not dev_path.exists():
+            raise FileNotFoundError(
+                f"Dev transformer not found: {dev_path}\n"
+                "Extend requires the dev model for CFG guidance.\n"
+                "Use: --model dgrauet/ltx-2.3-mlx-q8"
+            )
+        dit = LTXModel()
+        weights = load_split_safetensors(dev_path, prefix="transformer.")
+        apply_quantization(dit, weights)
+        dit.load_weights(list(weights.items()))
+        aggressive_cleanup()
+        return dit
+
     def _load_encoders(self) -> None:
-        """Load VAE encoder and audio encoder for video-from-file workflows."""
+        """Load VAE encoder and audio encoder."""
         if self.vae_encoder is None:
             self.vae_encoder = VideoEncoder()
             enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
@@ -61,7 +92,6 @@ class ExtendPipeline(TextToVideoPipeline):
             encoder_weights = load_split_safetensors(
                 self.model_dir / "audio_vae.safetensors", prefix="audio_vae.encoder."
             )
-            # Also load per_channel_statistics (lives under audio_vae., not audio_vae.encoder.)
             all_audio = load_split_safetensors(self.model_dir / "audio_vae.safetensors", prefix="audio_vae.")
             for k, v in all_audio.items():
                 if k.startswith("per_channel_statistics."):
@@ -78,12 +108,11 @@ class ExtendPipeline(TextToVideoPipeline):
         extend_frames: int,
         direction: str = "after",
         seed: int = 42,
-        num_steps: int | None = None,
+        num_steps: int = 30,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
+        stg_scale: float = DEFAULT_STG_SCALE,
     ) -> tuple[mx.array, mx.array]:
         """Extend a video file by adding frames.
-
-        Convenience wrapper that loads the video, encodes it to latents,
-        and calls :meth:`extend`.
 
         Args:
             prompt: Text prompt for new frames.
@@ -91,26 +120,27 @@ class ExtendPipeline(TextToVideoPipeline):
             extend_frames: Number of latent frames to add.
             direction: "before" or "after".
             seed: Random seed.
-            num_steps: Number of denoising steps.
+            num_steps: Number of denoising steps (default: 30).
+            cfg_scale: CFG guidance scale (default: 3.0).
+            stg_scale: STG guidance scale (default: 0.0).
 
         Returns:
             Tuple of (extended_video_latent, extended_audio_latent).
         """
-        self.load()
+        # --- Encode source video + audio ---
         self._load_encoders()
         assert self.vae_encoder is not None
 
         video_path = str(video_path)
         info = probe_video_info(video_path)
 
-        # Load video frames via ffmpeg -> (B, 3, F, H, W)
         video_tensor = load_video_frames(video_path, info.height, info.width, info.num_frames)
         video_latent = self.vae_encoder.encode(video_tensor)
+        mx.synchronize()
         if self.low_memory:
             del video_tensor
             aggressive_cleanup()
 
-        # Encode audio if present
         audio_latent: mx.array | None = None
         if info.has_audio:
             assert self.audio_encoder is not None
@@ -131,11 +161,10 @@ class ExtendPipeline(TextToVideoPipeline):
                     aggressive_cleanup()
 
         if audio_latent is None:
-            # Create silence audio latent
             audio_T = compute_audio_token_count(info.num_frames)
             audio_latent = mx.zeros((1, 8, audio_T, 16), dtype=mx.bfloat16)
 
-        # Free encoders to save memory
+        # Free encoders
         if self.low_memory:
             self.vae_encoder = None
             self.audio_encoder = None
@@ -150,8 +179,12 @@ class ExtendPipeline(TextToVideoPipeline):
             direction=direction,
             height=info.height,
             width=info.width,
+            num_frames=info.num_frames,
+            fps=info.fps,
             seed=seed,
             num_steps=num_steps,
+            cfg_scale=cfg_scale,
+            stg_scale=stg_scale,
         )
 
     def extend(
@@ -163,8 +196,12 @@ class ExtendPipeline(TextToVideoPipeline):
         direction: str = "after",
         height: int = 480,
         width: int = 704,
+        num_frames: int = 97,
+        fps: float = 24.0,
         seed: int = 42,
-        num_steps: int | None = None,
+        num_steps: int = 30,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
+        stg_scale: float = DEFAULT_STG_SCALE,
     ) -> tuple[mx.array, mx.array]:
         """Extend a video by adding frames.
 
@@ -176,13 +213,48 @@ class ExtendPipeline(TextToVideoPipeline):
             direction: "before" or "after".
             height: Video height.
             width: Video width.
+            num_frames: Total number of pixel frames in source.
+            fps: Frame rate.
             seed: Random seed.
-            num_steps: Number of denoising steps.
+            num_steps: Number of denoising steps (default: 30).
+            cfg_scale: CFG guidance scale (default: 3.0).
+            stg_scale: STG guidance scale (default: 0.0).
 
         Returns:
             Tuple of (extended_video_latent, extended_audio_latent).
         """
-        self.load()
+        # --- Text encoding (positive + negative for CFG) ---
+        if self.text_encoder is None or self.feature_extractor is None:
+            model_dir = self.model_dir
+            if self.text_encoder is None:
+                from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+
+                self.text_encoder = GemmaLanguageModel()
+                self.text_encoder.load(self._gemma_model_id)
+                aggressive_cleanup()
+            if self.feature_extractor is None:
+                from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
+
+                self.feature_extractor = GemmaFeaturesExtractorV2()
+                conn_weights = load_split_safetensors(model_dir / "connector.safetensors", prefix="connector.")
+                self.feature_extractor.connector.load_weights(list(conn_weights.items()))
+                aggressive_cleanup()
+
+        video_embeds, audio_embeds = self._encode_text(prompt)
+
+        from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
+
+        neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
+        mx.synchronize()
+
+        # Free text encoder before loading DiT
+        self.text_encoder = None
+        self.feature_extractor = None
+        aggressive_cleanup()
+
+        # --- Load dev transformer ---
+        if self.dit is None:
+            self.dit = self._load_dev_transformer()
         assert self.dit is not None
 
         B = source_video_latent.shape[0]
@@ -193,52 +265,51 @@ class ExtendPipeline(TextToVideoPipeline):
 
         # Patchify source
         source_tokens, _ = self.video_patchifier.patchify(source_video_latent)
-
-        # Create new tokens for extension
-        new_shape = (B, extend_frames * tokens_per_frame, 128)
-        mx.random.seed(seed)
-        new_noise = mx.random.normal(new_shape).astype(mx.bfloat16)
-
-        # Combine source (preserved) and new (to denoise)
-        if direction == "after":
-            combined_latent = mx.concatenate([source_tokens, new_noise], axis=1)
-            denoise_mask = mx.concatenate(
-                [
-                    mx.zeros((B, source_tokens.shape[1], 1)),
-                    mx.ones((B, new_noise.shape[1], 1)),
-                ],
-                axis=1,
-            )
-        else:  # before
-            combined_latent = mx.concatenate([new_noise, source_tokens], axis=1)
-            denoise_mask = mx.concatenate(
-                [
-                    mx.ones((B, new_noise.shape[1], 1)),
-                    mx.zeros((B, source_tokens.shape[1], 1)),
-                ],
-                axis=1,
-            )
-
-        # Compute positions for RoPE
-        video_positions = compute_video_positions(F_total, H, W)
         audio_tokens, audio_T = self.audio_patchifier.patchify(source_audio_latent)
-        extend_audio_T = round(audio_T * extend_frames / F_source)
+
+        # Compute total pixel frames for audio token count
+        total_pixel_frames = num_frames + extend_frames * 8  # each latent frame = 8 pixel frames
+        extend_audio_T = compute_audio_token_count(total_pixel_frames, fps) - audio_T
+        if extend_audio_T < 0:
+            extend_audio_T = 0
         audio_total_T = audio_T + extend_audio_T
+
+        # Create video state with noise for new frames, preserve source
+        new_shape = (B, extend_frames * tokens_per_frame, 128)
+
+        if direction == "after":
+            denoise_mask = mx.concatenate(
+                [
+                    mx.zeros((B, source_tokens.shape[1], 1), dtype=mx.bfloat16),
+                    mx.ones((B, new_shape[1], 1), dtype=mx.bfloat16),
+                ],
+                axis=1,
+            )
+            # Clean latent: source for preserved, zeros for new
+            clean_video = mx.concatenate([source_tokens, mx.zeros(new_shape, dtype=mx.bfloat16)], axis=1)
+        else:  # before
+            denoise_mask = mx.concatenate(
+                [
+                    mx.ones((B, new_shape[1], 1), dtype=mx.bfloat16),
+                    mx.zeros((B, source_tokens.shape[1], 1), dtype=mx.bfloat16),
+                ],
+                axis=1,
+            )
+            clean_video = mx.concatenate([mx.zeros(new_shape, dtype=mx.bfloat16), source_tokens], axis=1)
+
+        video_positions = compute_video_positions(F_total, H, W)
         audio_positions = compute_audio_positions(audio_total_T)
 
         video_state = LatentState(
-            latent=combined_latent,
-            clean_latent=combined_latent * (1.0 - denoise_mask),  # clean only preserved parts
+            latent=clean_video,
+            clean_latent=clean_video,
             denoise_mask=denoise_mask,
             positions=video_positions,
         )
+        video_state = noise_latent_state(video_state, sigma=1.0, seed=seed)
 
-        # Audio: preserve source audio, extend with noise
-        mx.random.seed(seed + 1)
-        new_audio_noise = mx.random.normal((B, extend_audio_T, 128)).astype(mx.bfloat16)
-
+        # Audio: preserve source, extend with noise
         if direction == "after":
-            audio_combined = mx.concatenate([audio_tokens, new_audio_noise], axis=1)
             audio_denoise_mask = mx.concatenate(
                 [
                     mx.zeros((B, audio_T, 1), dtype=mx.bfloat16),
@@ -246,8 +317,8 @@ class ExtendPipeline(TextToVideoPipeline):
                 ],
                 axis=1,
             )
-        else:  # before
-            audio_combined = mx.concatenate([new_audio_noise, audio_tokens], axis=1)
+            clean_audio = mx.concatenate([audio_tokens, mx.zeros((B, extend_audio_T, 128), dtype=mx.bfloat16)], axis=1)
+        else:
             audio_denoise_mask = mx.concatenate(
                 [
                     mx.ones((B, extend_audio_T, 1), dtype=mx.bfloat16),
@@ -255,29 +326,47 @@ class ExtendPipeline(TextToVideoPipeline):
                 ],
                 axis=1,
             )
+            clean_audio = mx.concatenate([mx.zeros((B, extend_audio_T, 128), dtype=mx.bfloat16), audio_tokens], axis=1)
 
         audio_state = LatentState(
-            latent=audio_combined,
-            clean_latent=audio_combined * (1.0 - audio_denoise_mask),
+            latent=clean_audio,
+            clean_latent=clean_audio,
             denoise_mask=audio_denoise_mask,
             positions=audio_positions,
         )
+        audio_state = noise_latent_state(audio_state, sigma=1.0, seed=seed + 1)
 
-        # Text encoding
-        video_embeds, audio_embeds = self._encode_text(prompt)
-        if self.low_memory:
-            aggressive_cleanup()
-
-        # Denoise
-        sigmas = DISTILLED_SIGMAS[: num_steps + 1] if num_steps else DISTILLED_SIGMAS
+        # --- Guided denoising ---
+        num_tokens = F_total * H * W
+        sigmas = ltx2_schedule(num_steps, num_tokens=num_tokens)
         x0_model = X0Model(self.dit)
 
-        output = denoise_loop(
+        video_gp = MultiModalGuiderParams(
+            cfg_scale=cfg_scale,
+            stg_scale=stg_scale,
+            rescale_scale=0.7,
+            modality_scale=3.0,
+            stg_blocks=[28],
+        )
+        audio_gp = MultiModalGuiderParams(
+            cfg_scale=7.0,
+            stg_scale=stg_scale,
+            rescale_scale=0.7,
+            modality_scale=3.0,
+            stg_blocks=[28],
+        )
+
+        video_factory = create_multimodal_guider_factory(video_gp, negative_context=neg_video_embeds)
+        audio_factory = create_multimodal_guider_factory(audio_gp, negative_context=neg_audio_embeds)
+
+        output = guided_denoise_loop(
             model=x0_model,
             video_state=video_state,
             audio_state=audio_state,
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
+            video_guider_factory=video_factory,
+            audio_guider_factory=audio_factory,
             sigmas=sigmas,
         )
         if self.low_memory:

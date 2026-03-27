@@ -1,6 +1,9 @@
 """Retake pipeline — regenerate a time segment of an existing video.
 
-Ported from ltx-pipelines retake functionality.
+Matches the reference architecture: single-stage with dev model + CFG guidance.
+Default: 30 steps, cfg=3.0, full multi-modal guidance.
+
+Ported from ltx-pipelines/src/ltx_pipelines/retake.py
 """
 
 from __future__ import annotations
@@ -9,28 +12,41 @@ from pathlib import Path
 
 import mlx.core as mx
 
+from ltx_core_mlx.components.guiders import (
+    MultiModalGuiderParams,
+    create_multimodal_guider_factory,
+)
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState, TemporalRegionMask, noise_latent_state
 from ltx_core_mlx.model.audio_vae import AudioProcessor, AudioVAEEncoder, encode_audio
-from ltx_core_mlx.model.transformer.model import X0Model
+from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
 from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
 from ltx_core_mlx.utils.audio import load_audio
 from ltx_core_mlx.utils.ffmpeg import probe_video_info
 from ltx_core_mlx.utils.image import load_video_frames
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_core_mlx.utils.weights import load_split_safetensors, remap_audio_vae_keys
-from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS
+from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors, remap_audio_vae_keys
+from ltx_pipelines_mlx.scheduler import ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_one_stage import TextToVideoPipeline
-from ltx_pipelines_mlx.utils.samplers import denoise_loop
+from ltx_pipelines_mlx.utils.samplers import guided_denoise_loop
+
+# Reference defaults (LTX_2_3_PARAMS)
+DEFAULT_CFG_SCALE = 3.0
+DEFAULT_STG_SCALE = 0.0  # 32GB safe; ref uses 1.0 but OOM on long videos
 
 
 class RetakePipeline(TextToVideoPipeline):
     """Retake pipeline: regenerate a time segment while preserving the rest.
 
+    Uses the dev (non-distilled) model with CFG guidance for quality output.
+    Single-stage pipeline (no upsampler).
+
     Args:
         model_dir: Path to model weights.
+        gemma_model_id: Gemma model for text encoding.
         low_memory: Aggressive memory management.
+        dev_transformer: Dev transformer filename.
     """
 
     def __init__(
@@ -38,14 +54,32 @@ class RetakePipeline(TextToVideoPipeline):
         model_dir: str,
         gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
         low_memory: bool = True,
+        dev_transformer: str = "transformer-dev.safetensors",
     ):
         super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
+        self._dev_transformer = dev_transformer
         self.vae_encoder: VideoEncoder | None = None
         self.audio_encoder: AudioVAEEncoder | None = None
         self.audio_processor: AudioProcessor | None = None
 
+    def _load_dev_transformer(self) -> LTXModel:
+        """Load the dev (non-distilled) transformer weights."""
+        dev_path = self.model_dir / self._dev_transformer
+        if not dev_path.exists():
+            raise FileNotFoundError(
+                f"Dev transformer not found: {dev_path}\n"
+                "Retake requires the dev model for CFG guidance.\n"
+                "Use: --model dgrauet/ltx-2.3-mlx-q8"
+            )
+        dit = LTXModel()
+        weights = load_split_safetensors(dev_path, prefix="transformer.")
+        apply_quantization(dit, weights)
+        dit.load_weights(list(weights.items()))
+        aggressive_cleanup()
+        return dit
+
     def _load_encoders(self) -> None:
-        """Load VAE encoder and audio encoder for video-from-file workflows."""
+        """Load VAE encoder and audio encoder."""
         if self.vae_encoder is None:
             self.vae_encoder = VideoEncoder()
             enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
@@ -61,7 +95,6 @@ class RetakePipeline(TextToVideoPipeline):
             encoder_weights = load_split_safetensors(
                 self.model_dir / "audio_vae.safetensors", prefix="audio_vae.encoder."
             )
-            # Also load per_channel_statistics (lives under audio_vae., not audio_vae.encoder.)
             all_audio = load_split_safetensors(self.model_dir / "audio_vae.safetensors", prefix="audio_vae.")
             for k, v in all_audio.items():
                 if k.startswith("per_channel_statistics."):
@@ -78,39 +111,42 @@ class RetakePipeline(TextToVideoPipeline):
         start_frame: int,
         end_frame: int,
         seed: int = 42,
-        num_steps: int | None = None,
+        num_steps: int = 30,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
+        stg_scale: float = DEFAULT_STG_SCALE,
+        regenerate_audio: bool = True,
     ) -> tuple[mx.array, mx.array]:
         """Regenerate a time segment of a video file.
-
-        Convenience wrapper that loads the video, encodes it to latents,
-        and calls :meth:`retake`.
 
         Args:
             prompt: Text prompt for the regenerated segment.
             video_path: Path to the source video file.
-            start_frame: First frame to regenerate (inclusive, in latent space).
-            end_frame: Last frame to regenerate (exclusive, in latent space).
+            start_frame: First latent frame to regenerate (inclusive).
+            end_frame: Last latent frame to regenerate (exclusive).
             seed: Random seed.
-            num_steps: Number of denoising steps.
+            num_steps: Number of denoising steps (default: 30).
+            cfg_scale: CFG guidance scale (default: 3.0).
+            stg_scale: STG guidance scale (default: 0.0).
+            regenerate_audio: If True, regenerate audio in the retake region.
+                If False, preserve original audio entirely.
 
         Returns:
             Tuple of (video_latent, audio_latent).
         """
-        self.load()
+        # --- Encode source video + audio ---
         self._load_encoders()
         assert self.vae_encoder is not None
 
         video_path = str(video_path)
         info = probe_video_info(video_path)
 
-        # Load video frames via ffmpeg -> (B, 3, F, H, W)
         video_tensor = load_video_frames(video_path, info.height, info.width, info.num_frames)
         video_latent = self.vae_encoder.encode(video_tensor)
+        mx.synchronize()
         if self.low_memory:
             del video_tensor
             aggressive_cleanup()
 
-        # Encode audio if present
         audio_latent: mx.array | None = None
         if info.has_audio:
             assert self.audio_encoder is not None
@@ -131,11 +167,10 @@ class RetakePipeline(TextToVideoPipeline):
                     aggressive_cleanup()
 
         if audio_latent is None:
-            # Create silence audio latent
             audio_T = compute_audio_token_count(info.num_frames)
             audio_latent = mx.zeros((1, 8, audio_T, 16), dtype=mx.bfloat16)
 
-        # Free encoders to save memory
+        # Free encoders before text encoding
         if self.low_memory:
             self.vae_encoder = None
             self.audio_encoder = None
@@ -153,6 +188,9 @@ class RetakePipeline(TextToVideoPipeline):
             num_frames=info.num_frames,
             seed=seed,
             num_steps=num_steps,
+            cfg_scale=cfg_scale,
+            stg_scale=stg_scale,
+            regenerate_audio=regenerate_audio,
         )
 
     def retake(
@@ -166,7 +204,10 @@ class RetakePipeline(TextToVideoPipeline):
         width: int = 704,
         num_frames: int = 97,
         seed: int = 42,
-        num_steps: int | None = None,
+        num_steps: int = 30,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
+        stg_scale: float = DEFAULT_STG_SCALE,
+        regenerate_audio: bool = True,
     ) -> tuple[mx.array, mx.array]:
         """Regenerate a time segment of a video.
 
@@ -174,18 +215,52 @@ class RetakePipeline(TextToVideoPipeline):
             prompt: Text prompt for the regenerated segment.
             source_video_latent: (B, C, F, H, W) source video latent.
             source_audio_latent: (B, 8, T, 16) source audio latent.
-            start_frame: First frame to regenerate (inclusive, in latent space).
-            end_frame: Last frame to regenerate (exclusive, in latent space).
+            start_frame: First latent frame to regenerate (inclusive).
+            end_frame: Last latent frame to regenerate (exclusive).
             height: Video height.
             width: Video width.
-            num_frames: Total number of frames.
+            num_frames: Total number of pixel frames.
             seed: Random seed.
-            num_steps: Number of denoising steps.
+            num_steps: Number of denoising steps (default: 30).
+            cfg_scale: CFG guidance scale (default: 3.0).
+            stg_scale: STG guidance scale (default: 0.0).
+            regenerate_audio: If True, regenerate audio in the retake region.
 
         Returns:
             Tuple of (video_latent, audio_latent).
         """
-        self.load()
+        # --- Text encoding (positive + negative for CFG) ---
+        if self.text_encoder is None or self.feature_extractor is None:
+            model_dir = self.model_dir
+            if self.text_encoder is None:
+                from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+
+                self.text_encoder = GemmaLanguageModel()
+                self.text_encoder.load(self._gemma_model_id)
+                aggressive_cleanup()
+            if self.feature_extractor is None:
+                from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
+
+                self.feature_extractor = GemmaFeaturesExtractorV2()
+                conn_weights = load_split_safetensors(model_dir / "connector.safetensors", prefix="connector.")
+                self.feature_extractor.connector.load_weights(list(conn_weights.items()))
+                aggressive_cleanup()
+
+        video_embeds, audio_embeds = self._encode_text(prompt)
+
+        from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
+
+        neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
+        mx.synchronize()
+
+        # Free text encoder before loading DiT
+        self.text_encoder = None
+        self.feature_extractor = None
+        aggressive_cleanup()
+
+        # --- Load dev transformer ---
+        if self.dit is None:
+            self.dit = self._load_dev_transformer()
         assert self.dit is not None
 
         F, H, W = compute_video_latent_shape(num_frames, height, width)
@@ -195,11 +270,11 @@ class RetakePipeline(TextToVideoPipeline):
         source_tokens, _ = self.video_patchifier.patchify(source_video_latent)
         audio_tokens, audio_T = self.audio_patchifier.patchify(source_audio_latent)
 
-        # Compute positions for RoPE
+        # Compute positions
         video_positions = compute_video_positions(F, H, W)
         audio_positions = compute_audio_positions(audio_T)
 
-        # Create video state with temporal mask
+        # Create video state with temporal mask (1 = regenerate, 0 = preserve)
         region = TemporalRegionMask(start_frame, end_frame)
         denoise_mask = region.create_mask(F, tokens_per_frame)
 
@@ -211,15 +286,20 @@ class RetakePipeline(TextToVideoPipeline):
         )
         video_state = noise_latent_state(video_state, sigma=1.0, seed=seed)
 
-        # Audio state: apply same temporal mask to audio
-        audio_tokens_per_video_frame = audio_T / F
-        audio_start = round(start_frame * audio_tokens_per_video_frame)
-        audio_end = round(end_frame * audio_tokens_per_video_frame)
+        # Audio state
+        if regenerate_audio:
+            # Apply same temporal mask to audio
+            audio_tokens_per_video_frame = audio_T / F
+            audio_start = round(start_frame * audio_tokens_per_video_frame)
+            audio_end = round(end_frame * audio_tokens_per_video_frame)
 
-        audio_mask = mx.zeros((1, audio_T, 1), dtype=mx.bfloat16)
-        audio_mask = audio_mask.at[:, audio_start:audio_end, :].add(
-            mx.ones((1, audio_end - audio_start, 1), dtype=mx.bfloat16)
-        )
+            audio_mask = mx.zeros((1, audio_T, 1), dtype=mx.bfloat16)
+            audio_mask = audio_mask.at[:, audio_start:audio_end, :].add(
+                mx.ones((1, audio_end - audio_start, 1), dtype=mx.bfloat16)
+            )
+        else:
+            # Preserve all audio (mask=0)
+            audio_mask = mx.zeros((1, audio_T, 1), dtype=mx.bfloat16)
 
         audio_state = LatentState(
             latent=audio_tokens,
@@ -229,21 +309,38 @@ class RetakePipeline(TextToVideoPipeline):
         )
         audio_state = noise_latent_state(audio_state, sigma=1.0, seed=seed + 1)
 
-        # Encode text
-        video_embeds, audio_embeds = self._encode_text(prompt)
-        if self.low_memory:
-            aggressive_cleanup()
-
-        # Denoise
-        sigmas = DISTILLED_SIGMAS[: num_steps + 1] if num_steps else DISTILLED_SIGMAS
+        # --- Guided denoising ---
+        num_tokens = F * H * W
+        sigmas = ltx2_schedule(num_steps, num_tokens=num_tokens)
         x0_model = X0Model(self.dit)
 
-        output = denoise_loop(
+        # Build guidance (ref LTX_2_3_PARAMS)
+        video_gp = MultiModalGuiderParams(
+            cfg_scale=cfg_scale,
+            stg_scale=stg_scale,
+            rescale_scale=0.7,
+            modality_scale=3.0,
+            stg_blocks=[28],
+        )
+        audio_gp = MultiModalGuiderParams(
+            cfg_scale=7.0,
+            stg_scale=stg_scale,
+            rescale_scale=0.7,
+            modality_scale=3.0,
+            stg_blocks=[28],
+        )
+
+        video_factory = create_multimodal_guider_factory(video_gp, negative_context=neg_video_embeds)
+        audio_factory = create_multimodal_guider_factory(audio_gp, negative_context=neg_audio_embeds)
+
+        output = guided_denoise_loop(
             model=x0_model,
             video_state=video_state,
             audio_state=audio_state,
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
+            video_guider_factory=video_factory,
+            audio_guider_factory=audio_factory,
             sigmas=sigmas,
         )
         if self.low_memory:
