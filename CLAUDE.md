@@ -349,15 +349,15 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 | Command | Pipeline | Description |
 |---------|----------|-------------|
 | `generate` | T2V / I2V / Two-stage | One-stage, two-stage (`--two-stage` Euler, `--hq` res_2s), or I2V (`--image`) |
+| `a2v` | Audio-to-video | Two-stage audio-conditioned generation (`--hq` for res_2s) |
 | `keyframe` | Keyframe interpolation | Two-stage interpolation between start/end frames |
 | `ic-lora` | IC-LoRA | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
-| `retake` | Retake | Regenerate a time segment of an existing video |
-| `extend` | Extend | Add frames before or after an existing video |
-| `a2v` | Audio-to-video | Two-stage audio-conditioned generation |
+| `retake` | Retake | Regenerate a time segment of an existing video (dev model + CFG) |
+| `extend` | Extend | Add frames before or after an existing video (dev model + CFG) |
 | `enhance` | Prompt enhancement | Enhance a text prompt using Gemma (no video generation) |
 | `info` | Model info | Show model configuration and memory estimates |
 
-Common flags: `--model`, `--prompt`, `--output`, `--height`, `--width`, `--frames`, `--seed`, `--steps`, `--cfg-scale`, `--stg-scale`, `--enhance-prompt`.
+All pipelines except one-stage T2V/I2V use the dev model with CFG guidance. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet`.
 
 ### IC-LoRA Example
 
@@ -398,7 +398,39 @@ ltx-2-mlx generate \
   --two-stage --image photo.jpg -o output.mp4
 ```
 
-Flags: `--two-stage` (Euler), `--hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--stage1-steps` (default 20), `--stage2-steps` (default 3), `--image`.
+Flags: `--two-stage` (Euler), `--hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3), `--image`.
+
+### Audio-to-Video Example
+
+```bash
+# A2V with reference image
+ltx-2-mlx a2v \
+  --prompt "a singer performing" \
+  --audio music.wav --image photo.jpg -o output.mp4
+
+# A2V HQ (res_2s sampler)
+ltx-2-mlx a2v \
+  --prompt "a singer performing" \
+  --audio music.wav --hq -o output.mp4
+```
+
+Flags: `--audio` (required), `--image` (optional I2V), `--hq` (res_2s), `--cfg-scale`, `--stg-scale`, `--stage1-steps` (default 30 standard, 15 HQ), `--fps`.
+
+### Retake / Extend Example
+
+```bash
+# Retake: regenerate latent frames 2-5
+ltx-2-mlx retake \
+  --prompt "a different action" \
+  --video source.mp4 --start 2 --end 5 -o retake.mp4
+
+# Extend: add 4 latent frames after
+ltx-2-mlx extend \
+  --prompt "continue the scene" \
+  --video source.mp4 --extend-frames 4 -o extended.mp4
+```
+
+Flags: `--steps` (default 30), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--no-regen-audio` (retake only).
 
 ---
 
@@ -413,9 +445,12 @@ The non-distilled (dev) model uses multi-modal guidance with up to 4 forward pas
 | Perturbed | STG (spatio-temporal guidance) | `stg_scale != 0.0` |
 | Modality-isolated | Cross-modal guidance | `modality_scale != 1.0` |
 
-Default reference params for keyframe: `cfg_scale=3.0`, `stg_scale=1.0`, `stg_blocks=[28]`, `rescale_scale=0.7`, `modality_scale=3.0`.
+Default reference params (LTX_2_3_PARAMS): `cfg_scale=3.0`, `stg_scale=1.0`, `stg_blocks=[28]`, `rescale_scale=0.7`, `modality_scale=3.0`. Audio: `cfg_scale=7.0`.
+HQ params (LTX_2_3_HQ_PARAMS): `cfg_scale=3.0`, `stg_scale=0.0`, `stg_blocks=[]`, `rescale_scale=0.45`. Audio: `cfg_scale=7.0`, `rescale_scale=1.0`.
 
-**Memory impact**: Each extra pass doubles/triples/quadruples memory. On 32GB Mac with dev model at 480x704: CFG-only supports 33 frames, full guidance (4 passes) supports ~17 frames.
+**Default `stg_scale=0.0`**: STG requires a 3rd forward pass per step. On 32GB Mac, this causes OOM for videos longer than ~33 frames at 480x704. All pipelines default to `stg_scale=0.0` (CFG-only) for 32GB compatibility. Use `--stg-scale 1.0` for short videos only.
+
+**Memory impact**: Each extra pass doubles/triples/quadruples memory. On 32GB Mac with dev model at 480x704: CFG-only supports ~97 frames at half-res (two-stage), full guidance (4 passes) supports ~17 frames.
 
 **STG perturbation masks**: Self-attention masks are 4D `(B,1,1,1)` for use inside attention where tensors are `(B,H,N,D)`. Cross-modal masks (A2V/V2A) are 3D `(B,1,1)` for use outside attention where outputs are `(B,N,dim)`. Mixing these up causes silent shape corruption via broadcasting.
 
@@ -429,7 +464,7 @@ Two-stage pipeline requiring the dev (non-distilled) model + CFG. The distilled 
 1. Compute half-res latent dims: `H_half = (height//2) // 32`, `W_half = (width//2) // 32`
 2. Encode keyframes at VAE-compatible resolution: `H_half * 32` x `W_half * 32`
 3. Create empty LatentState → apply `VideoConditionByKeyframeIndex` → noise (order matters!)
-4. Denoise with dev model + CFG (20 steps, dynamic schedule)
+4. Denoise with dev model + CFG (30 steps, dynamic schedule)
 
 ### Stage 2: Upscale + Refine
 1. Denormalize latent → neural upsampler (2x spatial) → re-normalize (using VAE encoder stats)
@@ -453,7 +488,7 @@ Two-stage pipeline for higher-resolution generation. Requires the dev model + di
 - **Stage 1**: Dev model + CFG guidance at half resolution
   - `--two-stage`: Euler sampler (`guided_denoise_loop`)
   - `--hq`: res_2s second-order sampler (`res2s_denoise_loop` with guidance)
-  - Dynamic sigma schedule via `ltx2_schedule` (default 20 steps)
+  - Dynamic sigma schedule via `ltx2_schedule` (default 30 steps standard, 15 HQ)
   - Optional I2V conditioning (re-encoded at half-res)
 - **Stage 2**: Dev + distilled LoRA fused, simple Euler (no CFG)
   - `STAGE_2_SIGMAS` (default 3 steps)

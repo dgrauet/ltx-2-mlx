@@ -154,38 +154,47 @@ ltx-2-mlx generate   T2V / I2V / two-stage / HQ generation
   --hq                Enable HQ pipeline (res_2s sampler)
   --cfg-scale         CFG guidance scale (default: 3.0)
   --stg-scale         STG guidance scale (default: 0.0)
-  --stage1-steps      Stage 1 steps (default: 20)
+  --stage1-steps      Stage 1 steps (default: 30 standard, 15 HQ)
   --stage2-steps      Stage 2 steps (default: 3)
   --enhance-prompt    Enhance prompt with Gemma before generation
   --quiet, -q         Suppress progress output
 
-ltx-2-mlx a2v        Audio-to-Video generation
+ltx-2-mlx a2v        Audio-to-Video (two-stage, dev model + CFG)
   --audio, -a         Input audio file (required)
+  --image, -i         Reference image for I2V (optional)
+  --hq                HQ mode (res_2s sampler for stage 1)
   --fps               Frame rate (default: 24)
   --audio-start       Audio start time in seconds (default: 0)
-  --stage1-steps      Stage 1 denoising steps
-  --stage2-steps      Stage 2 denoising steps
+  --cfg-scale         CFG guidance scale (default: 3.0)
+  --stg-scale         STG guidance scale (default: 0.0)
+  --stage1-steps      Stage 1 steps (default: 30 standard, 15 HQ)
+  --stage2-steps      Stage 2 steps (default: 3)
 
-ltx-2-mlx retake     Regenerate a time segment
+ltx-2-mlx retake     Regenerate a time segment (dev model + CFG)
   --video, -v         Source video file (required)
   --start             Start latent frame index (required)
   --end               End latent frame index (required)
-  --steps             Denoising steps (default: 8)
+  --steps             Denoising steps (default: 30)
+  --cfg-scale         CFG guidance scale (default: 3.0)
+  --stg-scale         STG guidance scale (default: 0.0)
+  --no-regen-audio    Preserve original audio
 
-ltx-2-mlx extend     Add frames before/after
+ltx-2-mlx extend     Add frames before/after (dev model + CFG)
   --video, -v         Source video file (required)
   --extend-frames     Number of latent frames to add (required)
   --direction         "before" or "after" (default: after)
-  --steps             Denoising steps (default: 8)
+  --steps             Denoising steps (default: 30)
+  --cfg-scale         CFG guidance scale (default: 3.0)
+  --stg-scale         STG guidance scale (default: 0.0)
 
-ltx-2-mlx keyframe   Keyframe interpolation
+ltx-2-mlx keyframe   Keyframe interpolation (two-stage, dev model + CFG)
   --start             Start keyframe image (required)
   --end               End keyframe image (required)
   --fps               Frame rate (default: 24)
   --cfg-scale         CFG scale (default: 3.0)
-  --stg-scale         STG scale (default: 1.0)
-  --stage1-steps      Stage 1 denoising steps
-  --stage2-steps      Stage 2 denoising steps
+  --stg-scale         STG scale (default: 0.0)
+  --stage1-steps      Stage 1 steps (default: 30)
+  --stage2-steps      Stage 2 steps (default: 3)
 
 ltx-2-mlx enhance    Prompt enhancement (no generation)
   --mode              "t2v" or "i2v" (default: t2v)
