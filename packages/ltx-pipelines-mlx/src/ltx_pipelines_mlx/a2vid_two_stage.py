@@ -20,10 +20,17 @@ from ltx_core_mlx.components.guiders import (
     create_multimodal_guider_factory,
 )
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
-from ltx_core_mlx.conditioning.types.latent_cond import LatentState, create_initial_state, noise_latent_state
+from ltx_core_mlx.conditioning.types.latent_cond import (
+    LatentState,
+    VideoConditionByLatentIndex,
+    apply_conditioning,
+    create_initial_state,
+    noise_latent_state,
+)
 from ltx_core_mlx.model.audio_vae import AudioProcessor, AudioVAEEncoder, encode_audio
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.audio import load_audio
+from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import load_split_safetensors, remap_audio_vae_keys
@@ -105,6 +112,7 @@ class AudioToVideoPipeline(TwoStagePipeline):
         stage2_steps: int | None = None,
         cfg_scale: float = DEFAULT_CFG_SCALE,
         stg_scale: float = 0.0,
+        image: str | None = None,
         audio_start_time: float = 0.0,
         audio_max_duration: float | None = None,
     ) -> str:
@@ -126,6 +134,7 @@ class AudioToVideoPipeline(TwoStagePipeline):
             stage2_steps: Stage 2 denoising steps.
             cfg_scale: CFG guidance scale for stage 1 (default: 3.0).
             stg_scale: STG guidance scale for stage 1 (default: 0.0).
+            image: Optional reference image for I2V conditioning (first frame).
             audio_start_time: Start time in seconds for audio.
             audio_max_duration: Max audio duration.
 
@@ -221,6 +230,28 @@ class AudioToVideoPipeline(TwoStagePipeline):
 
         video_state_1 = create_initial_state(video_shape, seed, positions=video_positions_1)
 
+        # I2V conditioning at half resolution
+        enc_h_half = H_half * 32
+        enc_w_half = W_half * 32
+        conditionings_1: list[VideoConditionByLatentIndex] = []
+        if image is not None:
+            img_tensor = prepare_image_for_encoding(image, enc_h_half, enc_w_half)
+            img_tensor = img_tensor[:, :, None, :, :]
+            ref_latent = self.vae_encoder.encode(img_tensor)
+            ref_tokens = ref_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
+            conditionings_1.append(
+                VideoConditionByLatentIndex(
+                    frame_indices=[0],
+                    clean_latent=ref_tokens,
+                    strength=1.0,
+                )
+            )
+
+        if conditionings_1:
+            video_state_1 = apply_conditioning(video_state_1, conditionings_1, (F, H_half, W_half))
+            # Re-noise after conditioning so preserved frames keep clean values
+            video_state_1 = noise_latent_state(video_state_1, sigma=1.0, seed=seed)
+
         # Audio frozen in Stage 1 (denoise_mask=0 = preserve)
         audio_state_1 = LatentState(
             latent=audio_tokens,
@@ -273,6 +304,23 @@ class AudioToVideoPipeline(TwoStagePipeline):
         H_full = H_half * 2
         W_full = W_half * 2
 
+        # I2V conditioning at full resolution for Stage 2
+        conditionings_2: list[VideoConditionByLatentIndex] = []
+        if image is not None:
+            enc_h_full = H_full * 32
+            enc_w_full = W_full * 32
+            img_tensor = prepare_image_for_encoding(image, enc_h_full, enc_w_full)
+            img_tensor = img_tensor[:, :, None, :, :]
+            ref_latent = self.vae_encoder.encode(img_tensor)
+            ref_tokens = ref_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
+            conditionings_2.append(
+                VideoConditionByLatentIndex(
+                    frame_indices=[0],
+                    clean_latent=ref_tokens,
+                    strength=1.0,
+                )
+            )
+
         # Free VAE encoder + upsampler before Stage 2
         if self.low_memory:
             self.vae_encoder = None
@@ -297,6 +345,9 @@ class AudioToVideoPipeline(TwoStagePipeline):
             denoise_mask=mx.ones((1, video_tokens.shape[1], 1), dtype=mx.bfloat16),
             positions=video_positions_2,
         )
+
+        if conditionings_2:
+            video_state_2 = apply_conditioning(video_state_2, conditionings_2, (F, H_full, W_full))
 
         # Audio gets noised and refined in Stage 2
         audio_state_2 = LatentState(

@@ -106,6 +106,7 @@ examples:
     a2v.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps (default: 3)")
     a2v.add_argument("--cfg-scale", type=float, default=3.0, help="CFG guidance scale (default: 3.0)")
     a2v.add_argument("--stg-scale", type=float, default=0.0, help="STG guidance scale (default: 0.0)")
+    a2v.add_argument("--image", "-i", default=None, help="Reference image for I2V conditioning (optional)")
 
     # --- retake ---
     ret = sub.add_parser("retake", help="Regenerate a time segment of an existing video")
@@ -335,6 +336,7 @@ def _cmd_a2v(args: argparse.Namespace) -> None:
         stage2_steps=args.stage2_steps,
         cfg_scale=args.cfg_scale,
         stg_scale=args.stg_scale,
+        image=args.image,
         audio_start_time=args.audio_start,
     )
 
