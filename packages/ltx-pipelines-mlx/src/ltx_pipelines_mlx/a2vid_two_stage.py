@@ -98,6 +98,38 @@ class AudioToVideoPipeline(TwoStagePipeline):
         self.audio_processor = AudioProcessor()
         aggressive_cleanup()
 
+    def _denoise_stage1(
+        self,
+        x0_model: X0Model,
+        video_state: LatentState,
+        audio_state: LatentState,
+        video_embeds: mx.array,
+        audio_embeds: mx.array,
+        neg_video_embeds: mx.array,
+        neg_audio_embeds: mx.array,
+        sigmas: list[float],
+        cfg_scale: float = 3.0,
+        stg_scale: float = 0.0,
+    ) -> object:
+        """Run Stage 1 denoising with Euler + CFG. Override for HQ (res2s)."""
+        # Video gets CFG, audio doesn't (frozen)
+        video_gp = MultiModalGuiderParams(cfg_scale=cfg_scale, stg_scale=stg_scale)
+        audio_gp = MultiModalGuiderParams()
+
+        video_factory = create_multimodal_guider_factory(video_gp, negative_context=neg_video_embeds)
+        audio_factory = create_multimodal_guider_factory(audio_gp, negative_context=neg_audio_embeds)
+
+        return guided_denoise_loop(
+            model=x0_model,
+            video_state=video_state,
+            audio_state=audio_state,
+            video_text_embeds=video_embeds,
+            audio_text_embeds=audio_embeds,
+            video_guider_factory=video_factory,
+            audio_guider_factory=audio_factory,
+            sigmas=sigmas,
+        )
+
     def generate_and_save(
         self,
         prompt: str,
@@ -260,27 +292,22 @@ class AudioToVideoPipeline(TwoStagePipeline):
             positions=audio_positions,
         )
 
-        # Stage 1 sigma schedule (dynamic for dev model)
+        # Stage 1 denoising
         num_tokens = F * H_half * W_half
         sigmas_1 = ltx2_schedule(stage1_steps, num_tokens=num_tokens)
         x0_model = X0Model(self.dit)
 
-        # Build guidance — video gets CFG, audio doesn't (frozen)
-        video_gp = MultiModalGuiderParams(cfg_scale=cfg_scale, stg_scale=stg_scale)
-        audio_gp = MultiModalGuiderParams()
-
-        video_factory = create_multimodal_guider_factory(video_gp, negative_context=neg_video_embeds)
-        audio_factory = create_multimodal_guider_factory(audio_gp, negative_context=neg_audio_embeds)
-
-        output_1 = guided_denoise_loop(
-            model=x0_model,
+        output_1 = self._denoise_stage1(
+            x0_model=x0_model,
             video_state=video_state_1,
             audio_state=audio_state_1,
-            video_text_embeds=video_embeds,
-            audio_text_embeds=audio_embeds,
-            video_guider_factory=video_factory,
-            audio_guider_factory=audio_factory,
+            video_embeds=video_embeds,
+            audio_embeds=audio_embeds,
+            neg_video_embeds=neg_video_embeds,
+            neg_audio_embeds=neg_audio_embeds,
             sigmas=sigmas_1,
+            cfg_scale=cfg_scale,
+            stg_scale=stg_scale,
         )
         if self.low_memory:
             aggressive_cleanup()

@@ -107,6 +107,7 @@ examples:
     a2v.add_argument("--cfg-scale", type=float, default=3.0, help="CFG guidance scale (default: 3.0)")
     a2v.add_argument("--stg-scale", type=float, default=0.0, help="STG guidance scale (default: 0.0)")
     a2v.add_argument("--image", "-i", default=None, help="Reference image for I2V conditioning (optional)")
+    a2v.add_argument("--hq", action="store_true", help="HQ mode: use res_2s sampler for stage 1")
 
     # --- retake ---
     ret = sub.add_parser("retake", help="Regenerate a time segment of an existing video")
@@ -312,17 +313,22 @@ def _cmd_a2v(args: argparse.Namespace) -> None:
     """Generate video from audio + text prompt."""
     t0 = time.time()
 
-    from ltx_pipelines_mlx.a2vid_two_stage import AudioToVideoPipeline
+    if args.hq:
+        from ltx_pipelines_mlx.a2vid_two_stage_hq import AudioToVideoHQPipeline as PipeClass
+
+        mode_name = "Audio-to-Video HQ (res_2s + CFG)"
+    else:
+        from ltx_pipelines_mlx.a2vid_two_stage import AudioToVideoPipeline as PipeClass
+
+        mode_name = "Audio-to-Video (Euler + CFG)"
 
     if not args.quiet:
-        print("Mode: Audio-to-Video")
+        print(f"Mode: {mode_name}")
         print(f"Audio: {args.audio}")
-
-    if not args.quiet:
         print(f"  Model: {args.model}")
         print(f"  CFG scale: {args.cfg_scale}")
 
-    pipe = AudioToVideoPipeline(model_dir=args.model, gemma_model_id=args.gemma)
+    pipe = PipeClass(model_dir=args.model, gemma_model_id=args.gemma)
     pipe.generate_and_save(
         prompt=args.prompt,
         output_path=args.output,
