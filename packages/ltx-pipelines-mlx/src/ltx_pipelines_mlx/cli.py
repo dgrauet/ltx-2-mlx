@@ -566,7 +566,9 @@ def _decode_and_save(
     from pathlib import Path
 
     from ltx_core_mlx.utils.memory import aggressive_cleanup
+    from ltx_core_mlx.utils.weights import load_split_safetensors, remap_audio_vae_keys
 
+    # Free DiT + text encoder to make room for decoders
     if hasattr(pipe, "low_memory") and pipe.low_memory:
         pipe.dit = None
         pipe.text_encoder = None
@@ -574,8 +576,30 @@ def _decode_and_save(
         pipe._loaded = False
         aggressive_cleanup()
 
-    assert pipe.audio_decoder is not None
-    assert pipe.vocoder is not None
+    model_dir = pipe.model_dir
+
+    # Load decoders on-demand if not already loaded
+    if pipe.audio_decoder is None:
+        from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
+
+        pipe.audio_decoder = AudioVAEDecoder()
+        audio_weights = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.decoder.")
+        all_audio = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.")
+        for k, v in all_audio.items():
+            if k.startswith("per_channel_statistics."):
+                audio_weights[k] = v
+        audio_weights = remap_audio_vae_keys(audio_weights)
+        pipe.audio_decoder.load_weights(list(audio_weights.items()))
+        aggressive_cleanup()
+
+    if pipe.vocoder is None:
+        from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
+
+        pipe.vocoder = VocoderWithBWE()
+        vocoder_weights = load_split_safetensors(model_dir / "vocoder.safetensors", prefix="vocoder.")
+        pipe.vocoder.load_weights(list(vocoder_weights.items()))
+        aggressive_cleanup()
+
     mel = pipe.audio_decoder.decode(audio_latent)
     waveform = pipe.vocoder(mel)
     aggressive_cleanup()
@@ -583,7 +607,14 @@ def _decode_and_save(
     audio_path = tempfile.mktemp(suffix=".wav")
     pipe._save_waveform(waveform, audio_path, sample_rate=48000)
 
-    assert pipe.vae_decoder is not None
+    if pipe.vae_decoder is None:
+        from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder
+
+        pipe.vae_decoder = VideoDecoder()
+        vae_weights = load_split_safetensors(model_dir / "vae_decoder.safetensors", prefix="vae_decoder.")
+        pipe.vae_decoder.load_weights(list(vae_weights.items()))
+        aggressive_cleanup()
+
     pipe.vae_decoder.decode_and_stream(video_latent, args.output, fps=24.0, audio_path=audio_path)
     Path(audio_path).unlink(missing_ok=True)
     aggressive_cleanup()
