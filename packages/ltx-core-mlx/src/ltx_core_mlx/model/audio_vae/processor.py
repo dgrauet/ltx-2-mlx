@@ -60,10 +60,12 @@ class AudioProcessor:
         # Slaney mel scale: linear below 1000 Hz, logarithmic above
         def hz_to_mel_slaney(f: np.ndarray) -> np.ndarray:
             f = np.asarray(f, dtype=np.float64)
+            # np.where evaluates both branches; clamp to avoid log(0) on the DC bin
+            f_safe = np.maximum(f, 1e-10)
             result = np.where(
                 f < 1000.0,
                 3.0 * f / 200.0,  # Linear region
-                15.0 + 27.0 * np.log(f / 1000.0) / np.log(6.4),  # Log region
+                15.0 + 27.0 * np.log(f_safe / 1000.0) / np.log(6.4),  # Log region
             )
             return result
 
