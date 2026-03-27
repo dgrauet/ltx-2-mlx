@@ -375,7 +375,7 @@ class VideoDecoder(nn.Module):
             "-",
         ]
         if audio_path:
-            cmd.extend(["-i", audio_path, "-c:a", "aac"])
+            cmd.extend(["-i", audio_path, "-c:a", "aac", "-shortest"])
         cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", output_path])
 
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)

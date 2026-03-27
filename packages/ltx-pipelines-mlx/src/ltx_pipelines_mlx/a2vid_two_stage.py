@@ -407,17 +407,22 @@ class AudioToVideoPipeline(TwoStagePipeline):
         self._load_decoders()
 
         # Use original audio for output (higher fidelity than VAE-decoded)
+        # Trim to exact video duration to ensure sync
         import tempfile
 
+        video_duration = num_frames / fps
         audio_data_48k = load_audio(
             audio_path,
             target_sample_rate=48000,
             start_time=audio_start_time,
-            max_duration=audio_max_duration,
+            max_duration=video_duration,
         )
         if audio_data_48k is not None:
+            # Trim to exact sample count for video duration
+            max_samples = int(video_duration * 48000)
+            waveform_48k = audio_data_48k.waveform[:, :, :max_samples]
             temp_audio = tempfile.mktemp(suffix=".wav")
-            self._save_waveform(audio_data_48k.waveform, temp_audio, sample_rate=48000)
+            self._save_waveform(waveform_48k, temp_audio, sample_rate=48000)
         else:
             temp_audio = None
 
