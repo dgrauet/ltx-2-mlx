@@ -248,16 +248,10 @@ class AudioToVideoPipeline(TwoStagePipeline):
         self.feature_extractor = None
         aggressive_cleanup()
 
-        # --- Load DiT + VAE encoder + upsampler ---
+        # --- Load DiT (defer VAE encoder + upsampler to after Stage 1 for memory) ---
         if self.dit is None:
             self.dit = self._load_dev_transformer()
-        self._load_vae_encoder()
-        if self.upsampler is None:
-            self._load_upsampler()
-
         assert self.dit is not None
-        assert self.vae_encoder is not None
-        assert self.upsampler is not None
 
         # --- Stage 1: Half resolution with CFG, audio frozen ---
         half_h, half_w = height // 2, width // 2
@@ -269,15 +263,18 @@ class AudioToVideoPipeline(TwoStagePipeline):
 
         video_state_1 = create_initial_state(video_shape, seed, positions=video_positions_1)
 
-        # I2V conditioning at half resolution
-        enc_h_half = H_half * 32
-        enc_w_half = W_half * 32
+        # I2V conditioning at half resolution (load VAE encoder on-demand, then free)
         conditionings_1: list[VideoConditionByLatentIndex] = []
         if image is not None:
+            self._load_vae_encoder()
+            assert self.vae_encoder is not None
+            enc_h_half = H_half * 32
+            enc_w_half = W_half * 32
             img_tensor = prepare_image_for_encoding(image, enc_h_half, enc_w_half)
             img_tensor = img_tensor[:, :, None, :, :]
             ref_latent = self.vae_encoder.encode(img_tensor)
             ref_tokens = ref_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
+            mx.synchronize()
             conditionings_1.append(
                 VideoConditionByLatentIndex(
                     frame_indices=[0],
@@ -285,6 +282,10 @@ class AudioToVideoPipeline(TwoStagePipeline):
                     strength=1.0,
                 )
             )
+            # Free VAE encoder before Stage 1 denoising to save memory
+            if self.low_memory:
+                self.vae_encoder = None
+                aggressive_cleanup()
 
         if conditionings_1:
             video_state_1 = apply_conditioning(video_state_1, conditionings_1, (F, H_half, W_half))
@@ -321,6 +322,13 @@ class AudioToVideoPipeline(TwoStagePipeline):
 
         # --- Fuse distilled LoRA for Stage 2 ---
         self._fuse_distilled_lora(self.dit)
+
+        # --- Load VAE encoder + upsampler for upscale (deferred from before Stage 1) ---
+        self._load_vae_encoder()
+        if self.upsampler is None:
+            self._load_upsampler()
+        assert self.vae_encoder is not None
+        assert self.upsampler is not None
 
         # --- Upscale with denormalize/renormalize ---
         video_half = self.video_patchifier.unpatchify(output_1.video_latent, (F, H_half, W_half))
