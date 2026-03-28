@@ -16,15 +16,13 @@ from ltx_core_mlx.components.guiders import (
 )
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState, noise_latent_state
-from ltx_core_mlx.model.audio_vae import AudioProcessor, AudioVAEEncoder, encode_audio
-from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
-from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
+from ltx_core_mlx.model.audio_vae import encode_audio
+from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.audio import load_audio
 from ltx_core_mlx.utils.ffmpeg import probe_video_info
 from ltx_core_mlx.utils.image import load_video_frames
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors, remap_audio_vae_keys
 from ltx_pipelines_mlx.scheduler import ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_one_stage import TextToVideoPipeline
 from ltx_pipelines_mlx.utils.samplers import guided_denoise_loop
@@ -55,51 +53,6 @@ class ExtendPipeline(TextToVideoPipeline):
     ):
         super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
         self._dev_transformer = dev_transformer
-        self.vae_encoder: VideoEncoder | None = None
-        self.audio_encoder: AudioVAEEncoder | None = None
-        self.audio_processor: AudioProcessor | None = None
-
-    def _load_dev_transformer(self) -> LTXModel:
-        """Load the dev (non-distilled) transformer weights."""
-        dev_path = self.model_dir / self._dev_transformer
-        if not dev_path.exists():
-            raise FileNotFoundError(
-                f"Dev transformer not found: {dev_path}\n"
-                "Extend requires the dev model for CFG guidance.\n"
-                "Use: --model dgrauet/ltx-2.3-mlx-q8"
-            )
-        dit = LTXModel()
-        weights = load_split_safetensors(dev_path, prefix="transformer.")
-        apply_quantization(dit, weights)
-        dit.load_weights(list(weights.items()))
-        aggressive_cleanup()
-        return dit
-
-    def _load_encoders(self) -> None:
-        """Load VAE encoder and audio encoder."""
-        if self.vae_encoder is None:
-            self.vae_encoder = VideoEncoder()
-            enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
-            enc_weights = {
-                k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
-                for k, v in enc_weights.items()
-            }
-            self.vae_encoder.load_weights(list(enc_weights.items()))
-            aggressive_cleanup()
-
-        if self.audio_encoder is None:
-            self.audio_encoder = AudioVAEEncoder()
-            encoder_weights = load_split_safetensors(
-                self.model_dir / "audio_vae.safetensors", prefix="audio_vae.encoder."
-            )
-            all_audio = load_split_safetensors(self.model_dir / "audio_vae.safetensors", prefix="audio_vae.")
-            for k, v in all_audio.items():
-                if k.startswith("per_channel_statistics."):
-                    encoder_weights[k] = v
-            encoder_weights = remap_audio_vae_keys(encoder_weights)
-            self.audio_encoder.load_weights(list(encoder_weights.items()))
-            self.audio_processor = AudioProcessor()
-            aggressive_cleanup()
 
     def extend_from_video(
         self,
@@ -128,7 +81,8 @@ class ExtendPipeline(TextToVideoPipeline):
             Tuple of (extended_video_latent, extended_audio_latent).
         """
         # --- Encode source video + audio ---
-        self._load_encoders()
+        self._load_vae_encoder()
+        self._load_audio_encoder()
         assert self.vae_encoder is not None
 
         video_path = str(video_path)
@@ -224,33 +178,7 @@ class ExtendPipeline(TextToVideoPipeline):
             Tuple of (extended_video_latent, extended_audio_latent).
         """
         # --- Text encoding (positive + negative for CFG) ---
-        if self.text_encoder is None or self.feature_extractor is None:
-            model_dir = self.model_dir
-            if self.text_encoder is None:
-                from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
-
-                self.text_encoder = GemmaLanguageModel()
-                self.text_encoder.load(self._gemma_model_id)
-                aggressive_cleanup()
-            if self.feature_extractor is None:
-                from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
-
-                self.feature_extractor = GemmaFeaturesExtractorV2()
-                conn_weights = load_split_safetensors(model_dir / "connector.safetensors", prefix="connector.")
-                self.feature_extractor.connector.load_weights(list(conn_weights.items()))
-                aggressive_cleanup()
-
-        video_embeds, audio_embeds = self._encode_text(prompt)
-
-        from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
-
-        neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
-        mx.synchronize()
-
-        # Free text encoder before loading DiT
-        self.text_encoder = None
-        self.feature_extractor = None
-        aggressive_cleanup()
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
 
         # --- Load dev transformer ---
         if self.dit is None:

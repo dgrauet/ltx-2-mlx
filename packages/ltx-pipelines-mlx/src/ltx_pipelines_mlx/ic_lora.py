@@ -122,15 +122,7 @@ class ICLoraPipeline(TextToVideoPipeline):
             aggressive_cleanup()
 
         # VAE encoder (for encoding control videos and I2V images)
-        if self.vae_encoder is None:
-            self.vae_encoder = VideoEncoder()
-            enc_weights = load_split_safetensors(model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
-            enc_weights = {
-                k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
-                for k, v in enc_weights.items()
-            }
-            self.vae_encoder.load_weights(list(enc_weights.items()))
-            aggressive_cleanup()
+        self._load_vae_encoder()
 
         # Upsampler (for Stage 2)
         if self.upsampler is None:
@@ -150,55 +142,6 @@ class ICLoraPipeline(TextToVideoPipeline):
             aggressive_cleanup()
 
         self._loaded = True
-
-    def _load_decoders(self) -> None:
-        """Load VAE decoder, audio decoder, and vocoder for output decoding."""
-        from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
-        from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
-        from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder
-
-        model_dir = self.model_dir
-
-        if self.vae_decoder is None:
-            self.vae_decoder = VideoDecoder()
-            vae_weights = load_split_safetensors(model_dir / "vae_decoder.safetensors", prefix="vae_decoder.")
-            self.vae_decoder.load_weights(list(vae_weights.items()))
-            aggressive_cleanup()
-
-        if self.audio_decoder is None:
-            self.audio_decoder = AudioVAEDecoder()
-            audio_weights = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.decoder.")
-            all_audio = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.")
-            for k, v in all_audio.items():
-                if k.startswith("per_channel_statistics."):
-                    audio_weights[k] = v
-            from ltx_core_mlx.utils.weights import remap_audio_vae_keys
-
-            audio_weights = remap_audio_vae_keys(audio_weights)
-            self.audio_decoder.load_weights(list(audio_weights.items()))
-            aggressive_cleanup()
-
-        if self.vocoder is None:
-            self.vocoder = VocoderWithBWE()
-            vocoder_weights = load_split_safetensors(model_dir / "vocoder.safetensors", prefix="vocoder.")
-            self.vocoder.load_weights(list(vocoder_weights.items()))
-            aggressive_cleanup()
-
-    def _load_text_encoder(self) -> None:
-        """Load Gemma text encoder and feature extractor connector."""
-        from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
-        from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
-
-        if self.text_encoder is None:
-            self.text_encoder = GemmaLanguageModel()
-            self.text_encoder.load(self._gemma_model_id)
-            aggressive_cleanup()
-
-        if self.feature_extractor is None:
-            self.feature_extractor = GemmaFeaturesExtractorV2()
-            connector_weights = load_split_safetensors(self.model_dir / "connector.safetensors", prefix="connector.")
-            self.feature_extractor.connector.load_weights(list(connector_weights.items()))
-            aggressive_cleanup()
 
     def _fuse_loras(self) -> None:
         """Fuse all LoRA weights into the transformer.
@@ -636,27 +579,7 @@ class ICLoraPipeline(TextToVideoPipeline):
         # Load decoders on-demand (not loaded during generate to save memory)
         self._load_decoders()
 
-        # Decode audio first (smaller)
-        assert self.audio_decoder is not None
-        assert self.vocoder is not None
-        mel = self.audio_decoder.decode(audio_latent)
-        waveform = self.vocoder(mel)
-        if self.low_memory:
-            aggressive_cleanup()
-
-        import tempfile
-
-        audio_path = tempfile.mktemp(suffix=".wav")
-        self._save_waveform(waveform, audio_path, sample_rate=48000)
-
-        # Decode video and stream to ffmpeg
-        assert self.vae_decoder is not None
-        self.vae_decoder.decode_and_stream(video_latent, output_path, fps=24.0, audio_path=audio_path)
-
-        Path(audio_path).unlink(missing_ok=True)
-        aggressive_cleanup()
-
-        return output_path
+        return self._decode_and_save_video(video_latent, audio_latent, output_path)
 
 
 def _resolve_lora_path(path: str) -> str:

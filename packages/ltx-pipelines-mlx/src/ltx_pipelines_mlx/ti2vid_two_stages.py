@@ -11,8 +11,6 @@ Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages.py
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import mlx.core as mx
 
 from ltx_core_mlx.components.guiders import (
@@ -32,11 +30,10 @@ from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
 from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
 from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
 from ltx_core_mlx.model.upsampler import LatentUpsampler
-from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
 from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
+from ltx_core_mlx.utils.weights import load_split_safetensors
 from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_one_stage import TextToVideoPipeline
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
@@ -89,23 +86,6 @@ class TwoStagePipeline(TextToVideoPipeline):
         self._distilled_lora = distilled_lora
         self._distilled_lora_strength = distilled_lora_strength
         self.upsampler: LatentUpsampler | None = None
-        self.vae_encoder: VideoEncoder | None = None
-
-    def _load_dev_transformer(self) -> LTXModel:
-        """Load the dev (non-distilled) transformer weights."""
-        dev_path = self.model_dir / self._dev_transformer
-        if not dev_path.exists():
-            raise FileNotFoundError(
-                f"Dev transformer not found: {dev_path}\n"
-                "Two-stage requires the dev model + distilled LoRA.\n"
-                "Use: --model dgrauet/ltx-2.3-mlx-q8"
-            )
-        dit = LTXModel()
-        weights = load_split_safetensors(dev_path, prefix="transformer.")
-        apply_quantization(dit, weights)
-        dit.load_weights(list(weights.items()))
-        aggressive_cleanup()
-        return dit
 
     def _fuse_distilled_lora(self, dit: LTXModel) -> None:
         """Fuse distilled LoRA weights into a loaded transformer in-place."""
@@ -130,19 +110,6 @@ class TwoStagePipeline(TextToVideoPipeline):
 
         fused = apply_loras(model_sd, [lora_with_strength])
         dit.load_weights(list(fused.sd.items()))
-        aggressive_cleanup()
-
-    def _load_vae_encoder(self) -> None:
-        """Load VAE encoder (for per-channel normalization stats + I2V encoding)."""
-        if self.vae_encoder is not None:
-            return
-        self.vae_encoder = VideoEncoder()
-        enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
-        enc_weights = {
-            k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
-            for k, v in enc_weights.items()
-        }
-        self.vae_encoder.load_weights(list(enc_weights.items()))
         aggressive_cleanup()
 
     def _load_upsampler(self, name: str = "spatial_upscaler_x2_v1_1") -> None:
@@ -171,23 +138,8 @@ class TwoStagePipeline(TextToVideoPipeline):
         if self._loaded:
             return
 
-        model_dir = self.model_dir
-
         # Text encoder + connector
-        if self.text_encoder is None:
-            from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
-
-            self.text_encoder = GemmaLanguageModel()
-            self.text_encoder.load(self._gemma_model_id)
-            aggressive_cleanup()
-
-        if self.feature_extractor is None:
-            from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
-
-            self.feature_extractor = GemmaFeaturesExtractorV2()
-            connector_weights = load_split_safetensors(model_dir / "connector.safetensors", prefix="connector.")
-            self.feature_extractor.connector.load_weights(list(connector_weights.items()))
-            aggressive_cleanup()
+        self._load_text_encoder()
 
         # DiT (dev model)
         if self.dit is None:
@@ -205,38 +157,6 @@ class TwoStagePipeline(TextToVideoPipeline):
             self._load_upsampler()
 
         self._loaded = True
-
-    def _load_decoders(self) -> None:
-        """Load decoders on-demand (VAE decoder, audio decoder, vocoder)."""
-        from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
-        from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
-        from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder
-        from ltx_core_mlx.utils.weights import remap_audio_vae_keys
-
-        model_dir = self.model_dir
-
-        if self.vae_decoder is None:
-            self.vae_decoder = VideoDecoder()
-            vae_weights = load_split_safetensors(model_dir / "vae_decoder.safetensors", prefix="vae_decoder.")
-            self.vae_decoder.load_weights(list(vae_weights.items()))
-            aggressive_cleanup()
-
-        if self.audio_decoder is None:
-            self.audio_decoder = AudioVAEDecoder()
-            audio_weights = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.decoder.")
-            all_audio = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.")
-            for k, v in all_audio.items():
-                if k.startswith("per_channel_statistics."):
-                    audio_weights[k] = v
-            audio_weights = remap_audio_vae_keys(audio_weights)
-            self.audio_decoder.load_weights(list(audio_weights.items()))
-            aggressive_cleanup()
-
-        if self.vocoder is None:
-            self.vocoder = VocoderWithBWE()
-            vocoder_weights = load_split_safetensors(model_dir / "vocoder.safetensors", prefix="vocoder.")
-            self.vocoder.load_weights(list(vocoder_weights.items()))
-            aggressive_cleanup()
 
     def generate_two_stage(
         self,
@@ -273,35 +193,7 @@ class TwoStagePipeline(TextToVideoPipeline):
             Tuple of (video_latent, audio_latent) at full resolution.
         """
         # --- Text encoding ---
-        if self.text_encoder is None or self.feature_extractor is None:
-            model_dir = self.model_dir
-            if self.text_encoder is None:
-                from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
-
-                self.text_encoder = GemmaLanguageModel()
-                self.text_encoder.load(self._gemma_model_id)
-                aggressive_cleanup()
-            if self.feature_extractor is None:
-                from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
-
-                self.feature_extractor = GemmaFeaturesExtractorV2()
-                conn_weights = load_split_safetensors(model_dir / "connector.safetensors", prefix="connector.")
-                self.feature_extractor.connector.load_weights(list(conn_weights.items()))
-                aggressive_cleanup()
-
-        video_embeds, audio_embeds = self._encode_text(prompt)
-
-        # Encode negative prompt for CFG
-        from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
-
-        neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
-
-        mx.eval(video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds)
-
-        # Free text encoder before loading heavy components
-        self.text_encoder = None
-        self.feature_extractor = None
-        aggressive_cleanup()
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
 
         # --- Load DiT + VAE encoder + upsampler ---
         if self.dit is None:
@@ -523,23 +415,4 @@ class TwoStagePipeline(TextToVideoPipeline):
         # Load decoders on-demand
         self._load_decoders()
 
-        # Decode audio first (smaller)
-        assert self.audio_decoder is not None
-        assert self.vocoder is not None
-        mel = self.audio_decoder.decode(audio_latent)
-        waveform = self.vocoder(mel)
-        if self.low_memory:
-            aggressive_cleanup()
-
-        import tempfile
-
-        audio_path = tempfile.mktemp(suffix=".wav")
-        self._save_waveform(waveform, audio_path, sample_rate=48000)
-
-        assert self.vae_decoder is not None
-        self.vae_decoder.decode_and_stream(video_latent, output_path, fps=24.0, audio_path=audio_path)
-
-        Path(audio_path).unlink(missing_ok=True)
-        aggressive_cleanup()
-
-        return output_path
+        return self._decode_and_save_video(video_latent, audio_latent, output_path)

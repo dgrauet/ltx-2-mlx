@@ -12,8 +12,6 @@ Ported from ltx-pipelines keyframe_interpolation.py
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import mlx.core as mx
 from PIL import Image
 
@@ -24,28 +22,14 @@ from ltx_core_mlx.components.guiders import (
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
 from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState, noise_latent_state
-from ltx_core_mlx.loader.fuse_loras import apply_loras
-from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
-from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
-from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
+from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
 from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS, ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_two_stages import TwoStagePipeline
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
-
-
-def _flatten_dict(d: dict, prefix: str, out: dict[str, mx.array]) -> None:
-    """Flatten a nested dict to dot-separated keys."""
-    for k, v in d.items():
-        full_key = f"{prefix}{k}" if prefix else k
-        if isinstance(v, dict):
-            _flatten_dict(v, f"{full_key}.", out)
-        else:
-            out[full_key] = v
 
 
 def _encode_keyframe(
@@ -72,31 +56,6 @@ def _encode_keyframe(
     # (1, 128, 1, H', W') -> (1, H'*W', 128) tokens
     tokens = latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
     return tokens
-
-
-def _remap_lora_keys(lora_sd: dict[str, mx.array]) -> dict[str, mx.array]:
-    """Remap LoRA keys from ComfyUI/diffusion_model format to MLX model format.
-
-    Applies the LTXV_LORA_COMFY_RENAMING_MAP replacements plus additional
-    MLX-specific key remapping:
-    - ``diffusion_model.`` → ```` (strip prefix)
-    - ``.to_out.0.`` → ``.to_out.`` (no Sequential index)
-    - ``.ff.net.0.proj.`` → ``.ff.proj_in.`` (MLX naming)
-    - ``.ff.net.2.`` → ``.ff.proj_out.`` (MLX naming)
-    - ``.linear_1.`` → ``.linear1.`` (MLX AdaLN naming)
-    - ``.linear_2.`` → ``.linear2.`` (MLX AdaLN naming)
-    """
-    remapped: dict[str, mx.array] = {}
-    for key, value in lora_sd.items():
-        new_key = LTXV_LORA_COMFY_RENAMING_MAP.apply_to_key(key)
-        # MLX timestep embedder uses linear1/linear2 (no underscore)
-        new_key = new_key.replace(".linear_1.", ".linear1.").replace(".linear_2.", ".linear2.")
-        # audio_ff uses same net.0.proj / net.2 pattern as ff, but underscore prefix
-        # prevents the .ff.net replacement from matching
-        new_key = new_key.replace("audio_ff.net.0.proj.", "audio_ff.proj_in.")
-        new_key = new_key.replace("audio_ff.net.2.", "audio_ff.proj_out.")
-        remapped[new_key] = value
-    return remapped
 
 
 class KeyframeInterpolationPipeline(TwoStagePipeline):
@@ -133,49 +92,6 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
         self._dev_transformer = dev_transformer
         self._distilled_lora = distilled_lora
         self._distilled_lora_strength = distilled_lora_strength
-
-    def _load_dev_transformer(self) -> LTXModel:
-        """Load the dev (non-distilled) transformer weights."""
-        assert self._dev_transformer is not None
-        dev_path = self.model_dir / self._dev_transformer
-        dit = LTXModel()
-        weights = load_split_safetensors(dev_path, prefix="transformer.")
-        apply_quantization(dit, weights)
-        dit.load_weights(list(weights.items()))
-        aggressive_cleanup()
-        return dit
-
-    def _fuse_distilled_lora(self, dit: LTXModel) -> None:
-        """Fuse distilled LoRA weights into a loaded transformer in-place."""
-        assert self._distilled_lora is not None
-        lora_path = self.model_dir / self._distilled_lora
-        lora_raw = dict(mx.load(str(lora_path)))
-        lora_remapped = _remap_lora_keys(lora_raw)
-
-        # Flatten model parameters to dot-separated keys using MLX tree_flatten
-        import mlx.utils
-
-        flat_params = mlx.utils.tree_flatten(dit.parameters())
-        flat_model = {k: v for k, v in flat_params if isinstance(v, mx.array)}
-
-        model_sd = StateDict(sd=flat_model, size=0, dtype=set())
-        lora_sd = StateDict(sd=lora_remapped, size=0, dtype=set())
-        lora_with_strength = LoraStateDictWithStrength(lora_sd, self._distilled_lora_strength)
-
-        fused = apply_loras(model_sd, [lora_with_strength])
-        dit.load_weights(list(fused.sd.items()))
-        aggressive_cleanup()
-
-    def _load_vae_encoder(self) -> VideoEncoder:
-        """Load VAE encoder for keyframe encoding."""
-        vae_encoder = VideoEncoder()
-        enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
-        enc_weights = {
-            k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
-            for k, v in enc_weights.items()
-        }
-        vae_encoder.load_weights(list(enc_weights.items()))
-        return vae_encoder
 
     def interpolate(
         self,
@@ -227,60 +143,39 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
         up_h, up_w = H_up * 32, W_up * 32
 
         # --- Encode keyframes at both resolutions ---
-        vae_encoder = self._load_vae_encoder()
+        self._load_vae_encoder()
+        assert self.vae_encoder is not None
 
         kf_tokens_half = []
         for img in keyframe_images:
-            tokens = _encode_keyframe(vae_encoder, img, enc_h_half, enc_w_half)
+            tokens = _encode_keyframe(self.vae_encoder, img, enc_h_half, enc_w_half)
             kf_tokens_half.append(tokens)
 
         kf_tokens_full = []
         for img in keyframe_images:
-            tokens = _encode_keyframe(vae_encoder, img, up_h, up_w)
+            tokens = _encode_keyframe(self.vae_encoder, img, up_h, up_w)
             kf_tokens_full.append(tokens)
 
         # Force evaluation before freeing encoder — ensures all Metal
         # operations using the encoder weights are complete
         mx.eval(*(kf_tokens_half + kf_tokens_full))
-        del vae_encoder
+        self.vae_encoder = None
         aggressive_cleanup()
 
         # --- Text encoding (load Gemma, encode, free) ---
         use_dev = self._dev_transformer is not None
-        if self.text_encoder is None or self.feature_extractor is None:
-            model_dir = self.model_dir
-            if self.text_encoder is None:
-                from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
-
-                self.text_encoder = GemmaLanguageModel()
-                self.text_encoder.load(self._gemma_model_id)
-                aggressive_cleanup()
-            if self.feature_extractor is None:
-                from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
-
-                self.feature_extractor = GemmaFeaturesExtractorV2()
-                conn_weights = load_split_safetensors(model_dir / "connector.safetensors", prefix="connector.")
-                self.feature_extractor.connector.load_weights(list(conn_weights.items()))
-                aggressive_cleanup()
-
-        video_embeds, audio_embeds = self._encode_text(prompt)
-
-        # Encode negative prompt for CFG (required for guidance to have effect)
-        neg_video_embeds = None
-        neg_audio_embeds = None
         if cfg_scale != 1.0:
-            from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
-
-            neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
-
-        mx.eval(video_embeds, audio_embeds)
-        if neg_video_embeds is not None:
-            mx.eval(neg_video_embeds, neg_audio_embeds)
-
-        # Free text encoder before loading transformer
-        self.text_encoder = None
-        self.feature_extractor = None
-        aggressive_cleanup()
+            video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
+        else:
+            self._load_text_encoder()
+            video_embeds, audio_embeds = self._encode_text(prompt)
+            neg_video_embeds = None
+            neg_audio_embeds = None
+            mx.eval(video_embeds, audio_embeds)
+            # Free text encoder before loading transformer
+            self.text_encoder = None
+            self.feature_extractor = None
+            aggressive_cleanup()
 
         # --- Load transformer (dev model required) + upsampler only ---
         # The distilled model hallucinates during keyframe interpolation.
@@ -405,16 +300,17 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
 
         # Load encoder stats for normalization (encoder itself was already freed)
         # unpatchify returns PyTorch layout (B, C, F, H, W), encoder stats expect MLX (B, F, H, W, C)
-        vae_encoder = self._load_vae_encoder()
+        self._load_vae_encoder()
+        assert self.vae_encoder is not None
         video_mlx = video_half.transpose(0, 2, 3, 4, 1)  # (B,C,F,H,W) -> (B,F,H,W,C)
-        video_denorm = vae_encoder.denormalize_latent(video_mlx)
+        video_denorm = self.vae_encoder.denormalize_latent(video_mlx)
         video_denorm = video_denorm.transpose(0, 4, 1, 2, 3)  # back to (B,C,F,H,W)
         video_upscaled = self.upsampler(video_denorm)
         video_up_mlx = video_upscaled.transpose(0, 2, 3, 4, 1)  # (B,C,F,H,W) -> (B,F,H,W,C)
-        video_up_mlx = vae_encoder.normalize_latent(video_up_mlx)
+        video_up_mlx = self.vae_encoder.normalize_latent(video_up_mlx)
         video_upscaled = video_up_mlx.transpose(0, 4, 1, 2, 3)  # back to (B,C,F,H,W)
         mx.async_eval(video_upscaled)
-        del vae_encoder
+        self.vae_encoder = None
         if self.low_memory:
             self.upsampler = None
             aggressive_cleanup()
@@ -553,52 +449,14 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
             self._loaded = False
             aggressive_cleanup()
 
-        # --- Decode phase: load decoders on demand ---
-        from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
-        from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
-        from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder
-        from ltx_core_mlx.utils.weights import remap_audio_vae_keys
+        # Load decoders on-demand
+        self._load_decoders()
 
-        model_dir = self.model_dir
+        result = self._decode_and_save_video(video_latent, audio_latent, output_path, fps=fps)
 
-        if self.audio_decoder is None:
-            self.audio_decoder = AudioVAEDecoder()
-            audio_weights = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.decoder.")
-            all_audio = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.")
-            for k, v in all_audio.items():
-                if k.startswith("per_channel_statistics."):
-                    audio_weights[k] = v
-            audio_weights = remap_audio_vae_keys(audio_weights)
-            self.audio_decoder.load_weights(list(audio_weights.items()))
-            aggressive_cleanup()
-
-        if self.vocoder is None:
-            self.vocoder = VocoderWithBWE()
-            vocoder_weights = load_split_safetensors(model_dir / "vocoder.safetensors", prefix="vocoder.")
-            self.vocoder.load_weights(list(vocoder_weights.items()))
-            aggressive_cleanup()
-
-        mel = self.audio_decoder.decode(audio_latent)
-        waveform = self.vocoder(mel)
         if self.low_memory:
             self.audio_decoder = None
             self.vocoder = None
             aggressive_cleanup()
 
-        import tempfile
-
-        audio_path = tempfile.mktemp(suffix=".wav")
-        self._save_waveform(waveform, audio_path, sample_rate=48000)
-
-        if self.vae_decoder is None:
-            self.vae_decoder = VideoDecoder()
-            vae_weights = load_split_safetensors(model_dir / "vae_decoder.safetensors", prefix="vae_decoder.")
-            self.vae_decoder.load_weights(list(vae_weights.items()))
-            aggressive_cleanup()
-
-        self.vae_decoder.decode_and_stream(video_latent, output_path, fps=fps, audio_path=audio_path)
-
-        Path(audio_path).unlink(missing_ok=True)
-        aggressive_cleanup()
-
-        return output_path
+        return result

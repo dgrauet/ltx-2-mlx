@@ -27,7 +27,6 @@ from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_core_mlx.utils.weights import load_split_safetensors
 from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TwoStagePipeline
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, res2s_denoise_loop
@@ -69,34 +68,7 @@ class TwoStageHQPipeline(TwoStagePipeline):
         for Stage 1 instead of Euler.
         """
         # --- Text encoding ---
-        if self.text_encoder is None or self.feature_extractor is None:
-            model_dir = self.model_dir
-            if self.text_encoder is None:
-                from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
-
-                self.text_encoder = GemmaLanguageModel()
-                self.text_encoder.load(self._gemma_model_id)
-                aggressive_cleanup()
-            if self.feature_extractor is None:
-                from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
-
-                self.feature_extractor = GemmaFeaturesExtractorV2()
-                conn_weights = load_split_safetensors(model_dir / "connector.safetensors", prefix="connector.")
-                self.feature_extractor.connector.load_weights(list(conn_weights.items()))
-                aggressive_cleanup()
-
-        video_embeds, audio_embeds = self._encode_text(prompt)
-
-        from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
-
-        neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
-
-        # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
-        mx.eval(video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds)
-
-        self.text_encoder = None
-        self.feature_extractor = None
-        aggressive_cleanup()
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
 
         # --- Load DiT + VAE encoder + upsampler ---
         if self.dit is None:

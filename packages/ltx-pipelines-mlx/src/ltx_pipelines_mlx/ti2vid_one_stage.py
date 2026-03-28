@@ -28,6 +28,7 @@ from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors, remap_audio_vae_keys
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS
+from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
 from ltx_pipelines_mlx.utils.samplers import denoise_loop
 
 
@@ -52,13 +53,18 @@ class TextToVideoPipeline:
         self.low_memory = low_memory
         self._loaded = False
 
+        self._dev_transformer: str | None = None
+
         # Components (lazy-loaded)
         self.dit: LTXModel | None = None
         self.vae_decoder: VideoDecoder | None = None
+        self.vae_encoder: VideoEncoder | None = None
         self.audio_decoder: AudioVAEDecoder | None = None
         self.vocoder: VocoderWithBWE | None = None
         self.text_encoder: GemmaLanguageModel | None = None
         self.feature_extractor: GemmaFeaturesExtractorV2 | None = None
+        self.audio_encoder: object | None = None
+        self.audio_processor: object | None = None
         self.video_patchifier = VideoLatentPatchifier()
         self.audio_patchifier = AudioPatchifier()
 
@@ -71,20 +77,12 @@ class TextToVideoPipeline:
         # Try HuggingFace download
         return Path(snapshot_download(model_dir))
 
-    def load(self) -> None:
-        """Load all model components from disk.
+    # ------------------------------------------------------------------
+    # Shared component loading methods (used by subclass pipelines)
+    # ------------------------------------------------------------------
 
-        In low_memory mode, components are loaded in stages to avoid
-        exceeding Metal memory. Gemma (7GB) + connector (6GB) are loaded
-        first for text encoding, then freed before loading the
-        transformer (10.5GB).
-        """
-        if self._loaded:
-            return
-
-        model_dir = self.model_dir
-
-        # Stage 1: Text encoder + connector (loaded first, freed after encode)
+    def _load_text_encoder(self) -> None:
+        """Load Gemma text encoder and feature extractor connector if not already loaded."""
         if self.text_encoder is None:
             self.text_encoder = GemmaLanguageModel()
             self.text_encoder.load(self._gemma_model_id)
@@ -92,28 +90,64 @@ class TextToVideoPipeline:
 
         if self.feature_extractor is None:
             self.feature_extractor = GemmaFeaturesExtractorV2()
-            connector_weights = load_split_safetensors(model_dir / "connector.safetensors", prefix="connector.")
+            connector_weights = load_split_safetensors(self.model_dir / "connector.safetensors", prefix="connector.")
             self.feature_extractor.connector.load_weights(list(connector_weights.items()))
             aggressive_cleanup()
 
-        # Stage 2: DiT (largest component — load after text encoding frees Gemma)
-        if self.dit is None:
-            if self.low_memory:
-                # Free text encoder before loading transformer to fit in RAM
-                self.text_encoder = None
-                aggressive_cleanup()
+    def _encode_text_with_negative(self, prompt: str) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+        """Load text encoder, encode prompt + negative prompt, materialize, free encoder.
 
-            self.dit = LTXModel()
-            transformer_path = model_dir / "transformer.safetensors"
-            if not transformer_path.exists():
-                # Fallback: try transformer-distilled.safetensors (mlx-forge dual-variant layout)
-                transformer_path = model_dir / "transformer-distilled.safetensors"
-            transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
-            apply_quantization(self.dit, transformer_weights)
-            self.dit.load_weights(list(transformer_weights.items()))
-            aggressive_cleanup()
+        Returns:
+            Tuple of (video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds).
+        """
+        self._load_text_encoder()
 
-        # Stage 3: VAE + audio (smaller components)
+        video_embeds, audio_embeds = self._encode_text(prompt)
+        neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
+        # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
+        mx.eval(video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds)
+
+        # Free text encoder before loading heavy components
+        self.text_encoder = None
+        self.feature_extractor = None
+        aggressive_cleanup()
+
+        return video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds
+
+    def _load_vae_encoder(self) -> None:
+        """Load VAE encoder with key remapping if not already loaded."""
+        if self.vae_encoder is not None:
+            return
+        self.vae_encoder = VideoEncoder()
+        enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
+        enc_weights = {
+            k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
+            for k, v in enc_weights.items()
+        }
+        self.vae_encoder.load_weights(list(enc_weights.items()))
+        aggressive_cleanup()
+
+    def _load_audio_encoder(self) -> None:
+        """Load audio VAE encoder + processor if not already loaded."""
+        if self.audio_encoder is not None:
+            return
+        from ltx_core_mlx.model.audio_vae import AudioProcessor, AudioVAEEncoder
+
+        self.audio_encoder = AudioVAEEncoder()
+        encoder_weights = load_split_safetensors(self.model_dir / "audio_vae.safetensors", prefix="audio_vae.encoder.")
+        all_audio = load_split_safetensors(self.model_dir / "audio_vae.safetensors", prefix="audio_vae.")
+        for k, v in all_audio.items():
+            if k.startswith("per_channel_statistics."):
+                encoder_weights[k] = v
+        encoder_weights = remap_audio_vae_keys(encoder_weights)
+        self.audio_encoder.load_weights(list(encoder_weights.items()))
+        self.audio_processor = AudioProcessor()
+        aggressive_cleanup()
+
+    def _load_decoders(self) -> None:
+        """Load VAE decoder, audio decoder, and vocoder if not already loaded."""
+        model_dir = self.model_dir
+
         if self.vae_decoder is None:
             self.vae_decoder = VideoDecoder()
             vae_weights = load_split_safetensors(model_dir / "vae_decoder.safetensors", prefix="vae_decoder.")
@@ -137,6 +171,111 @@ class TextToVideoPipeline:
             self.vocoder.load_weights(list(vocoder_weights.items()))
             aggressive_cleanup()
 
+    def _load_dev_transformer(self) -> LTXModel:
+        """Load the dev (non-distilled) transformer weights.
+
+        Requires ``self._dev_transformer`` to be set by the subclass.
+        """
+        assert self._dev_transformer is not None, "_dev_transformer must be set before calling _load_dev_transformer()"
+        dev_path = self.model_dir / self._dev_transformer
+        if not dev_path.exists():
+            raise FileNotFoundError(
+                f"Dev transformer not found: {dev_path}\n"
+                "This pipeline requires the dev model for CFG guidance.\n"
+                "Use: --model dgrauet/ltx-2.3-mlx-q8"
+            )
+        dit = LTXModel()
+        weights = load_split_safetensors(dev_path, prefix="transformer.")
+        apply_quantization(dit, weights)
+        dit.load_weights(list(weights.items()))
+        aggressive_cleanup()
+        return dit
+
+    def _decode_and_save_video(
+        self,
+        video_latent: mx.array,
+        audio_latent: mx.array,
+        output_path: str,
+        fps: float = 24.0,
+    ) -> str:
+        """Decode audio + video latents and save to file.
+
+        Decodes audio first (smaller), saves to temp WAV, then streams
+        video decode to ffmpeg with audio muxing.
+
+        Args:
+            video_latent: Video latent tensor.
+            audio_latent: Audio latent tensor.
+            output_path: Path to output video file.
+            fps: Frame rate.
+
+        Returns:
+            Path to the output video file.
+        """
+        import tempfile
+
+        # Decode audio first (smaller)
+        assert self.audio_decoder is not None
+        assert self.vocoder is not None
+        mel = self.audio_decoder.decode(audio_latent)
+        waveform = self.vocoder(mel)
+        if self.low_memory:
+            aggressive_cleanup()
+
+        # Save audio to temp file
+        audio_path = tempfile.mktemp(suffix=".wav")
+        self._save_waveform(waveform, audio_path, sample_rate=48000)
+
+        # Decode video and stream to ffmpeg
+        assert self.vae_decoder is not None
+        self.vae_decoder.decode_and_stream(video_latent, output_path, fps=fps, audio_path=audio_path)
+
+        # Cleanup temp audio
+        Path(audio_path).unlink(missing_ok=True)
+        aggressive_cleanup()
+
+        return output_path
+
+    # ------------------------------------------------------------------
+    # Original one-stage pipeline methods
+    # ------------------------------------------------------------------
+
+    def load(self) -> None:
+        """Load all model components from disk.
+
+        In low_memory mode, components are loaded in stages to avoid
+        exceeding Metal memory. Gemma (7GB) + connector (6GB) are loaded
+        first for text encoding, then freed before loading the
+        transformer (10.5GB).
+        """
+        if self._loaded:
+            return
+
+        model_dir = self.model_dir
+
+        # Stage 1: Text encoder + connector (loaded first, freed after encode)
+        self._load_text_encoder()
+
+        # Stage 2: DiT (largest component — load after text encoding frees Gemma)
+        if self.dit is None:
+            if self.low_memory:
+                # Free text encoder before loading transformer to fit in RAM
+                self.text_encoder = None
+                aggressive_cleanup()
+
+            self.dit = LTXModel()
+            transformer_path = model_dir / "transformer.safetensors"
+            if not transformer_path.exists():
+                # Fallback: try transformer-distilled.safetensors (mlx-forge dual-variant layout)
+                transformer_path = model_dir / "transformer-distilled.safetensors"
+            transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
+            apply_quantization(self.dit, transformer_weights)
+            self.dit.load_weights(list(transformer_weights.items()))
+            aggressive_cleanup()
+
+        # Stage 3: VAE + audio (smaller components)
+        self._load_decoders()
+
         self._loaded = True
 
     def _encode_text_and_load(self, prompt: str) -> tuple[mx.array, mx.array]:
@@ -146,17 +285,7 @@ class TextToVideoPipeline:
         transformer is loaded, keeping peak memory under control.
         """
         # Load text encoder + connector if not already loaded
-        if self.text_encoder is None or self.feature_extractor is None:
-            model_dir = self.model_dir
-            if self.text_encoder is None:
-                self.text_encoder = GemmaLanguageModel()
-                self.text_encoder.load(self._gemma_model_id)
-                aggressive_cleanup()
-            if self.feature_extractor is None:
-                self.feature_extractor = GemmaFeaturesExtractorV2()
-                connector_weights = load_split_safetensors(model_dir / "connector.safetensors", prefix="connector.")
-                self.feature_extractor.connector.load_weights(list(connector_weights.items()))
-                aggressive_cleanup()
+        self._load_text_encoder()
 
         # Encode text
         video_embeds, audio_embeds = self._encode_text(prompt)
@@ -287,29 +416,7 @@ class TextToVideoPipeline:
             self._loaded = False
             aggressive_cleanup()
 
-        # Decode audio first (smaller)
-        assert self.audio_decoder is not None
-        assert self.vocoder is not None
-        mel = self.audio_decoder.decode(audio_latent)
-        waveform = self.vocoder(mel)
-        if self.low_memory:
-            aggressive_cleanup()
-
-        # Save audio to temp file
-        import tempfile
-
-        audio_path = tempfile.mktemp(suffix=".wav")
-        self._save_waveform(waveform, audio_path, sample_rate=48000)
-
-        # Decode video and stream to ffmpeg
-        assert self.vae_decoder is not None
-        self.vae_decoder.decode_and_stream(video_latent, output_path, fps=24.0, audio_path=audio_path)
-
-        # Cleanup temp audio
-        Path(audio_path).unlink(missing_ok=True)
-        aggressive_cleanup()
-
-        return output_path
+        return self._decode_and_save_video(video_latent, audio_latent, output_path)
 
     @staticmethod
     def _save_waveform(waveform: mx.array, path: str, sample_rate: int = 48000) -> None:
@@ -355,31 +462,10 @@ class ImageToVideoPipeline(TextToVideoPipeline):
         low_memory: If True, aggressively free memory between stages.
     """
 
-    def __init__(
-        self,
-        model_dir: str,
-        gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
-        low_memory: bool = True,
-    ):
-        super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
-        self.vae_encoder: VideoEncoder | None = None
-
     def load(self) -> None:
         """Load all model components including VAE encoder."""
         super().load()
-
-        if self.vae_encoder is None:
-            from ltx_core_mlx.utils.weights import load_split_safetensors
-
-            self.vae_encoder = VideoEncoder()
-            enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
-            # Remap underscore-prefixed per-channel stats keys
-            enc_weights = {
-                k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
-                for k, v in enc_weights.items()
-            }
-            self.vae_encoder.load_weights(list(enc_weights.items()))
-            aggressive_cleanup()
+        self._load_vae_encoder()
 
     def generate_from_image(
         self,
@@ -409,15 +495,7 @@ class ImageToVideoPipeline(TextToVideoPipeline):
         # In low_memory mode, load and use each before loading the transformer.
 
         # Step 1: Load VAE encoder, encode image, free
-        if self.vae_encoder is None:
-            self.vae_encoder = VideoEncoder()
-            enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
-            enc_weights = {
-                k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
-                for k, v in enc_weights.items()
-            }
-            self.vae_encoder.load_weights(list(enc_weights.items()))
-            aggressive_cleanup()
+        self._load_vae_encoder()
 
         img_tensor = prepare_image_for_encoding(image, height, width)
         ref_latent = self.vae_encoder.encode(img_tensor[:, :, None, :, :])
@@ -508,22 +586,4 @@ class ImageToVideoPipeline(TextToVideoPipeline):
             num_steps=num_steps,
         )
 
-        # Decode and save (reuse parent logic)
-        assert self.audio_decoder is not None
-        assert self.vocoder is not None
-        mel = self.audio_decoder.decode(audio_latent)
-        waveform = self.vocoder(mel)
-        if self.low_memory:
-            aggressive_cleanup()
-
-        import tempfile
-
-        audio_path = tempfile.mktemp(suffix=".wav")
-        self._save_waveform(waveform, audio_path, sample_rate=48000)
-
-        assert self.vae_decoder is not None
-        self.vae_decoder.decode_and_stream(video_latent, output_path, fps=24.0, audio_path=audio_path)
-        Path(audio_path).unlink(missing_ok=True)
-        aggressive_cleanup()
-
-        return output_path
+        return self._decode_and_save_video(video_latent, audio_latent, output_path)
