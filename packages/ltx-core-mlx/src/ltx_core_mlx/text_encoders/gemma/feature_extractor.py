@@ -20,6 +20,22 @@ import mlx.nn as nn
 
 from ltx_core_mlx.text_encoders.gemma.embeddings_connector import Embeddings1DConnector
 
+# Threshold below which we force intermediate graph materialization to
+# avoid Metal GPU watchdog timeouts ("Impacting Interactivity").
+# Machines with more memory can handle the full graph in one pass.
+_LOW_MEMORY_THRESHOLD = 48 * 1024**3  # 48 GB
+
+
+def _materialize(*arrays: mx.array) -> None:
+    """Force MLX compute graph materialization on low-memory devices.
+
+    On devices with <= 48GB, breaks large compute graphs into smaller
+    Metal command buffers. On larger devices, this is a no-op.
+    """
+    if mx.device_info()["memory_size"] <= _LOW_MEMORY_THRESHOLD:
+        # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
+        mx.eval(*arrays)
+
 
 class TextEmbeddingProjection(nn.Module):
     """Projects concatenated multi-layer Gemma hidden states to video/audio dims.
@@ -64,10 +80,12 @@ class TextEmbeddingProjection(nn.Module):
         v_dim = self.video_aggregate_embed.weight.shape[0]
         v_scale = math.sqrt(v_dim / self.embedding_dim)
         video_embeds = self.video_aggregate_embed(hidden_states * v_scale)
+        _materialize(video_embeds)
 
         a_dim = self.audio_aggregate_embed.weight.shape[0]
         a_scale = math.sqrt(a_dim / self.embedding_dim)
         audio_embeds = self.audio_aggregate_embed(hidden_states * a_scale)
+        _materialize(audio_embeds)
 
         return video_embeds, audio_embeds
 
@@ -165,6 +183,7 @@ class TextEncoderConnector(nn.Module):
 
         # Refine through transformer connectors
         video_embeds = self.video_embeddings_connector(video_embeds, attention_mask=attention_mask)
+        _materialize(video_embeds)
         audio_embeds = self.audio_embeddings_connector(audio_embeds, attention_mask=attention_mask)
 
         return video_embeds, audio_embeds
@@ -260,6 +279,9 @@ class GemmaFeaturesExtractorV2(nn.Module):
             stacked = mx.stack(all_hidden_states, axis=-1)
             B, T, D, L = stacked.shape
             stacked = stacked.reshape(B, T, D * L)
+
+        # Materialize before projection to limit Metal command buffer size
+        _materialize(stacked)
 
         # Project and refine through connectors
         return self.connector(stacked, attention_mask=attention_mask)

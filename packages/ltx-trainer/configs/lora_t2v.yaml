@@ -1,0 +1,67 @@
+# LTX-2 LoRA Training Config — Text-to-Video
+#
+# Usage:
+#   1. Preprocess your videos:
+#      ltx-2-mlx preprocess --videos ./my_videos --captions ./my_captions -o ./data
+#
+#   2. Train:
+#      ltx-2-mlx train --config configs/lora_t2v.yaml
+
+model:
+  # Local path to model weights (run `huggingface-cli download dgrauet/ltx-2.3-mlx-q8` first)
+  model_path: ~/.cache/huggingface/hub/models--dgrauet--ltx-2.3-mlx-q8/snapshots/latest
+  text_encoder_path: mlx-community/gemma-3-12b-it-4bit
+  training_mode: lora
+
+lora:
+  rank: 64
+  alpha: 64
+  dropout: 0.0
+  target_modules:
+    - to_k
+    - to_q
+    - to_v
+    - to_out.0
+
+optimization:
+  learning_rate: 5.0e-4
+  steps: 3000
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  weight_decay: 0.0
+  scheduler_type: linear
+  scheduler_params:
+    start_factor: 1.0
+    end_factor: 0.1
+
+data:
+  # Path to directory created by `ltx-2-mlx preprocess`
+  preprocessed_data_root: ./data
+
+training_strategy:
+  name: text_to_video
+  generate_audio: false
+
+flow_matching:
+  timestep_sampling_mode: shifted_logit_normal
+
+validation:
+  prompts:
+    - "a cat walking through a garden"
+  video_dims: [704, 480, 25]  # width, height, frames (keep small for validation speed)
+  frame_rate: 24.0
+  inference_steps: 8
+  interval: 500
+  guidance_scale: 4.0
+  stg_scale: 0.0
+  seed: 42
+  generate_audio: false
+  skip_initial_validation: true
+
+checkpoints:
+  interval: 500
+  keep_last_n: 3
+
+seed: 42
+output_dir: ./outputs/lora_t2v

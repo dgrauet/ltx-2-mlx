@@ -356,6 +356,8 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 | `extend` | Extend | Add frames before or after an existing video (dev model + CFG) |
 | `enhance` | Prompt enhancement | Enhance a text prompt using Gemma (no video generation) |
 | `info` | Model info | Show model configuration and memory estimates |
+| `train` | Training | Train a LoRA or full model from YAML config (requires ltx-trainer-mlx) |
+| `preprocess` | Data preprocessing | Encode raw videos into latents + conditions for training |
 
 All pipelines except one-stage T2V/I2V use the dev model with CFG guidance. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet`.
 
@@ -431,6 +433,24 @@ ltx-2-mlx extend \
 ```
 
 Flags: `--steps` (default 30), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--no-regen-audio` (retake only).
+
+### Training Example
+
+```bash
+# 1. Preprocess videos into latents + conditions
+ltx-2-mlx preprocess \
+  --videos ./my_training_videos \
+  --captions ./my_captions \
+  --model dgrauet/ltx-2.3-mlx-q8 \
+  -o ./preprocessed_data
+
+# 2. Train LoRA from YAML config
+ltx-2-mlx train --config packages/ltx-trainer/configs/lora_t2v.yaml
+```
+
+Flags for `preprocess`: `--height`, `--width` (resize, must be divisible by 32), `--max-frames` (default 97), `--captions` (directory with .txt files matching video stems), `--caption-ext`.
+
+Flags for `train`: `--config` (required, path to YAML config). See `packages/ltx-trainer/configs/` for examples.
 
 ---
 

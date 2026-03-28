@@ -50,10 +50,13 @@ __all__ = [
 ]
 
 
-def get_training_strategy(config: TrainingStrategyConfig) -> TrainingStrategy:
+def get_training_strategy(config: TrainingStrategyConfig | object) -> TrainingStrategy:
     """Factory function to create the appropriate training strategy.
 
     The strategy is determined by the ``name`` field in the configuration.
+    Accepts either native strategy configs (``TextToVideoConfig``,
+    ``VideoToVideoConfig``) or the Pydantic ``TrainingStrategyConfig`` from
+    ``ltx_trainer_mlx.config``, which is automatically converted.
 
     Args:
         config: Strategy-specific configuration with a ``name`` field.
@@ -64,6 +67,17 @@ def get_training_strategy(config: TrainingStrategyConfig) -> TrainingStrategy:
     Raises:
         ValueError: If strategy name is not supported.
     """
+    # Convert Pydantic TrainingStrategyConfig to native strategy config
+    if not isinstance(config, TextToVideoConfig | VideoToVideoConfig):
+        name = getattr(config, "name", None)
+        generate_audio = getattr(config, "generate_audio", False)
+        if name == "text_to_video":
+            config = TextToVideoConfig(with_audio=generate_audio)
+        elif name == "video_to_video":
+            config = VideoToVideoConfig()
+        else:
+            raise ValueError(f"Unknown training strategy name: {name}")
+
     match config:
         case TextToVideoConfig():
             strategy = TextToVideoStrategy(config)

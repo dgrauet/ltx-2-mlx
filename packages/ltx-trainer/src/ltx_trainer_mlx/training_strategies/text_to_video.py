@@ -147,7 +147,7 @@ class TextToVideoStrategy(TrainingStrategy):
         )
 
         # Sample noise and sigmas
-        sigmas = sigma_sampler(video_latents)  # (B,) or (B, 1)
+        sigmas = sigma_sampler.sample_for(video_latents)  # (B,) or (B, 1)
         video_noise = mx.random.normal(video_latents.shape)
 
         # Apply noise: noisy = (1 - sigma) * clean + sigma * noise

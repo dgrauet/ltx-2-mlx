@@ -12,6 +12,8 @@ Usage:
     ltx-2-mlx ic-lora --prompt "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 -o out.mp4
     ltx-2-mlx enhance --prompt "a cat walking" --mode t2v
     ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q8
+    ltx-2-mlx train --config training_config.yaml
+    ltx-2-mlx preprocess --videos ./my_videos --model dgrauet/ltx-2.3-mlx-q8 -o ./preprocessed
 """
 
 from __future__ import annotations
@@ -95,6 +97,16 @@ examples:
     )
     gen.add_argument("--lora-strength", type=float, default=1.0, help="Distilled LoRA strength (default: 1.0)")
     gen.add_argument("--enhance-prompt", action="store_true", help="Enhance prompt using Gemma before generation")
+    gen.add_argument(
+        "--lora",
+        action="append",
+        nargs=2,
+        metavar=("PATH", "STRENGTH"),
+        help=(
+            "LoRA weights and strength (repeatable). PATH can be a local .safetensors file "
+            "or a HuggingFace repo ID. Example: --lora my_lora.safetensors 1.0"
+        ),
+    )
 
     # --- a2v (Audio-to-Video) ---
     a2v = sub.add_parser("a2v", help="Generate video from audio + text prompt")
@@ -197,6 +209,26 @@ examples:
     info = sub.add_parser("info", help="Show model info and memory estimate")
     info.add_argument("--model", "-m", default=DEFAULT_MODEL, help="Model weights (HF repo or path)")
 
+    # --- train ---
+    trn = sub.add_parser("train", help="Train a LoRA or full model (requires ltx-trainer-mlx)")
+    trn.add_argument("--config", "-c", required=True, help="Path to training config YAML file")
+
+    # --- preprocess ---
+    pre = sub.add_parser("preprocess", help="Preprocess videos into latents + conditions for training")
+    pre.add_argument("--videos", "-v", required=True, help="Directory containing video files (mp4/mov/avi)")
+    pre.add_argument("--output", "-o", required=True, help="Output directory for preprocessed data")
+    pre.add_argument(
+        "--model", "-m", default=DEFAULT_MODEL, help=f"Model weights for VAE encoding (default: {DEFAULT_MODEL})"
+    )
+    pre.add_argument("--gemma", default=DEFAULT_GEMMA, help=f"Gemma model for text encoding (default: {DEFAULT_GEMMA})")
+    pre.add_argument("--height", "-H", type=int, default=None, help="Resize height (default: keep original)")
+    pre.add_argument("--width", "-W", type=int, default=None, help="Resize width (default: keep original)")
+    pre.add_argument(
+        "--max-frames", type=int, default=97, help="Max frames per video (must satisfy frames %% 8 == 1, default: 97)"
+    )
+    pre.add_argument("--captions", default=None, help="Directory with .txt caption files (same stems as videos)")
+    pre.add_argument("--caption-ext", default=".txt", help="Caption file extension (default: .txt)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -218,6 +250,8 @@ examples:
         "ic-lora": _cmd_ic_lora,
         "enhance": _cmd_enhance,
         "info": _cmd_info,
+        "train": _cmd_train,
+        "preprocess": _cmd_preprocess,
     }
     commands[args.command](args)
 
@@ -232,6 +266,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
     t0 = time.time()
 
     prompt = _maybe_enhance_prompt(args)
+
+    lora_paths = [(path, float(strength)) for path, strength in args.lora] if args.lora else []
 
     if args.hq or args.two_stage:
         if args.hq:
@@ -255,6 +291,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             distilled_lora=args.distilled_lora,
             distilled_lora_strength=args.lora_strength,
         )
+        if lora_paths:
+            pipe._pending_loras = lora_paths
         # Only pass non-None overrides; pipeline defaults take over otherwise
         kwargs: dict = dict(
             prompt=prompt,
@@ -283,6 +321,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             print(f"Image: {args.image}")
 
         pipe = ImageToVideoPipeline(model_dir=args.model, gemma_model_id=args.gemma)
+        if lora_paths:
+            pipe._pending_loras = lora_paths
         pipe.generate_and_save(
             prompt=prompt,
             output_path=args.output,
@@ -301,6 +341,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             print("Mode: Text-to-Video")
 
         pipe = TextToVideoPipeline(model_dir=args.model, gemma_model_id=args.gemma)
+        if lora_paths:
+            pipe._pending_loras = lora_paths
         pipe.generate_and_save(
             prompt=prompt,
             output_path=args.output,
@@ -607,6 +649,68 @@ def _print_result(output: str, t0: float, quiet: bool) -> None:
     if not quiet:
         print(f"\nSaved to: {output}")
         print(f"Time: {elapsed:.1f}s")
+
+
+def _cmd_train(args: argparse.Namespace) -> None:
+    """Train a LoRA or full model from a YAML config."""
+    try:
+        from ltx_trainer_mlx.config import LtxTrainerConfig
+        from ltx_trainer_mlx.trainer import LtxvTrainer
+    except ImportError:
+        print("Error: ltx-trainer-mlx is not installed.")
+        print("Install it with: uv pip install -e 'packages/ltx-trainer[all]'")
+        sys.exit(1)
+
+    from pathlib import Path
+
+    import yaml
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"Error: Config file not found: {config_path}")
+        sys.exit(1)
+
+    with open(config_path) as f:
+        raw_config = yaml.safe_load(f)
+
+    config = LtxTrainerConfig(**raw_config)
+
+    trainer = LtxvTrainer(config)
+    saved_path, stats = trainer.train()
+
+    print("\nTraining complete!")
+    print(f"  Weights saved to: {saved_path}")
+    print(f"  Total time: {stats.total_time_seconds / 60:.1f} min")
+    print(f"  Speed: {stats.steps_per_second:.2f} steps/s")
+    print(f"  Peak memory: {stats.peak_memory_gb:.1f} GB")
+
+
+def _cmd_preprocess(args: argparse.Namespace) -> None:
+    """Preprocess videos into latents + conditions for training."""
+    # Set Metal cache limit early to prevent GPU watchdog timeouts
+    # when loading large models (Gemma 12B + connector ~7GB)
+    import mlx.core as mx
+
+    mx.set_cache_limit(mx.device_info()["memory_size"])
+
+    try:
+        from ltx_trainer_mlx.preprocess import preprocess_dataset
+    except ImportError:
+        print("Error: ltx-trainer-mlx is not installed.")
+        print("Install it with: uv pip install -e 'packages/ltx-trainer[all]'")
+        sys.exit(1)
+
+    preprocess_dataset(
+        videos_dir=args.videos,
+        output_dir=args.output,
+        model_dir=args.model,
+        gemma_model_id=args.gemma,
+        target_height=args.height,
+        target_width=args.width,
+        max_frames=args.max_frames,
+        captions_dir=args.captions,
+        caption_ext=args.caption_ext,
+    )
 
 
 def _cmd_enhance(args: argparse.Namespace) -> None:

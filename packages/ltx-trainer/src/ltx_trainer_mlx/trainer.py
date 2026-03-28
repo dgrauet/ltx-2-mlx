@@ -351,7 +351,7 @@ class LtxvTrainer:
                 video_latent=video_inputs.latent,
                 video_text_embeds=video_inputs.context,
                 video_positions=video_inputs.positions,
-                sigma=video_inputs.sigma,
+                timestep=video_inputs.sigma,
                 video_timesteps=video_inputs.timesteps,
             )
 
@@ -361,13 +361,25 @@ class LtxvTrainer:
                 call_kwargs["audio_positions"] = audio_inputs.positions
                 call_kwargs["audio_timesteps"] = audio_inputs.timesteps
             else:
-                # Dummy audio for the joint model
-                call_kwargs["audio_latent"] = mx.zeros((video_inputs.latent.shape[0], 1, 128), dtype=mx.bfloat16)
-                call_kwargs["audio_text_embeds"] = mx.zeros_like(video_inputs.context)
+                # Dummy audio for the joint model — must match expected token count
+                # Audio tokens = round(pixel_frames / fps * 25)
+                from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count
 
-            # Use inner model (LTXModel) which returns velocity directly,
+                latent_data = batch["latents"]
+                num_lat_frames = int(latent_data["num_frames"][0].item())
+                pixel_frames = (num_lat_frames - 1) * 8 + 1
+                fps_val = float(latent_data.get("fps", mx.array([24.0]))[0].item())
+                audio_tokens = compute_audio_token_count(pixel_frames, fps=fps_val)
+
+                B = video_inputs.latent.shape[0]
+                call_kwargs["audio_latent"] = mx.zeros((B, audio_tokens, 128), dtype=mx.bfloat16)
+                call_kwargs["audio_text_embeds"] = conditions["audio_prompt_embeds"]
+                call_kwargs["audio_positions"] = compute_audio_positions(audio_tokens)
+                call_kwargs["audio_timesteps"] = mx.zeros((B, audio_tokens))
+
+            # Call LTXModel directly which returns velocity (v),
             # NOT X0Model which converts to x0 predictions
-            video_pred, audio_pred = self._transformer.model(**call_kwargs)
+            video_pred, audio_pred = self._transformer(**call_kwargs)
 
             # Compute loss
             return strategy.compute_loss(video_pred, audio_pred, model_inputs)
@@ -380,8 +392,21 @@ class LtxvTrainer:
 
     @free_gpu_memory_context(after=True)
     def _load_text_encoder_and_cache_embeddings(self) -> list[CachedPromptEmbeddings] | None:
-        """Load text encoder + feature extractor, compute and cache validation embeddings."""
+        """Load text encoder + feature extractor, compute and cache validation embeddings.
+
+        When using precomputed data (no validation prompts), the feature
+        extractor is NOT loaded — precomputed conditions already contain
+        projected embeddings.
+        """
         cfg = self._config
+        has_validation = bool(cfg.validation.interval and cfg.validation.prompts)
+
+        if not has_validation:
+            # No validation prompts — skip text encoder and feature extractor entirely.
+            # Precomputed conditions already contain projected video/audio embeddings.
+            self._feature_extractor = None
+            logger.debug("No validation prompts. Skipping text encoder and feature extractor.")
+            return None
 
         # Load text encoder
         logger.debug("Loading text encoder...")
@@ -396,22 +421,20 @@ class LtxvTrainer:
         )
 
         # Cache validation embeddings
-        cached_embeddings = None
-        if cfg.validation.prompts:
-            logger.info("Pre-computing embeddings for %d validation prompts...", len(cfg.validation.prompts))
-            cached_embeddings = []
-            for prompt in cfg.validation.prompts:
-                all_hs, attn_mask = text_encoder.encode_all_layers(prompt)
-                video_embeds, audio_embeds = self._feature_extractor(all_hs, attention_mask=attn_mask)
+        logger.info("Pre-computing embeddings for %d validation prompts...", len(cfg.validation.prompts))
+        cached_embeddings = []
+        for prompt in cfg.validation.prompts:
+            all_hs, attn_mask = text_encoder.encode_all_layers(prompt)
+            video_embeds, audio_embeds = self._feature_extractor(all_hs, attention_mask=attn_mask)
 
-                cached_embeddings.append(
-                    CachedPromptEmbeddings(
-                        video_context=video_embeds,
-                        audio_context=audio_embeds,
-                    )
+            cached_embeddings.append(
+                CachedPromptEmbeddings(
+                    video_context=video_embeds,
+                    audio_context=audio_embeds,
                 )
+            )
 
-        # Unload text encoder (feature extractor stays for training)
+        # Unload text encoder (feature extractor stays for validation)
         del text_encoder
         free_gpu_memory()
 
@@ -429,12 +452,14 @@ class LtxvTrainer:
             self._config.validation.images is not None or self._config.validation.reference_videos is not None
         )
 
+        has_validation = bool(self._config.validation.interval and self._config.validation.prompts)
+
         components = load_ltx_model(
             model_dir=self._config.model.model_path,
             with_video_vae_encoder=need_vae_encoder,
-            with_video_vae_decoder=True,
-            with_audio_vae_decoder=load_audio,
-            with_vocoder=load_audio,
+            with_video_vae_decoder=has_validation,
+            with_audio_vae_decoder=load_audio and has_validation,
+            with_vocoder=load_audio and has_validation,
             with_text_encoder=False,  # Handled separately above
         )
 
@@ -469,26 +494,45 @@ class LtxvTrainer:
         logger.debug("Trainable params count: %s", f"{num_trainable:,}")
 
     def _setup_lora(self) -> None:
-        """Configure LoRA adapters for the transformer."""
+        """Configure LoRA adapters for the transformer.
+
+        Supports both ``nn.Linear`` and ``nn.QuantizedLinear`` targets.
+        For quantized models (q4/q8), the LoRA adapter wraps the existing
+        quantized layer, keeping weights in low-bit while LoRA params
+        train in full precision.
+        """
+        from mlx_lm.tuner.lora import LoRALinear
+
         lora_cfg = self._config.lora
         if lora_cfg is None:
             raise ValueError("LoRA config is required for LoRA training mode")
 
         logger.debug("Adding LoRA adapter with rank %d", lora_cfg.rank)
 
-        # Apply LoRA to matching linear layers
+        # Apply LoRA to matching linear layers (Linear or QuantizedLinear)
         lora_layers = _find_lora_targets(self._transformer, lora_cfg.target_modules)
 
         for layer_path, module in lora_layers:
-            # Create LoRA linear replacement using nn.LoRALinear
-            # MLX's nn.LoRALinear.from_linear() copies weights automatically
-            lora_linear = nn.LoRALinear.from_linear(
-                module,
+            # Create LoRA wrapper with matching dimensions
+            if isinstance(module, nn.QuantizedLinear):
+                in_dims = module.scales.shape[-1] * module.group_size
+                out_dims = module.weight.shape[0]
+                has_bias = hasattr(module, "bias") and module.bias is not None
+            else:
+                in_dims = module.weight.shape[-1]
+                out_dims = module.weight.shape[0]
+                has_bias = hasattr(module, "bias") and module.bias is not None
+
+            lora_linear = LoRALinear(
+                input_dims=in_dims,
+                output_dims=out_dims,
                 r=lora_cfg.rank,
                 scale=lora_cfg.alpha / lora_cfg.rank,
+                bias=has_bias,
             )
+            # Replace the inner nn.Linear with the original (possibly quantized) layer
+            lora_linear.linear = module
 
-            # Set the LoRA linear in place
             _set_module_by_path(self._transformer, layer_path, lora_linear)
 
         # Freeze everything, then unfreeze only LoRA params
@@ -757,7 +801,16 @@ class LtxvTrainer:
             state_dict: dict[str, np.ndarray] = {}
             for name, param in nn.utils.tree_flatten(self._transformer.trainable_parameters()):
                 key = f"diffusion_model.{name}"
-                state_dict[key] = np.array(param)
+                # Convert mlx_lm LoRA format to standard ComfyUI/diffusers format:
+                # mlx_lm: .lora_a (in_dim, rank), .lora_b (rank, out_dim)
+                # standard: .lora_A.weight (rank, in_dim), .lora_B.weight (out_dim, rank)
+                if key.endswith(".lora_a"):
+                    key = key[: -len(".lora_a")] + ".lora_A.weight"
+                    param = mx.transpose(param)
+                elif key.endswith(".lora_b"):
+                    key = key[: -len(".lora_b")] + ".lora_B.weight"
+                    param = mx.transpose(param)
+                state_dict[key] = np.array(param.astype(mx.float32))
             save_safetensors(state_dict, str(saved_path))
         else:
             state_dict = {}
@@ -876,7 +929,7 @@ def _find_lora_targets(
     """
     results: list[tuple[str, nn.Linear]] = []
     for path, module in model.named_modules():
-        if isinstance(module, nn.Linear):
+        if isinstance(module, nn.Linear | nn.QuantizedLinear):
             name_parts = path.split(".")
             if any(part in target_names for part in name_parts):
                 results.append((path, module))

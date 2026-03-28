@@ -48,11 +48,15 @@ class LtxModelComponents:
 
 def load_transformer(
     model_dir: str | Path,
+    transformer_file: str | None = None,
 ) -> LTXModel:
     """Load the LTX transformer model from split safetensors.
 
     Args:
-        model_dir: Directory containing ``transformer.safetensors``.
+        model_dir: Directory containing transformer safetensors.
+        transformer_file: Override filename. If None, auto-detects:
+            ``transformer.safetensors``, ``transformer-distilled.safetensors``,
+            or ``transformer-dev.safetensors`` (in that order).
 
     Returns:
         Loaded ``LTXModel``.
@@ -60,8 +64,24 @@ def load_transformer(
     model_dir = Path(model_dir)
     logger.debug("Loading transformer from %s", model_dir)
 
+    if transformer_file is not None:
+        tf_path = model_dir / transformer_file
+    else:
+        # Auto-detect transformer file
+        for candidate in [
+            "transformer.safetensors",
+            "transformer-distilled.safetensors",
+            "transformer-dev.safetensors",
+        ]:
+            tf_path = model_dir / candidate
+            if tf_path.exists():
+                break
+        else:
+            raise FileNotFoundError(f"No transformer safetensors found in {model_dir}")
+
+    logger.info("Loading transformer from %s", tf_path.name)
     model = LTXModel()
-    weights = load_split_safetensors(model_dir / "transformer.safetensors", prefix="transformer.")
+    weights = load_split_safetensors(tf_path, prefix="transformer.")
     apply_quantization(model, weights)
     model.load_weights(list(weights.items()))
     aggressive_cleanup()

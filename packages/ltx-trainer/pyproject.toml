@@ -31,6 +31,8 @@ dependencies = [
     "numpy>=1.26.0",
     "tqdm>=4.65.0",
     "rich>=13.0.0",
+    "pyyaml>=6.0",
+    "pillow>=10.4.0",
 ]
 
 [project.optional-dependencies]

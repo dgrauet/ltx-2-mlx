@@ -1,0 +1,69 @@
+# LTX-2 LoRA Training Config — Video-to-Video (IC-LoRA)
+#
+# Usage:
+#   1. Preprocess your videos and reference videos:
+#      ltx-2-mlx preprocess --videos ./target_videos --captions ./captions -o ./data
+#      (reference_latents must be pre-encoded separately into data/.precomputed/reference_latents/)
+#
+#   2. Train:
+#      ltx-2-mlx train --config configs/lora_v2v.yaml
+
+model:
+  model_path: ~/.cache/huggingface/hub/models--dgrauet--ltx-2.3-mlx-q8/snapshots/latest
+  text_encoder_path: mlx-community/gemma-3-12b-it-4bit
+  training_mode: lora  # Required for video-to-video
+
+lora:
+  rank: 64
+  alpha: 64
+  dropout: 0.0
+  target_modules:
+    - to_k
+    - to_q
+    - to_v
+    - to_out.0
+
+optimization:
+  learning_rate: 5.0e-4
+  steps: 3000
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  scheduler_type: linear
+  scheduler_params:
+    start_factor: 1.0
+    end_factor: 0.1
+
+data:
+  preprocessed_data_root: ./data
+
+training_strategy:
+  name: video_to_video
+  generate_audio: false
+
+flow_matching:
+  timestep_sampling_mode: shifted_logit_normal
+
+validation:
+  prompts:
+    - "a person walking in a park"
+  reference_videos:
+    - ./reference_video.mp4
+  reference_downscale_factor: 2
+  video_dims: [704, 480, 25]
+  frame_rate: 24.0
+  inference_steps: 8
+  interval: 500
+  guidance_scale: 4.0
+  stg_scale: 0.0
+  seed: 42
+  generate_audio: false
+  skip_initial_validation: true
+  include_reference_in_output: true
+
+checkpoints:
+  interval: 500
+  keep_last_n: 3
+
+seed: 42
+output_dir: ./outputs/lora_v2v

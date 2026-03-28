@@ -77,6 +77,37 @@ class TextToVideoPipeline:
         # Try HuggingFace download
         return Path(snapshot_download(model_dir))
 
+    @staticmethod
+    def _fuse_pending_loras(
+        transformer_weights: dict[str, mx.array],
+        lora_paths: list[tuple[str, float]],
+    ) -> dict[str, mx.array]:
+        """Fuse LoRA deltas into transformer weights before model loading.
+
+        Args:
+            transformer_weights: Raw transformer state dict.
+            lora_paths: List of (path, strength) tuples.
+
+        Returns:
+            Modified state dict with LoRA deltas fused.
+        """
+        from ltx_core_mlx.loader.fuse_loras import apply_loras
+        from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
+        from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
+        from ltx_core_mlx.loader.sft_loader import SafetensorsStateDictLoader
+
+        model_sd = StateDict(sd=transformer_weights, size=0, dtype=set())
+        loader = SafetensorsStateDictLoader()
+
+        lora_sds = []
+        for lora_path, strength in lora_paths:
+            lora_sd = loader.load(lora_path, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
+            lora_sds.append(LoraStateDictWithStrength(state_dict=lora_sd, strength=strength))
+            print(f"  Fusing LoRA: {lora_path} (strength={strength:.2f})")
+
+        fused_sd = apply_loras(model_sd=model_sd, lora_sd_and_strengths=lora_sds)
+        return fused_sd.sd
+
     # ------------------------------------------------------------------
     # Shared component loading methods (used by subclass pipelines)
     # ------------------------------------------------------------------
@@ -269,6 +300,12 @@ class TextToVideoPipeline:
                 # Fallback: try transformer-distilled.safetensors (mlx-forge dual-variant layout)
                 transformer_path = model_dir / "transformer-distilled.safetensors"
             transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
+
+            # Fuse pending LoRA weights before loading into model
+            pending_loras = getattr(self, "_pending_loras", None)
+            if pending_loras:
+                transformer_weights = self._fuse_pending_loras(transformer_weights, pending_loras)
+
             apply_quantization(self.dit, transformer_weights)
             self.dit.load_weights(list(transformer_weights.items()))
             aggressive_cleanup()
