@@ -94,8 +94,8 @@ class RetakePipeline(TextToVideoPipeline):
         video_path = str(video_path)
         info = probe_video_info(video_path)
 
-        # Round to nearest VAE-compatible frame count (1 + 8k)
-        k = max(1, round((info.num_frames - 1) / 8))
+        # Round down to VAE-compatible frame count (1 + 8k) that fits in the source
+        k = max(1, (info.num_frames - 1) // 8)
         vae_compatible_frames = 1 + k * 8
 
         video_tensor = load_video_frames(video_path, info.height, info.width, vae_compatible_frames)
