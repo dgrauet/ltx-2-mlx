@@ -1,11 +1,45 @@
-"""Sigma schedules for diffusion denoising.
+"""LTX-2 sigma schedules.
 
-Ported from ltx-core/src/ltx_core/components/schedulers.py
+`ltx2_schedule` is a thin wrapper over `mlx_arsenal.diffusion.dynamic_shift_schedule`
+that preserves LTX's original keyword name (``steps``) and default ``num_tokens``.
+The predefined LTX-specific tables (DISTILLED_SIGMAS, STAGE_2_SIGMAS) and the
+LTX-only helpers (get_sigma_schedule, sigma_to_timestep) stay local.
 """
 
 from __future__ import annotations
 
 import mlx.core as mx
+from mlx_arsenal.diffusion import dynamic_shift_schedule
+
+_MAX_SHIFT_ANCHOR = 4096
+
+
+def ltx2_schedule(
+    steps: int,
+    num_tokens: int = _MAX_SHIFT_ANCHOR,
+    max_shift: float = 2.05,
+    base_shift: float = 0.95,
+    stretch: bool = True,
+    terminal: float = 0.1,
+) -> list[float]:
+    """LTX-2 token-count-adaptive flow-matching sigma schedule."""
+    return dynamic_shift_schedule(
+        steps,
+        num_tokens=num_tokens,
+        base_shift=base_shift,
+        max_shift=max_shift,
+        stretch=stretch,
+        terminal=terminal,
+    )
+
+
+__all__ = [
+    "DISTILLED_SIGMAS",
+    "STAGE_2_SIGMAS",
+    "get_sigma_schedule",
+    "ltx2_schedule",
+    "sigma_to_timestep",
+]
 
 # Predefined sigma schedule for 8-step distilled model.
 # 9 values = 8 steps (iterate consecutive pairs: sigmas[i], sigmas[i+1]).
@@ -66,64 +100,3 @@ def sigma_to_timestep(sigma: float) -> mx.array:
         Timestep as (1,) array.
     """
     return mx.array([sigma], dtype=mx.bfloat16)
-
-
-# --- Dynamic schedulers ---
-
-_BASE_SHIFT_ANCHOR = 1024
-_MAX_SHIFT_ANCHOR = 4096
-
-
-def ltx2_schedule(
-    steps: int,
-    num_tokens: int = _MAX_SHIFT_ANCHOR,
-    max_shift: float = 2.05,
-    base_shift: float = 0.95,
-    stretch: bool = True,
-    terminal: float = 0.1,
-) -> list[float]:
-    """Generate a dynamic sigma schedule with token-count-dependent shifting.
-
-    Ported from ltx-core LTX2Scheduler. Used for non-distilled (full) models
-    with CFG guidance.
-
-    Args:
-        steps: Number of denoising steps.
-        num_tokens: Number of latent tokens (affects sigma shift).
-        max_shift: Maximum shift parameter.
-        base_shift: Base shift parameter.
-        stretch: Whether to stretch sigmas to match terminal value.
-        terminal: Terminal sigma value for stretching.
-
-    Returns:
-        List of steps+1 sigma values (includes terminal 0.0 if stretch).
-    """
-    import math
-
-    import numpy as np
-
-    sigmas = np.linspace(1.0, 0.0, steps + 1)
-
-    # Compute shift based on token count
-    mm = (max_shift - base_shift) / (_MAX_SHIFT_ANCHOR - _BASE_SHIFT_ANCHOR)
-    b = base_shift - mm * _BASE_SHIFT_ANCHOR
-    sigma_shift = num_tokens * mm + b
-
-    # Shift non-zero sigmas; avoid 1/0 for the terminal zero entry
-    nonzero = sigmas != 0
-    shifted = np.empty_like(sigmas)
-    shifted[~nonzero] = 0.0
-    shifted[nonzero] = math.exp(sigma_shift) / (math.exp(sigma_shift) + (1.0 / sigmas[nonzero] - 1.0))
-    sigmas = shifted
-
-    if stretch:
-        non_zero = sigmas != 0
-        non_zero_sigmas = sigmas[non_zero]
-        if len(non_zero_sigmas) > 0:
-            one_minus_z = 1.0 - non_zero_sigmas
-            scale_factor = one_minus_z[-1] / (1.0 - terminal)
-            if scale_factor != 0:
-                stretched = 1.0 - (one_minus_z / scale_factor)
-                sigmas[non_zero] = stretched
-
-    return sigmas.tolist()

@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import mlx.core as mx
+from mlx_arsenal.diffusion import euler_step
 from tqdm import tqdm
 
 from ltx_core_mlx.components.guiders import MultiModalGuiderFactory
@@ -44,29 +45,6 @@ class DenoiseOutput:
 
     video_latent: mx.array  # (B, N_video, C)
     audio_latent: mx.array  # (B, N_audio, C)
-
-
-def euler_step(
-    x: mx.array,
-    x0: mx.array,
-    sigma: float,
-    sigma_next: float,
-) -> mx.array:
-    """Single Euler step: x_{t-1} = x_t + (sigma_next - sigma) * (x_t - x0) / sigma.
-
-    Args:
-        x: Current noisy sample.
-        x0: Predicted clean sample.
-        sigma: Current noise level.
-        sigma_next: Next noise level.
-
-    Returns:
-        Updated sample at sigma_next.
-    """
-    if sigma == 0:
-        return x0
-    d = (x - x0) / sigma
-    return x + (sigma_next - sigma) * d
 
 
 def _is_uniform_mask(mask: mx.array) -> bool:
