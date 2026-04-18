@@ -200,6 +200,7 @@ class TextToVideoPipeline:
             self.vocoder = VocoderWithBWE()
             vocoder_weights = load_split_safetensors(model_dir / "vocoder.safetensors", prefix="vocoder.")
             self.vocoder.load_weights(list(vocoder_weights.items()))
+            self.vocoder.upcast_weights_to_fp32()
             aggressive_cleanup()
 
     def _load_dev_transformer(self) -> LTXModel:

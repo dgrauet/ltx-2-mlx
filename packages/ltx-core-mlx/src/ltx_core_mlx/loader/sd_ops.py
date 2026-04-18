@@ -59,6 +59,7 @@ class SDOps:
 
     name: str
     mapping: tuple[ContentReplacement | ContentMatching | SDKeyValueOperation, ...] = ()
+    allowed_keys: frozenset[str] | None = None
 
     def with_replacement(self, content: str, replacement: str) -> SDOps:
         """Create a new SDOps with an additional key replacement."""
@@ -69,6 +70,14 @@ class SDOps:
         """Create a new SDOps with an additional prefix/suffix filter."""
         new_mapping = (*self.mapping, ContentMatching(prefix, suffix))
         return replace(self, mapping=new_mapping)
+
+    def with_additional_allowed_keys(self, keys: frozenset[str]) -> SDOps:
+        """Create a new SDOps that only passes keys in *keys* (post-replacement).
+
+        If allowed_keys is already set, the sets are merged via union.
+        """
+        merged = frozenset(keys) | self.allowed_keys if self.allowed_keys is not None else frozenset(keys)
+        return replace(self, allowed_keys=merged)
 
     def with_kv_operation(
         self,
@@ -94,6 +103,10 @@ class SDOps:
                 continue
             if replacement.content in key:
                 key = key.replace(replacement.content, replacement.replacement)
+
+        if self.allowed_keys is not None and key not in self.allowed_keys:
+            return None
+
         return key
 
     def apply_to_key_value(self, key: str, value: mx.array) -> list[KeyValueOperationResult]:

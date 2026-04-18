@@ -207,15 +207,24 @@ def _sde_step(
     sigma: float,
     sigma_next: float,
     noise: mx.array,
+    eta: float = 0.5,
 ) -> mx.array:
     """Apply Res2s SDE noise injection step.
 
     Ported from Res2sDiffusionStep.step() in ltx-core.
+
+    Args:
+        sample: Current noisy sample.
+        denoised: Denoised prediction from the model.
+        sigma: Current sigma.
+        sigma_next: Next sigma in the schedule.
+        noise: Random noise for stochastic injection.
+        eta: Stochastic noise injection strength (0=deterministic, 1=maximum).
     """
     if sigma_next == 0:
         return denoised.astype(mx.bfloat16)
 
-    sigma_up = min(sigma_next * 0.5, sigma_next * 0.9999)
+    sigma_up = min(sigma_next * eta, sigma_next * 0.9999)
     sigma_signal = 1.0 - sigma_next
     sigma_residual = max(0.0, sigma_next**2 - sigma_up**2) ** 0.5
     alpha_ratio = sigma_signal + sigma_residual
