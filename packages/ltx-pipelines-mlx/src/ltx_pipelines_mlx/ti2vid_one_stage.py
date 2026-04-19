@@ -478,7 +478,7 @@ class TextToVideoPipeline:
             num_channels = 1
             wav = wav[:, None]  # (T, 1)
 
-        wav_np = np.array(wav, dtype=np.float32)
+        wav_np = np.array(wav.astype(mx.float32), dtype=np.float32)
         wav_np = np.clip(wav_np, -1.0, 1.0)
         wav_int16 = (wav_np * 32767).astype(np.int16)
 
