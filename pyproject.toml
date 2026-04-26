@@ -42,6 +42,9 @@ members = ["packages/*"]
 ltx-core-mlx = { workspace = true }
 ltx-pipelines-mlx = { workspace = true }
 ltx-trainer-mlx = { workspace = true }
+# TODO: replace with `mlx-arsenal>=0.2.3` in [project.dependencies] once
+# arsenal ships TeaCacheController to PyPI; this local-path source assumes
+# a sibling-directory checkout.
 mlx-arsenal = { path = "../mlx-arsenal", editable = true }
 
 [tool.ruff]
