@@ -362,6 +362,7 @@ source = { editable = "packages/ltx-core-mlx" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "mlx" },
+    { name = "mlx-arsenal" },
     { name = "mlx-lm" },
     { name = "numpy" },
     { name = "safetensors" },
@@ -371,6 +372,7 @@ dependencies = [
 requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "mlx", specifier = ">=0.31.0" },
+    { name = "mlx-arsenal", editable = "../mlx-arsenal" },
     { name = "mlx-lm", specifier = ">=0.31.0" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "safetensors", specifier = ">=0.4.0" },
@@ -382,6 +384,7 @@ version = "0.1.0"
 source = { editable = "packages/ltx-pipelines-mlx" }
 dependencies = [
     { name = "ltx-core-mlx" },
+    { name = "mlx-arsenal" },
     { name = "pillow" },
     { name = "tqdm" },
 ]
@@ -389,6 +392,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "ltx-core-mlx", editable = "packages/ltx-core-mlx" },
+    { name = "mlx-arsenal", editable = "../mlx-arsenal" },
     { name = "pillow", specifier = ">=10.4.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
 ]
@@ -564,6 +568,26 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/91/85c73f7cc3a661416d05315623458c719eda7de958b05f4e10ba40c52d07/mlx-0.31.1-cp314-cp314-manylinux_2_35_aarch64.whl", hash = "sha256:b973506fd49ba39df6dc4ff655b77bd35ea193cee878e71d6ee3d1a951d2b3a6", size = 628701, upload-time = "2026-03-12T02:16:28.949Z" },
     { url = "https://files.pythonhosted.org/packages/7d/e9/d87638e00a44dcf346fe838caaf1e2dae96a88d5779edbd66ce27d4bbdcc/mlx-0.31.1-cp314-cp314-manylinux_2_35_x86_64.whl", hash = "sha256:3987282a1e63252bdd7c636138812c67316c3f7c7a7acad08e76c8843648a056", size = 668959, upload-time = "2026-03-12T02:16:30.41Z" },
 ]
+
+[[package]]
+name = "mlx-arsenal"
+version = "0.2.3"
+source = { editable = "../mlx-arsenal" }
+dependencies = [
+    { name = "mlx" },
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "einops", marker = "extra == 'dev'", specifier = ">=0.8.2" },
+    { name = "mlx", specifier = ">=0.31.0" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.5" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "mlx-lm"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mlx.core as mx
+import pytest
 
 from ltx_core_mlx.components.guiders import (
     MultiModalGuiderFactory,
@@ -163,3 +164,21 @@ class TestTeaCacheHook:
         c = self._run(decisions=[True, False, True, True])
         assert len(c.gate_calls) == 4
         assert len(c.cache_calls) == 3
+
+
+class TestPipelineFlag:
+    def test_enable_teacache_raises_clear_error_when_preset_missing(self):
+        """Until calibration is run, the ltx2 preset is absent. Pipeline must
+        raise a clear error pointing at the calibration script (not a generic
+        KeyError)."""
+        from mlx_arsenal.diffusion import TEACACHE_PRESETS
+
+        # Fail fast if a future change accidentally adds the preset before this
+        # test is removed.
+        if "ltx2" in TEACACHE_PRESETS:
+            pytest.skip("ltx2 preset already present; this guard test no longer applies")
+
+        from ltx_pipelines_mlx.ti2vid_two_stages import _build_teacache_controller
+
+        with pytest.raises(RuntimeError, match="calibrate_teacache"):
+            _build_teacache_controller(num_steps=30, thresh=None)

@@ -12,6 +12,7 @@ Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages.py
 from __future__ import annotations
 
 import mlx.core as mx
+from mlx_arsenal.diffusion import TEACACHE_PRESETS, TeaCacheController
 
 from ltx_core_mlx.components.guiders import (
     MultiModalGuiderParams,
@@ -40,6 +41,29 @@ from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
 
 # Reference defaults
 DEFAULT_CFG_SCALE = 3.0
+
+
+def _build_teacache_controller(num_steps: int, thresh: float | None) -> TeaCacheController:
+    """Construct a controller for LTX-2 stage 1; raise if uncalibrated.
+
+    Args:
+        num_steps: Number of denoising steps for stage 1.
+        thresh: Optional override for the preset's default ``rel_l1_thresh``.
+
+    Returns:
+        Configured ``TeaCacheController``.
+
+    Raises:
+        RuntimeError: If the ``ltx2`` preset is missing — calibration not done.
+    """
+    if "ltx2" not in TEACACHE_PRESETS:
+        raise RuntimeError(
+            "TeaCache preset 'ltx2' is missing — run "
+            "scripts/calibrate_teacache.py to generate coefficients, then "
+            "add the snippet to mlx_arsenal/diffusion/teacache.py "
+            "TEACACHE_PRESETS."
+        )
+    return TeaCacheController.from_preset("ltx2", num_steps=num_steps, rel_l1_thresh=thresh)
 
 
 def _remap_lora_keys(lora_sd: dict[str, mx.array]) -> dict[str, mx.array]:
@@ -172,6 +196,8 @@ class TwoStagePipeline(TextToVideoPipeline):
         image: str | None = None,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
+        enable_teacache: bool = False,
+        teacache_thresh: float | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Generate video using two-stage pipeline.
 
@@ -188,6 +214,13 @@ class TwoStagePipeline(TextToVideoPipeline):
             image: Optional reference image for I2V conditioning.
             video_guider_params: Optional full guider params for video.
             audio_guider_params: Optional full guider params for audio.
+            enable_teacache: When True, instantiate a TeaCacheController
+                from the 'ltx2' arsenal preset and use it to skip stage 1
+                transformer forwards whose modulated input is sufficiently
+                close to the previous step's. Default False (no caching).
+            teacache_thresh: Optional override for the preset's default
+                ``rel_l1_thresh``. Higher = more skipping = faster but
+                lossier. Ignored when ``enable_teacache=False``.
 
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
@@ -268,6 +301,11 @@ class TwoStagePipeline(TextToVideoPipeline):
         video_factory = create_multimodal_guider_factory(video_guider_params, negative_context=neg_video_embeds)
         audio_factory = create_multimodal_guider_factory(audio_guider_params, negative_context=neg_audio_embeds)
 
+        teacache_controller = None
+        if enable_teacache:
+            teacache_controller = _build_teacache_controller(stage1_steps, teacache_thresh)
+            teacache_controller.reset()
+
         output_1 = guided_denoise_loop(
             model=x0_model,
             video_state=video_state,
@@ -277,6 +315,7 @@ class TwoStagePipeline(TextToVideoPipeline):
             video_guider_factory=video_factory,
             audio_guider_factory=audio_factory,
             sigmas=sigmas_1,
+            teacache=teacache_controller,
         )
         if self.low_memory:
             aggressive_cleanup()
