@@ -170,6 +170,45 @@ class LTXModel(nn.Module):
         params, embedded = adaln_module(flat)
         return params.reshape(B, N, -1), embedded.reshape(B, N, -1)
 
+    def compute_gate_signal(
+        self,
+        video_latent: mx.array,
+        audio_latent: mx.array,
+        timestep: mx.array,
+        video_timesteps: mx.array | None = None,
+    ) -> mx.array:
+        """Cheap probe: block 0's modulated video input (TeaCache gate signal).
+
+        Runs the prelude (patchify_proj + video AdaLN) but no transformer
+        blocks. The output is bit-equivalent to ``video_normed`` as it would
+        be computed inside block 0 during a full forward.
+
+        Args:
+            video_latent: (B, Nv, video_patch_channels).
+            audio_latent: (B, Na, audio_patch_channels). Unused for the
+                gate signal itself but accepted for API symmetry; ignored.
+            timestep: (B,) sigma value.
+            video_timesteps: Optional (B, Nv) per-token timesteps; matches
+                ``__call__`` semantics for conditioning masks.
+
+        Returns:
+            Gate signal ``(B, Nv, video_dim)``.
+        """
+        del audio_latent  # signature parity with __call__; not needed for gate
+        video_latent = video_latent.astype(mx.bfloat16)
+        timestep = timestep.astype(mx.bfloat16)
+
+        video_hidden = self.patchify_proj(video_latent)
+        t_emb = self._embed_timestep_scalar(timestep)
+
+        if video_timesteps is not None:
+            vt_emb = self._embed_timestep_per_token(video_timesteps)
+            video_adaln_emb, _ = self._adaln_per_token(self.adaln_single, vt_emb)
+        else:
+            video_adaln_emb, _ = self.adaln_single(t_emb)
+
+        return self.transformer_blocks[0].compute_video_normed_sa(video_hidden, video_adaln_emb)
+
     def __call__(
         self,
         video_latent: mx.array,

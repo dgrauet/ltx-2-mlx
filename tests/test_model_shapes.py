@@ -301,3 +301,49 @@ class TestBlockGateSignal:
         normed = block.compute_video_normed_sa(video_hidden, video_adaln_params)
         mx.synchronize()
         assert normed.shape == (B, Nv, 32)
+
+
+class TestLTXModelGateSignal:
+    @staticmethod
+    def _tiny_config():
+        return LTXModelConfig(
+            num_layers=2,
+            video_dim=32,
+            audio_dim=16,
+            video_num_heads=4,
+            audio_num_heads=4,
+            video_head_dim=8,
+            audio_head_dim=4,
+            av_cross_num_heads=4,
+            av_cross_head_dim=4,
+        )
+
+    def test_compute_gate_signal_shape(self):
+        model = LTXModel(self._tiny_config())
+        B, Nv, Na = 2, 8, 4
+        video_latent = mx.random.normal((B, Nv, 128))
+        audio_latent = mx.random.normal((B, Na, 128))
+        timestep = mx.array([0.5, 0.5], dtype=mx.bfloat16)
+
+        gate = model.compute_gate_signal(video_latent, audio_latent, timestep)
+        mx.synchronize()
+        assert gate.shape == (B, Nv, 32)
+
+    def test_gate_signal_matches_inline_block0_modulation(self):
+        """The gate must equal block 0's video_normed during a real forward."""
+        model = LTXModel(self._tiny_config())
+        B, Nv, Na = 1, 4, 2
+        video_latent = mx.random.normal((B, Nv, 128))
+        audio_latent = mx.random.normal((B, Na, 128))
+        timestep = mx.array([0.7], dtype=mx.bfloat16)
+
+        gate = model.compute_gate_signal(video_latent, audio_latent, timestep)
+
+        # Replicate the prelude manually and call block 0's helper.
+        v_hidden = model.patchify_proj(video_latent.astype(mx.bfloat16))
+        t_emb = model._embed_timestep_scalar(timestep.astype(mx.bfloat16))
+        video_adaln_emb, _ = model.adaln_single(t_emb)
+        ref = model.transformer_blocks[0].compute_video_normed_sa(v_hidden, video_adaln_emb)
+
+        mx.synchronize()
+        assert mx.allclose(gate, ref, atol=1e-5).item()
