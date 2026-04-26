@@ -347,3 +347,81 @@ class TestLTXModelGateSignal:
 
         mx.synchronize()
         assert mx.allclose(gate, ref, atol=1e-5).item()
+
+
+class TestLTXModelHooks:
+    @staticmethod
+    def _tiny():
+        return LTXModel(
+            LTXModelConfig(
+                num_layers=2,
+                video_dim=32,
+                audio_dim=16,
+                video_num_heads=4,
+                audio_num_heads=4,
+                video_head_dim=8,
+                audio_head_dim=4,
+                av_cross_num_heads=4,
+                av_cross_head_dim=4,
+            )
+        )
+
+    def _inputs(self):
+        B, Nv, Na = 1, 4, 2
+        return {
+            "video_latent": mx.random.normal((B, Nv, 128)),
+            "audio_latent": mx.random.normal((B, Na, 128)),
+            "timestep": mx.array([0.5], dtype=mx.bfloat16),
+        }
+
+    def test_tap_called_once_with_block_residuals(self):
+        model = self._tiny()
+        recorded = []
+
+        def tap(video_block_residual, audio_block_residual):
+            recorded.append((video_block_residual.shape, audio_block_residual.shape))
+
+        out_v, out_a = model(**self._inputs(), tap=tap)
+        mx.synchronize()
+        assert len(recorded) == 1
+        assert recorded[0] == ((1, 4, 32), (1, 2, 16))
+        assert out_v.shape == (1, 4, 128)
+        assert out_a.shape == (1, 2, 128)
+
+    def test_no_tap_no_overhead_no_failure(self):
+        model = self._tiny()
+        out_v, out_a = model(**self._inputs())
+        mx.synchronize()
+        assert out_v.shape == (1, 4, 128)
+        assert out_a.shape == (1, 2, 128)
+
+    def test_block_stack_override_replaces_block_iteration(self):
+        model = self._tiny()
+        called = []
+
+        def override(v_hidden, a_hidden):
+            called.append(True)
+            # Return a fixed deterministic transformation
+            return v_hidden + 1.0, a_hidden - 1.0
+
+        out_v, out_a = model(**self._inputs(), block_stack_override=override)
+        mx.synchronize()
+        assert called == [True]
+        assert out_v.shape == (1, 4, 128)
+        # Sanity: the head still ran (output channels are patch_channels=128, not video_dim=32)
+
+    def test_override_and_tap_coexist(self):
+        model = self._tiny()
+        recorded = []
+
+        def tap(v_res, a_res):
+            recorded.append((v_res.shape, a_res.shape))
+
+        def override(v_hidden, a_hidden):
+            return v_hidden * 2.0, a_hidden * 2.0
+
+        model(**self._inputs(), tap=tap, block_stack_override=override)
+        mx.synchronize()
+        # Tap fires once; residual is computed against the override output.
+        assert len(recorded) == 1
+        # Residuals are (override_output - block_input) — non-zero by construction.

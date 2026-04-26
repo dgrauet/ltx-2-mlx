@@ -223,6 +223,8 @@ class LTXModel(nn.Module):
         video_timesteps: mx.array | None = None,
         audio_timesteps: mx.array | None = None,
         perturbations: BatchedPerturbationConfig | None = None,
+        tap: callable | None = None,
+        block_stack_override: callable | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Forward pass.
 
@@ -242,6 +244,16 @@ class LTXModel(nn.Module):
                 timestep=0 (no modulation).
             audio_timesteps: Optional (B, Na) per-token timesteps for audio.
             perturbations: Optional perturbation config for STG guidance.
+            tap: Optional callback ``tap(video_block_residual,
+                audio_block_residual)`` invoked after the block stack with
+                the residuals ``block_output - block_input``. Used for
+                calibration; does not affect control flow.
+            block_stack_override: Optional callable
+                ``(video_hidden, audio_hidden) -> (video_hidden_out,
+                audio_hidden_out)`` that replaces the block iteration. Used
+                by TeaCache on skip steps to reconstruct outputs from a
+                cached residual without running the blocks. The model's
+                head still runs.
 
         Returns:
             Tuple of (video_velocity, audio_velocity), same shapes as inputs.
@@ -342,30 +354,39 @@ class LTXModel(nn.Module):
                 max_pos_override=[cross_pe_max_pos],
             )
 
-        # Transformer blocks
-        for block_idx, block in enumerate(self.transformer_blocks):
-            video_hidden, audio_hidden = block(
-                video_hidden=video_hidden,
-                audio_hidden=audio_hidden,
-                video_adaln_params=video_adaln_emb,
-                audio_adaln_params=audio_adaln_emb,
-                video_prompt_adaln_params=video_prompt_emb,
-                audio_prompt_adaln_params=audio_prompt_emb,
-                av_ca_video_params=av_ca_video_emb,
-                av_ca_audio_params=av_ca_audio_emb,
-                av_ca_a2v_gate_params=av_ca_a2v_gate_emb,
-                av_ca_v2a_gate_params=av_ca_v2a_gate_emb,
-                video_text_embeds=video_text_embeds,
-                audio_text_embeds=audio_text_embeds,
-                video_rope_freqs=video_rope_freqs,
-                audio_rope_freqs=audio_rope_freqs,
-                video_cross_rope_freqs=video_cross_rope_freqs,
-                audio_cross_rope_freqs=audio_cross_rope_freqs,
-                video_attention_mask=video_attention_mask,
-                audio_attention_mask=audio_attention_mask,
-                perturbations=perturbations,
-                block_idx=block_idx,
-            )
+        # --- Block stack (optionally overridden) ---
+        block_input_v = video_hidden
+        block_input_a = audio_hidden
+
+        if block_stack_override is not None:
+            video_hidden, audio_hidden = block_stack_override(video_hidden, audio_hidden)
+        else:
+            for block_idx, block in enumerate(self.transformer_blocks):
+                video_hidden, audio_hidden = block(
+                    video_hidden=video_hidden,
+                    audio_hidden=audio_hidden,
+                    video_adaln_params=video_adaln_emb,
+                    audio_adaln_params=audio_adaln_emb,
+                    video_prompt_adaln_params=video_prompt_emb,
+                    audio_prompt_adaln_params=audio_prompt_emb,
+                    av_ca_video_params=av_ca_video_emb,
+                    av_ca_audio_params=av_ca_audio_emb,
+                    av_ca_a2v_gate_params=av_ca_a2v_gate_emb,
+                    av_ca_v2a_gate_params=av_ca_v2a_gate_emb,
+                    video_text_embeds=video_text_embeds,
+                    audio_text_embeds=audio_text_embeds,
+                    video_rope_freqs=video_rope_freqs,
+                    audio_rope_freqs=audio_rope_freqs,
+                    video_cross_rope_freqs=video_cross_rope_freqs,
+                    audio_cross_rope_freqs=audio_cross_rope_freqs,
+                    video_attention_mask=video_attention_mask,
+                    audio_attention_mask=audio_attention_mask,
+                    perturbations=perturbations,
+                    block_idx=block_idx,
+                )
+
+        if tap is not None:
+            tap(video_hidden - block_input_v, audio_hidden - block_input_a)
 
         # Output: AdaLN with scale_shift_table + embedded_timestep + proj
         video_out = self._output_block(video_hidden, video_embedded_ts, self.scale_shift_table, self.proj_out)
@@ -455,6 +476,8 @@ class X0Model(nn.Module):
         video_timesteps: mx.array | None = None,
         audio_timesteps: mx.array | None = None,
         perturbations: BatchedPerturbationConfig | None = None,
+        tap: callable | None = None,
+        block_stack_override: callable | None = None,
         **kwargs,
     ) -> tuple[mx.array, mx.array]:
         """Predict x0 from noisy input.
@@ -469,6 +492,8 @@ class X0Model(nn.Module):
             video_timesteps: Optional per-token timesteps (B, Nv).
             audio_timesteps: Optional per-token timesteps (B, Na).
             perturbations: Optional perturbation config for STG guidance.
+            tap: Optional callback passed through to the inner model.
+            block_stack_override: Optional callable passed through to the inner model.
             **kwargs: Passed to inner model.
 
         Returns:
@@ -481,6 +506,8 @@ class X0Model(nn.Module):
             video_timesteps=video_timesteps,
             audio_timesteps=audio_timesteps,
             perturbations=perturbations,
+            tap=tap,
+            block_stack_override=block_stack_override,
             **kwargs,
         )
 
