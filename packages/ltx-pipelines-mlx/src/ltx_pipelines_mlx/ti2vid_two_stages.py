@@ -12,7 +12,7 @@ Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages.py
 from __future__ import annotations
 
 import mlx.core as mx
-from mlx_arsenal.diffusion import TEACACHE_PRESETS, TeaCacheController
+from mlx_arsenal.diffusion import TeaCacheController
 
 from ltx_core_mlx.components.guiders import (
     MultiModalGuiderParams,
@@ -43,27 +43,40 @@ from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
 DEFAULT_CFG_SCALE = 3.0
 
 
+# TeaCache calibration constants for LTX-2 stage 1 (dev model, 30 Euler steps,
+# 480x704x97 reference shape, MLX bf16 q8). Calibrated via
+# scripts/calibrate_teacache.py (polyfit degree 4 over per-step input/residual
+# L1 deltas in fp32). Empty until calibration is run; pipeline raises a clear
+# error when enable_teacache=True is requested without calibration.
+LTX2_TEACACHE_COEFFICIENTS: list[float] = []
+LTX2_TEACACHE_THRESH: float = 0.15  # upstream HunyuanVideo balanced default; tune per use case
+
+
 def _build_teacache_controller(num_steps: int, thresh: float | None) -> TeaCacheController:
-    """Construct a controller for LTX-2 stage 1; raise if uncalibrated.
+    """Construct a TeaCacheController for LTX-2 stage 1.
 
     Args:
         num_steps: Number of denoising steps for stage 1.
-        thresh: Optional override for the preset's default ``rel_l1_thresh``.
+        thresh: Optional override for the default ``rel_l1_thresh``.
 
     Returns:
         Configured ``TeaCacheController``.
 
     Raises:
-        RuntimeError: If the ``ltx2`` preset is missing — calibration not done.
+        RuntimeError: If ``LTX2_TEACACHE_COEFFICIENTS`` is empty — calibration
+            not yet run.
     """
-    if "ltx2" not in TEACACHE_PRESETS:
+    if not LTX2_TEACACHE_COEFFICIENTS:
         raise RuntimeError(
-            "TeaCache preset 'ltx2' is missing — run "
-            "scripts/calibrate_teacache.py to generate coefficients, then "
-            "add the snippet to mlx_arsenal/diffusion/teacache.py "
-            "TEACACHE_PRESETS."
+            "TeaCache coefficients for LTX-2 are not calibrated yet — run "
+            "scripts/calibrate_teacache.py to generate them, then paste the "
+            "values into LTX2_TEACACHE_COEFFICIENTS in this file."
         )
-    return TeaCacheController.from_preset("ltx2", num_steps=num_steps, rel_l1_thresh=thresh)
+    return TeaCacheController(
+        num_steps=num_steps,
+        rel_l1_thresh=thresh if thresh is not None else LTX2_TEACACHE_THRESH,
+        coefficients=LTX2_TEACACHE_COEFFICIENTS,
+    )
 
 
 def _remap_lora_keys(lora_sd: dict[str, mx.array]) -> dict[str, mx.array]:

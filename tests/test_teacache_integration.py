@@ -167,18 +167,38 @@ class TestTeaCacheHook:
 
 
 class TestPipelineFlag:
-    def test_enable_teacache_raises_clear_error_when_preset_missing(self):
-        """Until calibration is run, the ltx2 preset is absent. Pipeline must
-        raise a clear error pointing at the calibration script (not a generic
-        KeyError)."""
-        from mlx_arsenal.diffusion import TEACACHE_PRESETS
+    def test_enable_teacache_raises_clear_error_before_calibration(self):
+        """Until calibration is run, LTX2_TEACACHE_COEFFICIENTS is empty. The
+        pipeline must raise a clear error pointing at the calibration script."""
+        from ltx_pipelines_mlx import ti2vid_two_stages
 
-        # Fail fast if a future change accidentally adds the preset before this
-        # test is removed.
-        if "ltx2" in TEACACHE_PRESETS:
-            pytest.skip("ltx2 preset already present; this guard test no longer applies")
-
-        from ltx_pipelines_mlx.ti2vid_two_stages import _build_teacache_controller
+        # Fail fast if calibration has already been dropped in.
+        if ti2vid_two_stages.LTX2_TEACACHE_COEFFICIENTS:
+            pytest.skip("LTX2 coefficients already populated; this guard no longer applies")
 
         with pytest.raises(RuntimeError, match="calibrate_teacache"):
-            _build_teacache_controller(num_steps=30, thresh=None)
+            ti2vid_two_stages._build_teacache_controller(num_steps=30, thresh=None)
+
+    def test_build_teacache_controller_uses_module_constants(self):
+        """When calibration is populated, the controller picks up the module-level
+        constants (coefficients + default threshold)."""
+        from ltx_pipelines_mlx import ti2vid_two_stages
+
+        # Stub the constants for the duration of the test.
+        original_coeffs = ti2vid_two_stages.LTX2_TEACACHE_COEFFICIENTS
+        original_thresh = ti2vid_two_stages.LTX2_TEACACHE_THRESH
+        try:
+            ti2vid_two_stages.LTX2_TEACACHE_COEFFICIENTS = [1.0, 2.0, 3.0]
+            ti2vid_two_stages.LTX2_TEACACHE_THRESH = 0.2
+
+            ctrl = ti2vid_two_stages._build_teacache_controller(num_steps=30, thresh=None)
+            assert ctrl.num_steps == 30
+            assert ctrl.rel_l1_thresh == 0.2
+            assert list(ctrl.coefficients) == [1.0, 2.0, 3.0]
+
+            # thresh override
+            ctrl = ti2vid_two_stages._build_teacache_controller(num_steps=30, thresh=0.5)
+            assert ctrl.rel_l1_thresh == 0.5
+        finally:
+            ti2vid_two_stages.LTX2_TEACACHE_COEFFICIENTS = original_coeffs
+            ti2vid_two_stages.LTX2_TEACACHE_THRESH = original_thresh
