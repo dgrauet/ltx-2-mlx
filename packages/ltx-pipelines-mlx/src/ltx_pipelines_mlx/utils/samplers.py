@@ -518,6 +518,7 @@ def guided_denoise_loop(
     video_attention_mask: mx.array | None = None,
     audio_attention_mask: mx.array | None = None,
     show_progress: bool = True,
+    tap: callable | None = None,
 ) -> DenoiseOutput:
     """Run the Euler denoising loop with multi-modal guidance (CFG/STG).
 
@@ -547,6 +548,11 @@ def guided_denoise_loop(
         video_attention_mask: Attention mask for video.
         audio_attention_mask: Attention mask for audio.
         show_progress: Whether to show tqdm progress bar.
+        tap: Optional per-step instrumentation hook called as
+            ``tap(step_idx, gate_signal, video_block_residual,
+            audio_block_residual)`` after the conditioned-pass forward.
+            Used by the TeaCache calibration script. Has no effect on
+            control flow.
 
     Returns:
         DenoiseOutput with final video and audio latents.
@@ -588,6 +594,13 @@ def guided_denoise_loop(
     # Track last denoised for skip_step
     last_video_x0: mx.array | None = None
     last_audio_x0: mx.array | None = None
+
+    # Per-step tap: reusable residual accumulator (reset each step).
+    _tap_residuals: list = []
+
+    def _accumulate_residuals(v_res: mx.array, a_res: mx.array) -> None:
+        _tap_residuals.clear()
+        _tap_residuals.extend([v_res, a_res])
 
     for step_idx, (sigma, sigma_next) in enumerate(iterator):
         # Build guiders for this sigma level
@@ -632,7 +645,17 @@ def guided_denoise_loop(
             "video_text_embeds": video_text_embeds,
             "audio_text_embeds": audio_text_embeds,
         }
-        cond_video_x0, cond_audio_x0 = model(**cond_kwargs)
+        if tap is not None:
+            gate_signal = model.model.compute_gate_signal(
+                video_latent=video_x,
+                audio_latent=audio_x,
+                timestep=mx.broadcast_to(sigma_arr, (B,)),
+                video_timesteps=base_kwargs.get("video_timesteps"),
+            )
+            cond_video_x0, cond_audio_x0 = model(**cond_kwargs, tap=_accumulate_residuals)
+            tap(step_idx, gate_signal, _tap_residuals[0], _tap_residuals[1])
+        else:
+            cond_video_x0, cond_audio_x0 = model(**cond_kwargs)
 
         # --- 2. Unconditional prediction for CFG ---
         neg_video_x0: mx.array | float = 0.0
