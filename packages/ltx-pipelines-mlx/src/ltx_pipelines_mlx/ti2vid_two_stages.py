@@ -198,6 +198,7 @@ class TwoStagePipeline(TextToVideoPipeline):
         audio_guider_params: MultiModalGuiderParams | None = None,
         enable_teacache: bool = False,
         teacache_thresh: float | None = None,
+        tap: callable | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Generate video using two-stage pipeline.
 
@@ -221,6 +222,8 @@ class TwoStagePipeline(TextToVideoPipeline):
             teacache_thresh: Optional override for the preset's default
                 ``rel_l1_thresh``. Higher = more skipping = faster but
                 lossier. Ignored when ``enable_teacache=False``.
+            tap: Optional per-step instrumentation hook forwarded to
+                ``guided_denoise_loop``. Used by the calibration script.
 
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
@@ -316,6 +319,7 @@ class TwoStagePipeline(TextToVideoPipeline):
             audio_guider_factory=audio_factory,
             sigmas=sigmas_1,
             teacache=teacache_controller,
+            tap=tap,
         )
         if self.low_memory:
             aggressive_cleanup()
