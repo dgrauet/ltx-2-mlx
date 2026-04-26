@@ -42,7 +42,7 @@ members = ["packages/*"]
 ltx-core-mlx = { workspace = true }
 ltx-pipelines-mlx = { workspace = true }
 ltx-trainer-mlx = { workspace = true }
-mlx-arsenal = { path = "/Users/dgrauet/Work/mlx-arsenal", editable = true }
+mlx-arsenal = { path = "../mlx-arsenal", editable = true }
 
 [tool.ruff]
 line-length = 120
