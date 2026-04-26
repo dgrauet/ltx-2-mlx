@@ -149,11 +149,15 @@ def main() -> int:
     args.out.write_text(json.dumps(out_payload, indent=2))
 
     print(f"\n  Wrote {args.out}")
-    print("\nAdd this to mlx_arsenal/diffusion/teacache.py TEACACHE_PRESETS:\n")
-    print('    "ltx2": {')
-    print(f'        "coefficients": {coeffs!r},')
-    print(f'        "rel_l1_thresh": {args.default_rel_l1_thresh},')
-    print("    },")
+    print(
+        "\nPaste these into ltx_pipelines_mlx/ti2vid_two_stages.py "
+        "(LTX2_TEACACHE_COEFFICIENTS / LTX2_TEACACHE_THRESH):\n"
+    )
+    print("LTX2_TEACACHE_COEFFICIENTS = [")
+    for c in coeffs:
+        print(f"    {c!r},")
+    print("]")
+    print(f"LTX2_TEACACHE_THRESH = {args.default_rel_l1_thresh}")
     return 0
 
 
