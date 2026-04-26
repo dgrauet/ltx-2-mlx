@@ -179,6 +179,31 @@ class BasicAVTransformerBlock(nn.Module):
         """Affine-free RMS norm (no mean subtraction, matches reference rms_norm)."""
         return mx.fast.rms_norm(x, weight=None, eps=self._norm_eps)
 
+    def compute_video_normed_sa(
+        self,
+        video_hidden: mx.array,
+        video_adaln_params: mx.array,
+    ) -> mx.array:
+        """Modulated video input to self-attention — the TeaCache gate signal.
+
+        Mirrors the first two ops of ``__call__`` (the line that computes
+        ``video_normed = rms(x) * (1 + scale_sa) + shift_sa``) without running
+        attention. Used for cheap probe / cache-decision computations.
+
+        Args:
+            video_hidden: (B, Nv, video_dim) post-patchify hidden states.
+            video_adaln_params: (B, 9*video_dim) or (B, Nv, 9*video_dim) AdaLN
+                parameters for self-attn / ff / text-xattn (indices 0..2 are
+                self-attn shift/scale/gate).
+
+        Returns:
+            Modulated input ``rms(video_hidden) * (1 + scale_sa) + shift_sa``,
+            shape ``(B, Nv, video_dim)``.
+        """
+        vdim = video_hidden.shape[-1]
+        v_shift_sa, v_scale_sa, *_ = self._unpack_adaln(video_adaln_params, self.scale_shift_table, 9, vdim)
+        return self._rms_norm(video_hidden) * (1.0 + v_scale_sa) + v_shift_sa
+
     def __call__(
         self,
         video_hidden: mx.array,

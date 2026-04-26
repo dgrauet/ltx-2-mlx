@@ -249,3 +249,55 @@ class TestLTXModel:
         assert "scale_shift_table" in leaf_keys
         assert "audio_scale_shift_table" in leaf_keys
         assert any(k.startswith("transformer_blocks.") for k in leaf_keys)
+
+
+class TestBlockGateSignal:
+    def test_compute_video_normed_sa_matches_inline_modulation(self):
+        """The helper must match the inline computation used at the start of
+        the block's self-attention (transformer.py line 266)."""
+        block = BasicAVTransformerBlock(
+            video_dim=32,
+            audio_dim=16,
+            video_num_heads=4,
+            audio_num_heads=4,
+            video_head_dim=8,
+            audio_head_dim=4,
+            av_cross_num_heads=4,
+            av_cross_head_dim=4,
+            ff_mult=2.0,
+        )
+        B, Nv = 2, 6
+        video_hidden = mx.random.normal((B, Nv, 32))
+        # 9-param video AdaLN: (B, 9 * video_dim)
+        video_adaln_params = mx.random.normal((B, 9 * 32))
+
+        normed = block.compute_video_normed_sa(video_hidden, video_adaln_params)
+
+        # Reference: replicate the transformer.py:266 computation
+        v_shift_sa, v_scale_sa, *_ = block._unpack_adaln(video_adaln_params, block.scale_shift_table, 9, 32)
+        ref = block._rms_norm(video_hidden) * (1.0 + v_scale_sa) + v_shift_sa
+
+        mx.synchronize()
+        assert normed.shape == (B, Nv, 32)
+        assert mx.allclose(normed, ref, atol=1e-6).item()
+
+    def test_compute_video_normed_sa_per_token_adaln(self):
+        """Per-token AdaLN (B, N, 9*dim) must also work."""
+        block = BasicAVTransformerBlock(
+            video_dim=32,
+            audio_dim=16,
+            video_num_heads=4,
+            audio_num_heads=4,
+            video_head_dim=8,
+            audio_head_dim=4,
+            av_cross_num_heads=4,
+            av_cross_head_dim=4,
+            ff_mult=2.0,
+        )
+        B, Nv = 2, 6
+        video_hidden = mx.random.normal((B, Nv, 32))
+        video_adaln_params = mx.random.normal((B, Nv, 9 * 32))
+
+        normed = block.compute_video_normed_sa(video_hidden, video_adaln_params)
+        mx.synchronize()
+        assert normed.shape == (B, Nv, 32)
