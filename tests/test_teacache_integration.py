@@ -88,3 +88,78 @@ class TestTapHook:
             assert gate_shape == (B, Nv, 32)
             assert v_res_shape == (B, Nv, 32)
             assert a_res_shape == (B, Na, 16)
+
+
+class _StubController:
+    """Records calls and returns canned should_compute decisions."""
+
+    def __init__(self, decisions: list[bool]):
+        self.decisions = list(decisions)
+        self.cached = None
+        self.gate_calls: list = []
+        self.cache_calls: list = []
+        self.reset_calls = 0
+
+    def should_compute(self, step_idx, gate_signal):
+        self.gate_calls.append((step_idx, gate_signal.shape))
+        return self.decisions.pop(0)
+
+    def cache_residual(self, payload):
+        self.cache_calls.append(payload)
+        self.cached = payload
+
+    @property
+    def previous_residual(self):
+        if self.cached is None:
+            raise RuntimeError("nothing cached")
+        return self.cached
+
+    def reset(self):
+        self.reset_calls += 1
+
+
+class TestTeaCacheHook:
+    def _run(self, decisions: list[bool]):
+        model = _tiny_x0_model()
+        B, Nv, Na = 1, 4, 2
+        video_state = _make_state(B, Nv)
+        audio_state = _make_state(B, Na)
+        sigmas = [1.0, 0.7, 0.4, 0.1, 0.0]
+        controller = _StubController(decisions)
+        guided_denoise_loop(
+            model=model,
+            video_state=video_state,
+            audio_state=audio_state,
+            video_text_embeds=mx.zeros((B, 4, 32), dtype=mx.bfloat16),
+            audio_text_embeds=mx.zeros((B, 4, 16), dtype=mx.bfloat16),
+            video_guider_factory=_cfg_factory(B, 32),
+            audio_guider_factory=_cfg_factory(B, 16),
+            sigmas=sigmas,
+            show_progress=False,
+            teacache=controller,
+        )
+        return controller
+
+    def test_should_compute_called_once_per_step(self):
+        c = self._run(decisions=[True, True, True, True])
+        assert len(c.gate_calls) == 4
+        assert all(shape == (1, 4, 32) for _, shape in c.gate_calls)
+
+    def test_compute_path_caches_per_pass_dict(self):
+        c = self._run(decisions=[True, True, True, True])
+        # 4 cache_residual calls (one per step). Each is a dict with 'cond' and 'uncond' keys.
+        assert len(c.cache_calls) == 4
+        for payload in c.cache_calls:
+            assert isinstance(payload, dict)
+            assert set(payload.keys()) == {"cond", "uncond"}
+            v_res, a_res = payload["cond"]
+            assert v_res.shape == (1, 4, 32)
+            assert a_res.shape == (1, 2, 16)
+
+    def test_skip_path_does_not_cache(self):
+        """When should_compute returns False at step 1, no cache is stored
+        for that step (the previous residual is reused via override). 4 steps
+        with one skip → 3 cache_residual calls."""
+        c = self._run(decisions=[True, False, True, True])
+        assert len(c.gate_calls) == 4
+        assert len(c.cache_calls) == 3

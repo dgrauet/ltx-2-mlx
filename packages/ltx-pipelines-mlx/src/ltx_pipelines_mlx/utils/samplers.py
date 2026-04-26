@@ -263,14 +263,14 @@ def res2s_denoise_loop(
     substep and step levels, plus optional iterative anchor refinement.
 
     The algorithm:
-    1. Evaluate model at current sigma → x0 prediction
+    1. Evaluate model at current sigma -> x0 prediction
     2. Compute epsilon = x0 - x_anchor (denoised direction)
     3. Compute substep x_mid = x_anchor + h * a21 * epsilon
-    4. Inject SDE noise at substep (sigma → sub_sigma)
+    4. Inject SDE noise at substep (sigma -> sub_sigma)
     5. Optionally refine anchor via bong iteration
-    6. Evaluate model at sub_sigma → second x0 prediction
+    6. Evaluate model at sub_sigma -> second x0 prediction
     7. Combine: x_next = x_anchor + h * (b1 * eps1 + b2 * eps2)
-    8. Inject SDE noise at step level (sigma → sigma_next)
+    8. Inject SDE noise at step level (sigma -> sigma_next)
 
     Args:
         model: X0Model wrapping the LTXModel.
@@ -519,6 +519,7 @@ def guided_denoise_loop(
     audio_attention_mask: mx.array | None = None,
     show_progress: bool = True,
     tap: callable | None = None,
+    teacache=None,  # mlx_arsenal.diffusion.TeaCacheController-compatible
 ) -> DenoiseOutput:
     """Run the Euler denoising loop with multi-modal guidance (CFG/STG).
 
@@ -553,6 +554,15 @@ def guided_denoise_loop(
             audio_block_residual)`` after the conditioned-pass forward.
             Used by the TeaCache calibration script. Has no effect on
             control flow.
+        teacache: Optional TeaCache controller. When provided, the loop
+            calls ``teacache.should_compute(step_idx, gate_signal)`` once
+            per step using block 0's modulated input from the conditioned
+            pass; on True, all guidance passes run normally and their
+            block residuals are cached as a dict keyed by pass label
+            (``cond``, ``uncond``, ``ptb``, ``mod``); on False, the
+            previous step's cached residuals replace the block stack via
+            ``block_stack_override``. The transformer head still runs
+            on every pass.
 
     Returns:
         DenoiseOutput with final video and audio latents.
@@ -595,13 +605,6 @@ def guided_denoise_loop(
     last_video_x0: mx.array | None = None
     last_audio_x0: mx.array | None = None
 
-    # Per-step tap: reusable residual accumulator (reset each step).
-    _tap_residuals: list = []
-
-    def _accumulate_residuals(v_res: mx.array, a_res: mx.array) -> None:
-        _tap_residuals.clear()
-        _tap_residuals.extend([v_res, a_res])
-
     for step_idx, (sigma, sigma_next) in enumerate(iterator):
         # Build guiders for this sigma level
         video_guider = video_guider_factory.build_from_sigma(sigma)
@@ -639,30 +642,71 @@ def guided_denoise_loop(
         if not audio_uniform:
             base_kwargs["audio_timesteps"] = _compute_per_token_timesteps(sigma, audio_state.denoise_mask)
 
-        # --- 1. Conditioned prediction (positive context) ---
-        cond_kwargs = {
-            **base_kwargs,
-            "video_text_embeds": video_text_embeds,
-            "audio_text_embeds": audio_text_embeds,
-        }
-        if tap is not None:
+        # --- Compute the gate signal once per step (cheap, runs prelude only).
+        # Used both by tap and by teacache decisions. None when neither hook needs it.
+        gate_signal = None
+        if tap is not None or teacache is not None:
             gate_signal = model.model.compute_gate_signal(
                 video_latent=video_x,
                 audio_latent=audio_x,
                 timestep=mx.broadcast_to(sigma_arr, (B,)),
                 video_timesteps=base_kwargs.get("video_timesteps"),
             )
-            cond_video_x0, cond_audio_x0 = model(**cond_kwargs, tap=_accumulate_residuals)
-            tap(step_idx, gate_signal, _tap_residuals[0], _tap_residuals[1])
-        else:
-            cond_video_x0, cond_audio_x0 = model(**cond_kwargs)
+
+        should_compute_full = True
+        if teacache is not None:
+            should_compute_full = teacache.should_compute(step_idx, gate_signal)
+
+        # Pass-level helpers: capture residual on compute path, override on skip.
+        # Each loop iteration creates fresh dicts so no state leaks across steps.
+        captured_residuals: dict = {}
+        cached_residuals = teacache.previous_residual if (teacache is not None and not should_compute_full) else None
+
+        def _make_capture_tap(label: str):
+            """Return a tap callback that stores (v_res, a_res) under label."""
+
+            # Closures are constructed and consumed within the same loop iteration — safe.
+            def _capture(v_res: mx.array, a_res: mx.array) -> None:
+                captured_residuals[label] = (v_res, a_res)  # noqa: B023
+
+            return _capture
+
+        def _make_override(label: str):
+            """Return a block_stack_override that adds the cached residual."""
+            # cached_residuals is bound at definition time (read from previous step).
+            v_res, a_res = cached_residuals[label]  # noqa: B023
+
+            def _override(v_hidden: mx.array, a_hidden: mx.array) -> tuple[mx.array, mx.array]:
+                return v_hidden + v_res, a_hidden + a_res
+
+            return _override
+
+        def _run_pass(label: str, kwargs: dict) -> tuple[mx.array, mx.array]:
+            """Run one guidance pass, capturing or replaying residuals."""
+            if should_compute_full:  # noqa: B023
+                # Always capture residuals on compute path so teacache (or tap) can use them.
+                pass_tap = _make_capture_tap(label) if (tap is not None or teacache is not None) else None
+                return model(**kwargs, tap=pass_tap)
+            else:
+                return model(**kwargs, block_stack_override=_make_override(label))
+
+        # --- 1. Conditioned prediction (positive context) ---
+        cond_kwargs = {
+            **base_kwargs,
+            "video_text_embeds": video_text_embeds,
+            "audio_text_embeds": audio_text_embeds,
+        }
+        cond_video_x0, cond_audio_x0 = _run_pass("cond", cond_kwargs)
+
+        if tap is not None and "cond" in captured_residuals:
+            v_res, a_res = captured_residuals["cond"]
+            tap(step_idx, gate_signal, v_res, a_res)
 
         # --- 2. Unconditional prediction for CFG ---
         neg_video_x0: mx.array | float = 0.0
         neg_audio_x0: mx.array | float = 0.0
 
         if video_guider.do_unconditional_generation() or audio_guider.do_unconditional_generation():
-            # Use negative context from guiders, or fall back to positive
             neg_video_embeds = (
                 video_guider.negative_context if video_guider.negative_context is not None else video_text_embeds
             )
@@ -675,7 +719,7 @@ def guided_denoise_loop(
                 "video_text_embeds": neg_video_embeds,
                 "audio_text_embeds": neg_audio_embeds,
             }
-            neg_video_x0, neg_audio_x0 = model(**neg_kwargs)
+            neg_video_x0, neg_audio_x0 = _run_pass("uncond", neg_kwargs)
 
         # --- 3. Perturbed prediction for STG ---
         ptb_video_x0: mx.array | float = 0.0
@@ -706,7 +750,7 @@ def guided_denoise_loop(
                 "audio_text_embeds": audio_text_embeds,
                 "perturbations": batched_perturbations,
             }
-            ptb_video_x0, ptb_audio_x0 = model(**ptb_kwargs)
+            ptb_video_x0, ptb_audio_x0 = _run_pass("ptb", ptb_kwargs)
 
         # --- 4. Isolated modality prediction ---
         mod_video_x0: mx.array | float = 0.0
@@ -726,7 +770,10 @@ def guided_denoise_loop(
                 "audio_text_embeds": audio_text_embeds,
                 "perturbations": mod_batched_perturbations,
             }
-            mod_video_x0, mod_audio_x0 = model(**mod_kwargs)
+            mod_video_x0, mod_audio_x0 = _run_pass("mod", mod_kwargs)
+
+        if teacache is not None and should_compute_full:
+            teacache.cache_residual(captured_residuals)
 
         # --- 5. Apply guiders ---
         if video_guider.should_skip_step(step_idx) and last_video_x0 is not None:
