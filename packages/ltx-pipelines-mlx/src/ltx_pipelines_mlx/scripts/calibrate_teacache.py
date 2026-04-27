@@ -135,6 +135,11 @@ def main() -> int:
         "name": "ltx2",
         "coefficients": coeffs,
         "rel_l1_thresh": args.default_rel_l1_thresh,
+        "deltas": {
+            "delta_in": calibrator.delta_in,
+            "delta_res_video": calibrator.delta_res_video,
+            "delta_res_audio": calibrator.delta_res_audio,
+        },
         "calibration_meta": {
             "num_prompts": len(prompts),
             "num_steps": args.num_steps,
@@ -150,8 +155,10 @@ def main() -> int:
 
     print(f"\n  Wrote {args.out}")
     print(
-        "\nPaste these into ltx_pipelines_mlx/ti2vid_two_stages.py "
-        "(LTX2_TEACACHE_COEFFICIENTS / LTX2_TEACACHE_THRESH):\n"
+        "\nThe inline polyfit at degree "
+        f"{args.polyfit_degree} produced these coefficients (may be unstable — "
+        "use scripts/fit_teacache_poly.py for a robust fit that picks the "
+        "lowest stable degree from the saved deltas):\n"
     )
     print("LTX2_TEACACHE_COEFFICIENTS = [")
     for c in coeffs:
