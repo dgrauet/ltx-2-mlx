@@ -10,6 +10,7 @@ Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages_hq.py
 from __future__ import annotations
 
 import mlx.core as mx
+from mlx_arsenal.diffusion import TeaCacheController
 
 from ltx_core_mlx.components.guiders import (
     MultiModalGuiderParams,
@@ -28,8 +29,48 @@ from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule
-from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TwoStagePipeline, _build_teacache_controller
+from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TwoStagePipeline
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, res2s_denoise_loop
+
+# TeaCache calibration constants for the HQ res_2s path (LTX-2 stage 1, 30
+# steps, 384x576x65 reference shape, MLX bf16 q8). Calibrated 2026-04-27 from
+# a 5-prompt run (145 deltas) via scripts/calibrate_teacache.py --hq. The
+# robust fitter (scripts/fit_teacache_poly.py) picked degree 1.
+#
+# res_2s has fundamentally different per-step dynamics from Euler:
+# - SDE noise injection between stage 1 and stage 2 inflates delta_in
+#   (HQ median 0.66 vs Euler median 0.08).
+# - Pearson(delta_in, delta_out) is 0.62 here vs Euler's 0.41 — the polynomial
+#   is more predictive, justifying a more aggressive default threshold.
+# - The pol(delta) values cluster around 0.8 because delta_in is large and
+#   the slope is ~1.27, which produces a "cliff" in skip-rate vs threshold:
+#   below ~0.8 nothing skips; at ~1.0 most steps skip. Default 1.0 lands at
+#   the sweet spot (~52% skip per simulation, ~2x speedup expected).
+LTX2_HQ_TEACACHE_COEFFICIENTS: list[float] = [
+    1.2692083808655041,
+    -0.033401134092491416,
+]
+LTX2_HQ_TEACACHE_THRESH: float = 1.0  # tune per use case
+
+
+def _build_hq_teacache_controller(num_steps: int, thresh: float | None) -> TeaCacheController:
+    """Construct an HQ-specific TeaCacheController.
+
+    Mirrors :func:`ltx_pipelines_mlx.ti2vid_two_stages._build_teacache_controller`
+    but uses ``LTX2_HQ_TEACACHE_COEFFICIENTS`` / ``LTX2_HQ_TEACACHE_THRESH``
+    so res_2s gets coefficients fit on its own dynamics.
+    """
+    if not LTX2_HQ_TEACACHE_COEFFICIENTS:
+        raise RuntimeError(
+            "TeaCache coefficients for the LTX-2 HQ path are not calibrated yet — "
+            "run scripts/calibrate_teacache.py --hq to generate them, then paste "
+            "the values into LTX2_HQ_TEACACHE_COEFFICIENTS in this file."
+        )
+    return TeaCacheController(
+        num_steps=num_steps,
+        rel_l1_thresh=thresh if thresh is not None else LTX2_HQ_TEACACHE_THRESH,
+        coefficients=LTX2_HQ_TEACACHE_COEFFICIENTS,
+    )
 
 
 class TwoStageHQPipeline(TwoStagePipeline):
@@ -151,7 +192,7 @@ class TwoStageHQPipeline(TwoStagePipeline):
         # Stage 1: res_2s with guidance
         teacache_controller = None
         if enable_teacache:
-            teacache_controller = _build_teacache_controller(stage1_steps, teacache_thresh)
+            teacache_controller = _build_hq_teacache_controller(stage1_steps, teacache_thresh)
             teacache_controller.reset()
         output_1 = res2s_denoise_loop(
             model=x0_model,
