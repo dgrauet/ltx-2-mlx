@@ -98,6 +98,23 @@ examples:
     gen.add_argument(
         "--distilled-lora-strength", type=float, default=1.0, help="Distilled LoRA strength for stage 2 (default: 1.0)"
     )
+    gen.add_argument(
+        "--enable-teacache",
+        action="store_true",
+        help=(
+            "Two-stage / HQ only: enable TeaCache stage-1 acceleration "
+            "(opt-in, ~1.46x speedup at default thresh, see CLAUDE.md)"
+        ),
+    )
+    gen.add_argument(
+        "--teacache-thresh",
+        type=float,
+        default=None,
+        help=(
+            "Override TeaCache rel_l1_thresh (default 0.5; higher = more skipping = "
+            "faster but lossier). Ignored unless --enable-teacache is set."
+        ),
+    )
     gen.add_argument("--enhance-prompt", action="store_true", help="Enhance prompt using Gemma before generation")
     gen.add_argument(
         "--lora",
@@ -271,7 +288,20 @@ def _cmd_generate(args: argparse.Namespace) -> None:
 
     lora_paths = [(path, float(strength)) for path, strength in args.lora] if args.lora else []
 
+    if args.enable_teacache and not (args.hq or args.two_stage):
+        raise SystemExit(
+            "--enable-teacache requires --two-stage (or --hq, but HQ is not yet "
+            "supported). The one-stage distilled path does not benefit from "
+            "TeaCache (only 8 denoising steps)."
+        )
+
     if args.hq or args.two_stage:
+        if args.enable_teacache and args.hq:
+            raise SystemExit(
+                "--enable-teacache is only supported on the Euler two-stage pipeline "
+                "(--two-stage), not on --hq (res_2s sampler). The HQ path uses "
+                "res2s_denoise_loop, which does not yet have a teacache hook."
+            )
         if args.hq:
             from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline as PipeClass
 
@@ -313,6 +343,10 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["cfg_scale"] = args.cfg_scale
         if args.stg_scale is not None:
             kwargs["stg_scale"] = args.stg_scale
+        if args.enable_teacache:
+            kwargs["enable_teacache"] = True
+            if args.teacache_thresh is not None:
+                kwargs["teacache_thresh"] = args.teacache_thresh
         pipe.generate_and_save(**kwargs)
 
     elif args.image:

@@ -543,6 +543,13 @@ pipeline.generate_and_save(
 )
 ```
 
+Equivalent CLI flag (only on `--two-stage`, **not** `--hq`):
+
+```bash
+ltx-2-mlx generate --prompt "..." --two-stage --enable-teacache -o out.mp4
+ltx-2-mlx generate --prompt "..." --two-stage --enable-teacache --teacache-thresh 1.0 -o out.mp4
+```
+
 Decision per step is made on **block 0's modulated input** of the conditioned pass; on skip, the entire transformer block stack is bypassed (head + prelude still run). With CFG enabled (default), residuals are cached as a per-pass dict (`{"cond": (v,a), "uncond": (v,a)}`) so all guidance passes skip together.
 
 **Calibration**: 5-prompt × 30-step run on a fresh host (commit `245fd5f`). The robust fitter (`scripts/fit_teacache_poly.py`) picked degree 1 — higher degrees are non-monotone on the observed delta range. Polynomial: `y = 1.364 * x + 0.409`.
