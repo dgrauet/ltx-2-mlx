@@ -102,8 +102,9 @@ examples:
         "--enable-teacache",
         action="store_true",
         help=(
-            "Two-stage / HQ only: enable TeaCache stage-1 acceleration "
-            "(opt-in, ~1.46x speedup at default thresh, see CLAUDE.md)"
+            "Two-stage (--two-stage / --hq) only: enable TeaCache stage-1 "
+            "acceleration (opt-in, ~1.46x speedup on Euler at default thresh; "
+            "see CLAUDE.md)"
         ),
     )
     gen.add_argument(
@@ -296,12 +297,6 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         )
 
     if args.hq or args.two_stage:
-        if args.enable_teacache and args.hq:
-            raise SystemExit(
-                "--enable-teacache is only supported on the Euler two-stage pipeline "
-                "(--two-stage), not on --hq (res_2s sampler). The HQ path uses "
-                "res2s_denoise_loop, which does not yet have a teacache hook."
-            )
         if args.hq:
             from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline as PipeClass
 

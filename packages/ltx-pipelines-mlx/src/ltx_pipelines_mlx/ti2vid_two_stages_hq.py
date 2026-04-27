@@ -28,7 +28,7 @@ from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule
-from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TwoStagePipeline
+from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TwoStagePipeline, _build_teacache_controller
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, res2s_denoise_loop
 
 
@@ -61,11 +61,16 @@ class TwoStageHQPipeline(TwoStagePipeline):
         image: str | None = None,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
+        enable_teacache: bool = False,
+        teacache_thresh: float | None = None,
+        tap: callable | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Generate video using HQ two-stage pipeline with res_2s sampler.
 
         Same as TwoStagePipeline.generate_two_stage but uses res_2s sampler
-        for Stage 1 instead of Euler.
+        for Stage 1 instead of Euler. ``enable_teacache`` / ``teacache_thresh``
+        / ``tap`` are forwarded to ``res2s_denoise_loop`` exactly as in the
+        Euler path.
         """
         # --- Text encoding ---
         video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
@@ -144,6 +149,10 @@ class TwoStageHQPipeline(TwoStagePipeline):
         audio_factory = create_multimodal_guider_factory(audio_guider_params, negative_context=neg_audio_embeds)
 
         # Stage 1: res_2s with guidance
+        teacache_controller = None
+        if enable_teacache:
+            teacache_controller = _build_teacache_controller(stage1_steps, teacache_thresh)
+            teacache_controller.reset()
         output_1 = res2s_denoise_loop(
             model=x0_model,
             video_state=video_state,
@@ -153,6 +162,8 @@ class TwoStageHQPipeline(TwoStagePipeline):
             sigmas=sigmas_1,
             video_guider_factory=video_factory,
             audio_guider_factory=audio_factory,
+            teacache=teacache_controller,
+            tap=tap,
         )
         if self.low_memory:
             aggressive_cleanup()

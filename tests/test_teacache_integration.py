@@ -12,7 +12,7 @@ from ltx_core_mlx.components.guiders import (
 )
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState
 from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig, X0Model
-from ltx_pipelines_mlx.utils.samplers import guided_denoise_loop
+from ltx_pipelines_mlx.utils.samplers import guided_denoise_loop, res2s_denoise_loop
 
 
 def _tiny_x0_model():
@@ -161,6 +161,59 @@ class TestTeaCacheHook:
         """When should_compute returns False at step 1, no cache is stored
         for that step (the previous residual is reused via override). 4 steps
         with one skip → 3 cache_residual calls."""
+        c = self._run(decisions=[True, False, True, True])
+        assert len(c.gate_calls) == 4
+        assert len(c.cache_calls) == 3
+
+
+class TestRes2sTeaCacheHook:
+    """Same contract as TestTeaCacheHook but exercising res2s_denoise_loop.
+
+    res2s does TWO model evaluations per outer step (stage 1 at sigma, stage 2
+    at sub_sigma). The TeaCache decision is per outer step, and the cache
+    payload contains residuals for BOTH stages keyed by ``"stage1"`` / ``"stage2"``.
+    """
+
+    def _run(self, decisions: list[bool]):
+        model = _tiny_x0_model()
+        B, Nv, Na = 1, 4, 2
+        video_state = _make_state(B, Nv)
+        audio_state = _make_state(B, Na)
+        sigmas = [1.0, 0.7, 0.4, 0.1, 0.05]  # 4 outer steps, no terminal 0 to keep the test simple
+        controller = _StubController(decisions)
+        res2s_denoise_loop(
+            model=model,
+            video_state=video_state,
+            audio_state=audio_state,
+            video_text_embeds=mx.zeros((B, 4, 32), dtype=mx.bfloat16),
+            audio_text_embeds=mx.zeros((B, 4, 16), dtype=mx.bfloat16),
+            video_guider_factory=_cfg_factory(B, 32),
+            audio_guider_factory=_cfg_factory(B, 16),
+            sigmas=sigmas,
+            show_progress=False,
+            bongmath=False,  # bong iteration is irrelevant for the cache contract
+            teacache=controller,
+        )
+        return controller
+
+    def test_should_compute_called_once_per_outer_step(self):
+        c = self._run(decisions=[True, True, True, True])
+        assert len(c.gate_calls) == 4
+        assert all(shape == (1, 4, 32) for _, shape in c.gate_calls)
+
+    def test_compute_path_caches_stage1_and_stage2(self):
+        c = self._run(decisions=[True, True, True, True])
+        assert len(c.cache_calls) == 4
+        for payload in c.cache_calls:
+            assert isinstance(payload, dict)
+            assert set(payload.keys()) == {"stage1", "stage2"}
+            for stage in ("stage1", "stage2"):
+                assert set(payload[stage].keys()) == {"cond", "uncond"}
+                v_res, a_res = payload[stage]["cond"]
+                assert v_res.shape == (1, 4, 32)
+                assert a_res.shape == (1, 2, 16)
+
+    def test_skip_path_does_not_cache(self):
         c = self._run(decisions=[True, False, True, True])
         assert len(c.gate_calls) == 4
         assert len(c.cache_calls) == 3
