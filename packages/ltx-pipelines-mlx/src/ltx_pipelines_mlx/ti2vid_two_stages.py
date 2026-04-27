@@ -44,12 +44,22 @@ DEFAULT_CFG_SCALE = 3.0
 
 
 # TeaCache calibration constants for LTX-2 stage 1 (dev model, 30 Euler steps,
-# 480x704x97 reference shape, MLX bf16 q8). Calibrate via
-# scripts/calibrate_teacache.py and paste the resulting polyfit coefficients
-# below. Empty until calibration is run; pipeline raises a clear error when
-# enable_teacache=True is requested without calibration.
-LTX2_TEACACHE_COEFFICIENTS: list[float] = []
-LTX2_TEACACHE_THRESH: float = 0.15  # starting point; tune per use case
+# 480x704x97 reference shape, MLX bf16 q8). Calibrated 2026-04-27 from a
+# 5-prompt x 30-step run (145 deltas) on a fresh host. The robust fitter
+# (scripts/fit_teacache_poly.py) picked degree 1 — higher degrees were
+# non-monotone on the observed delta range and only marginally better in RMSE.
+#
+# Per-step input/output drift correlation in LTX-2 stage 1 is moderate
+# (Pearson 0.41), and average output L1 ~ 0.56 — much higher than upstream
+# DiTs (HunyuanVideo, Flux) where TeaCache typically uses thresh 0.15-0.4.
+# Threshold 0.5 here yields ~22% skip rate per generation (~1.2x speedup);
+# tune via `teacache_thresh=` for more aggressive caching at the cost of
+# quality drift (1.0 ≈ 55% skip / ~2x, 1.5 ≈ 69% / ~3x).
+LTX2_TEACACHE_COEFFICIENTS: list[float] = [
+    1.3641334114092996,
+    0.40915524073366694,
+]
+LTX2_TEACACHE_THRESH: float = 0.5
 
 
 def _build_teacache_controller(num_steps: int, thresh: float | None) -> TeaCacheController:
