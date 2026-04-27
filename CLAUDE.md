@@ -531,6 +531,42 @@ Two-stage pipeline for higher-resolution generation. Requires the dev model + di
 - `utils/samplers.py` — `res2s_denoise_loop` (with guidance support), `guided_denoise_loop`
 - `scheduler.py` — `ltx2_schedule`, `STAGE_2_SIGMAS`
 
+### TeaCache (opt-in stage 1 acceleration)
+
+Timestep-aware residual caching (Liu et al., *Timestep Embedding Aware Cache*) for `TwoStagePipeline.generate_two_stage`. Engine lives in `mlx-arsenal>=0.2.4` (`TeaCacheController`); LTX-2-specific calibrated coefficients + threshold live in `ti2vid_two_stages.py` (`LTX2_TEACACHE_COEFFICIENTS`, `LTX2_TEACACHE_THRESH`).
+
+```python
+pipeline.generate_and_save(
+    prompt=...,
+    enable_teacache=True,           # default False
+    teacache_thresh=0.5,            # optional override
+)
+```
+
+Decision per step is made on **block 0's modulated input** of the conditioned pass; on skip, the entire transformer block stack is bypassed (head + prelude still run). With CFG enabled (default), residuals are cached as a per-pass dict (`{"cond": (v,a), "uncond": (v,a)}`) so all guidance passes skip together.
+
+**Calibration**: 5-prompt × 30-step run on a fresh host (commit `245fd5f`). The robust fitter (`scripts/fit_teacache_poly.py`) picked degree 1 — higher degrees are non-monotone on the observed delta range. Polynomial: `y = 1.364 * x + 0.409`.
+
+**Empirical speedup** (seed 81647281, 480×704×97, MLX bf16 q8):
+- Baseline: 1374s
+- TeaCache (thresh=0.5): 942s — **1.46x speedup, 31% time saved**, visually validated.
+
+**Tuning**: thresh 0.5 is the conservative default. Push higher for more skip / more speed, with quality risk:
+- thresh 1.0 → ~55% skip, ~2× speedup expected
+- thresh 1.5 → ~69% skip, ~3× expected, quality drift visible
+
+LTX-2 stage 1 has weak per-step input/output L1 correlation (Pearson 0.41) and high mean output drift (~0.56), which is why thresholds are nettement higher than upstream DiTs (HunyuanVideo 0.15, Flux 0.4).
+
+**Key files**:
+- `mlx_arsenal.diffusion.TeaCacheController` (engine)
+- `ti2vid_two_stages.py:LTX2_TEACACHE_COEFFICIENTS` (calibration constants)
+- `scripts/calibrate_teacache.py` (calibration runner — saves raw deltas in JSON)
+- `scripts/fit_teacache_poly.py` (offline robust polyfit; tries deg 1-N, picks lowest stable)
+- Hooks in `transformer/model.py` (`tap` + `block_stack_override` on `LTXModel.__call__`)
+- `samplers.py:guided_denoise_loop` (`teacache=` kwarg with per-pass `_run_pass` dispatcher)
+
+**Re-calibration**: run on fresh host. ~22 min/prompt × 5 prompts ≈ 1h45. Then `python -m ltx_pipelines_mlx.scripts.fit_teacache_poly <calibration.json>` to validate stability and produce a paste-ready snippet.
+
 ---
 
 ## IC-LoRA Pipeline
