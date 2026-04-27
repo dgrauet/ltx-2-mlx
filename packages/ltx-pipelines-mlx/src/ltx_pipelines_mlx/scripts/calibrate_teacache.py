@@ -28,6 +28,7 @@ import mlx.core as mx
 import numpy as np
 
 from ltx_pipelines_mlx.ti2vid_two_stages import TwoStagePipeline
+from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline
 
 
 def _rel_l1_fp32(curr: mx.array, prev: mx.array) -> float:
@@ -84,6 +85,15 @@ def _parse_args() -> argparse.Namespace:
         help="Starting threshold to ship with the preset (user can tune).",
     )
     p.add_argument("--out", type=Path, default=Path("ltx2_teacache_calibration.json"))
+    p.add_argument(
+        "--hq",
+        action="store_true",
+        help=(
+            "Calibrate the HQ res_2s path (TwoStageHQPipeline) instead of the "
+            "Euler path. res_2s has different per-step dynamics so its "
+            "coefficients are not interchangeable with the Euler ones."
+        ),
+    )
     return p.parse_args()
 
 
@@ -99,9 +109,11 @@ def main() -> int:
         print("prompts file is empty", file=sys.stderr)
         return 2
 
-    print(f"Calibrating TeaCache for LTX-2 stage 1: {len(prompts)} prompts x {args.num_steps} steps")
+    pipeline_label = "HQ res_2s" if args.hq else "Euler"
+    print(f"Calibrating TeaCache for LTX-2 stage 1 ({pipeline_label}): {len(prompts)} prompts x {args.num_steps} steps")
 
-    pipeline = TwoStagePipeline(model_dir=args.model_dir)
+    pipeline_class = TwoStageHQPipeline if args.hq else TwoStagePipeline
+    pipeline = pipeline_class(model_dir=args.model_dir)
     calibrator = _StreamingCalibrator()
 
     for i, prompt in enumerate(prompts):
