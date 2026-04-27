@@ -560,6 +560,16 @@ Decision per step is made on **block 0's modulated input** of the conditioned pa
 - Baseline: 1374s
 - TeaCache (thresh=0.5): 942s — **1.46x speedup, 31% time saved**, visually validated.
 
+**HQ (`--hq`) note**: the wiring on `res2s_denoise_loop` is mechanically
+correct (unit tests in `TestRes2sTeaCacheHook` cover compute / skip /
+cache-dict behaviour), but the Euler-derived coefficients **do not produce
+useful skips on res_2s** because res_2s has different per-step dynamics
+(SDE noise injection between stage 1 and stage 2, 100-iter bongmath
+refinement). Empirical bench at 384×576×65 frames showed 1.03x speedup —
+warmup-only, no actual skipping. To get a real HQ speedup, recalibrate
+specifically on `res2s_denoise_loop` and store separate constants
+(e.g. `LTX2_HQ_TEACACHE_COEFFICIENTS`). Out of scope for now.
+
 **Tuning**: thresh 0.5 is the conservative default. Push higher for more skip / more speed, with quality risk:
 - thresh 1.0 → ~55% skip, ~2× speedup expected
 - thresh 1.5 → ~69% skip, ~3× expected, quality drift visible
