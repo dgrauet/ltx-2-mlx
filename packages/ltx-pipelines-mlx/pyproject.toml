@@ -24,7 +24,7 @@ classifiers = [
 ]
 dependencies = [
     "ltx-core-mlx",
-    "mlx-arsenal>=0.2.2",
+    "mlx-arsenal>=0.2.4",
     "pillow>=10.4.0",
     "tqdm>=4.66.0",
 ]

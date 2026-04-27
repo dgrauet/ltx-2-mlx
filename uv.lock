@@ -372,7 +372,7 @@ dependencies = [
 requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "mlx", specifier = ">=0.31.0" },
-    { name = "mlx-arsenal", editable = "../mlx-arsenal" },
+    { name = "mlx-arsenal", specifier = ">=0.2.4" },
     { name = "mlx-lm", specifier = ">=0.31.0" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "safetensors", specifier = ">=0.4.0" },
@@ -392,7 +392,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "ltx-core-mlx", editable = "packages/ltx-core-mlx" },
-    { name = "mlx-arsenal", editable = "../mlx-arsenal" },
+    { name = "mlx-arsenal", specifier = ">=0.2.4" },
     { name = "pillow", specifier = ">=10.4.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
 ]
@@ -571,23 +571,16 @@ wheels = [
 
 [[package]]
 name = "mlx-arsenal"
-version = "0.2.3"
-source = { editable = "../mlx-arsenal" }
+version = "0.2.4"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mlx" },
     { name = "numpy" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "einops", marker = "extra == 'dev'", specifier = ">=0.8.2" },
-    { name = "mlx", specifier = ">=0.31.0" },
-    { name = "numpy", specifier = ">=1.24" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.5" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/00/aa/cec6278dcf4c900a6b9d44fcec2f52db6c943cc32c2c7d81b90a56b3f254/mlx_arsenal-0.2.4.tar.gz", hash = "sha256:f09ed240f7eadaf94fcdca98362c2be5f2d9d3cc8a02c90e496be90fefcfe8c3", size = 38736, upload-time = "2026-04-27T10:10:51.382Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/40/82/25dbd22d4dd5b59e2ba2963a838511a10ade8d4ad7ad5b58e0d8f61c87ac/mlx_arsenal-0.2.4-py3-none-any.whl", hash = "sha256:ef170885bdd5267ac565722f09e6634d6ddc496f7a50a9965cdee44b7353922e", size = 34435, upload-time = "2026-04-27T10:10:49.744Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "mlx-lm"
