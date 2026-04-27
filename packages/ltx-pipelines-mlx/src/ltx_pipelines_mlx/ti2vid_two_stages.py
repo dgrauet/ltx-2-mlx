@@ -485,4 +485,15 @@ class TwoStagePipeline(TextToVideoPipeline):
         # Load decoders on-demand
         self._load_decoders()
 
-        return self._decode_and_save_video(video_latent, audio_latent, output_path)
+        result = self._decode_and_save_video(video_latent, audio_latent, output_path)
+
+        # Free decoders so a subsequent generate_and_save call on the same
+        # pipeline instance doesn't stack DiT (~26 GB q8) on top of decoders
+        # and OOM the 32 GB envelope.
+        if self.low_memory:
+            self.vae_decoder = None
+            self.audio_decoder = None
+            self.vocoder = None
+            aggressive_cleanup()
+
+        return result
