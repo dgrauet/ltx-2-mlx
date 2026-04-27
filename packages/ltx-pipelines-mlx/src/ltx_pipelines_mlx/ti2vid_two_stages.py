@@ -44,16 +44,11 @@ DEFAULT_CFG_SCALE = 3.0
 
 
 # TeaCache calibration constants for LTX-2 stage 1 (dev model, 30 Euler steps,
-# 480x704x97 reference shape, MLX bf16 q8). Calibrated 2026-04-26 over
-# 3 prompts via scripts/calibrate_teacache.py (polyfit degree 4 on per-step
-# input/residual L1 deltas in fp32). 87 calibration deltas total.
-LTX2_TEACACHE_COEFFICIENTS: list[float] = [
-    -3535.6188003737434,
-    1898.9632500329858,
-    -345.5198275741567,
-    26.964112228380383,
-    -0.33149055535368976,
-]
+# 480x704x97 reference shape, MLX bf16 q8). Calibrate via
+# scripts/calibrate_teacache.py and paste the resulting polyfit coefficients
+# below. Empty until calibration is run; pipeline raises a clear error when
+# enable_teacache=True is requested without calibration.
+LTX2_TEACACHE_COEFFICIENTS: list[float] = []
 LTX2_TEACACHE_THRESH: float = 0.15  # starting point; tune per use case
 
 
@@ -446,6 +441,8 @@ class TwoStagePipeline(TextToVideoPipeline):
         image: str | None = None,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
+        enable_teacache: bool = False,
+        teacache_thresh: float | None = None,
     ) -> str:
         """Generate two-stage video+audio and save to file."""
         video_latent, audio_latent = self.generate_two_stage(
@@ -461,6 +458,8 @@ class TwoStagePipeline(TextToVideoPipeline):
             image=image,
             video_guider_params=video_guider_params,
             audio_guider_params=audio_guider_params,
+            enable_teacache=enable_teacache,
+            teacache_thresh=teacache_thresh,
         )
 
         # Free transformer + encoder to make room for decoders
