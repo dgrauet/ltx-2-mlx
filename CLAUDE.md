@@ -543,12 +543,14 @@ pipeline.generate_and_save(
 )
 ```
 
-Equivalent CLI flag (only on `--two-stage`, **not** `--hq`):
+Equivalent CLI flag (works on both `--two-stage` and `--hq`):
 
 ```bash
 ltx-2-mlx generate --prompt "..." --two-stage --enable-teacache -o out.mp4
-ltx-2-mlx generate --prompt "..." --two-stage --enable-teacache --teacache-thresh 1.0 -o out.mp4
+ltx-2-mlx generate --prompt "..." --hq --enable-teacache --teacache-thresh 1.0 -o out.mp4
 ```
+
+The HQ path uses the res_2s sampler, which does two model evaluations per outer step (stage 1 at `sigma`, stage 2 at the substep after SDE noise injection). The TeaCache decision is made **once per outer step** on stage 1's gate signal; on skip both stages reuse cached residuals via `block_stack_override`. Cache payload shape: `{"stage1": {cond: (v,a), uncond: (v,a), ...}, "stage2": {...}}`.
 
 Decision per step is made on **block 0's modulated input** of the conditioned pass; on skip, the entire transformer block stack is bypassed (head + prelude still run). With CFG enabled (default), residuals are cached as a per-pass dict (`{"cond": (v,a), "uncond": (v,a)}`) so all guidance passes skip together.
 
