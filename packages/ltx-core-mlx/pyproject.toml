@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ltx-core-mlx"
-version = "0.1.0"
+version = "0.2.0"
 description = "LTX-2.3 model library ported to MLX for Apple Silicon"
 readme = "../../README.md"
 license = "MIT"

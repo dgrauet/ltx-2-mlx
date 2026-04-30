@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ltx-pipelines-mlx"
-version = "0.1.0"
+version = "0.2.0"
 description = "Generation pipelines for LTX-2.3 on MLX"
 readme = "../../README.md"
 license = "MIT"
