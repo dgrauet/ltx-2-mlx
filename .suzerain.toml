@@ -1,0 +1,6 @@
+[suzerain]
+version = "1"
+stack = "python"
+mode = "advisory"
+
+[exemptions]
