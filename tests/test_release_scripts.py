@@ -111,3 +111,54 @@ def test_bump_version_handles_indented_version_line(tmp_path):
     text = (workspace / "pyproject.toml").read_text()
     assert '  version = "0.2.0"' in text, "indentation must be preserved"
     assert 'version = "0.1.0"' not in text
+
+
+def test_validate_versions_passes_when_all_match(tmp_path):
+    workspace = _make_workspace(tmp_path)
+    # bump everything to 0.2.0 first
+    subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "bump_version.py"), "0.2.0"],
+        cwd=workspace,
+        check=True,
+    )
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "validate_versions.py"), "v0.2.0"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_validate_versions_fails_on_mismatch(tmp_path):
+    workspace = _make_workspace(tmp_path)
+    # only bump root, leave packages at 0.1.0
+    root = workspace / "pyproject.toml"
+    root.write_text(root.read_text().replace('version = "0.1.0"', 'version = "0.2.0"'))
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "validate_versions.py"), "v0.2.0"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "ltx-core-mlx" in result.stderr or "ltx-core-mlx" in result.stdout
+
+
+def test_validate_versions_strips_v_prefix(tmp_path):
+    workspace = _make_workspace(tmp_path)
+    subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "bump_version.py"), "0.2.0"],
+        cwd=workspace,
+        check=True,
+    )
+    # accept both with and without v
+    for tag in ["v0.2.0", "0.2.0"]:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "validate_versions.py"), tag],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"tag={tag}: {result.stderr}"
