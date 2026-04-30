@@ -162,3 +162,81 @@ def test_validate_versions_strips_v_prefix(tmp_path):
             text=True,
         )
         assert result.returncode == 0, f"tag={tag}: {result.stderr}"
+
+
+def test_changelog_groups_commits_by_prefix(tmp_path):
+    """Build a tiny git repo with known commits, run the generator, check sections."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    (repo / "README.md").write_text("init\n")
+    git("add", ".")
+    git("commit", "-qm", "chore: initial")
+
+    for msg in [
+        "feat: shiny new pipeline",
+        "fix: off-by-one in scheduler",
+        "docs: update README",
+        "feat!: drop python 3.10",
+        "refactor: rename helper",
+        "weird message without a prefix",
+    ]:
+        (repo / "x.txt").write_text(msg)
+        git("add", ".")
+        git("commit", "-qm", msg)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "generate_changelog.py")],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    # Section headers
+    assert "### Breaking Changes" in out
+    assert "### Features" in out
+    assert "### Bug Fixes" in out
+    assert "### Other" in out
+    # Items in correct sections
+    assert "shiny new pipeline" in out
+    assert "off-by-one in scheduler" in out
+    assert "drop python 3.10" in out  # feat! goes to Breaking
+    # Refactor and "weird message" go under Other
+    assert "rename helper" in out
+    assert "weird message without a prefix" in out
+
+
+def test_changelog_uses_range_when_prev_tag_given(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    (repo / "f").write_text("a")
+    git("add", ".")
+    git("commit", "-qm", "feat: alpha")
+    git("tag", "v0.1.0")
+    (repo / "f").write_text("b")
+    git("add", ".")
+    git("commit", "-qm", "feat: beta")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "generate_changelog.py"), "v0.1.0"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "beta" in result.stdout
+    assert "alpha" not in result.stdout  # alpha is before v0.1.0
