@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history for changelog generation
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate version coherence
+        run: python scripts/validate_versions.py "${GITHUB_REF_NAME}"
+
+      - name: Determine previous tag
+        id: prev
+        run: |
+          # Find the most recent tag *before* the one being released, if any.
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo "")
+          echo "prev_tag=${prev}" >> "$GITHUB_OUTPUT"
+          echo "Previous tag: ${prev:-<none>}"
+
+      - name: Generate changelog
+        run: |
+          if [ -n "${{ steps.prev.outputs.prev_tag }}" ]; then
+            python scripts/generate_changelog.py "${{ steps.prev.outputs.prev_tag }}" > changelog.md
+          else
+            python scripts/generate_changelog.py > changelog.md
+          fi
+          echo "----- changelog.md -----"
+          cat changelog.md
+
+      - name: Detect prerelease
+        id: prerelease
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "flag=--prerelease" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file changelog.md \
+            ${{ steps.prerelease.outputs.flag }}
