@@ -88,3 +88,26 @@ def test_bump_version_accepts_prerelease(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert 'version = "0.3.0-rc1"' in (workspace / "pyproject.toml").read_text()
+
+
+def test_bump_version_handles_indented_version_line(tmp_path):
+    """TOML allows indented keys; the bumper should rewrite them and preserve indentation."""
+    workspace = _make_workspace(tmp_path)
+    indented = textwrap.dedent("""\
+        [project]
+          name = "ltx-2-mlx"
+          version = "0.1.0"
+          description = "x"
+        """)
+    (workspace / "pyproject.toml").write_text(indented)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "bump_version.py"), "0.2.0"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    text = (workspace / "pyproject.toml").read_text()
+    assert '  version = "0.2.0"' in text, "indentation must be preserved"
+    assert 'version = "0.1.0"' not in text

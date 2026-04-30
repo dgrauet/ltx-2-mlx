@@ -27,13 +27,18 @@ PYPROJECTS = [
     "packages/ltx-trainer/pyproject.toml",
 ]
 
-VERSION_RE = re.compile(r'^version\s*=\s*"[^"]*"', re.MULTILINE)
+VERSION_RE = re.compile(r'^[ \t]*version\s*=\s*"[^"]*"', re.MULTILINE)
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 
 
 def _bump_file(path: Path, new_version: str) -> None:
     text = path.read_text()
-    new_text, count = VERSION_RE.subn(f'version = "{new_version}"', text, count=1)
+
+    def _replace(m: re.Match[str]) -> str:
+        indent = m.group(0)[: len(m.group(0)) - len(m.group(0).lstrip())]
+        return f'{indent}version = "{new_version}"'
+
+    new_text, count = VERSION_RE.subn(_replace, text, count=1)
     if count != 1:
         raise SystemExit(f'error: no `version = "..."` line found in {path}')
     path.write_text(new_text)
