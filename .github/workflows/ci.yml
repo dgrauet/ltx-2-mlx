@@ -51,4 +51,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras
+      - name: Type-check with ty
+        run: uv run ty check
+        continue-on-error: true
       - run: uv run pytest tests/ -v -m "not slow" --tb=short
+
+  commitlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: wagoid/commitlint-github-action@v6

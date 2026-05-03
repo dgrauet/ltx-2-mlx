@@ -27,7 +27,9 @@ dependencies = [
 trainer = ["ltx-trainer-mlx"]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
     "ruff>=0.7.0",
+    "ty>=0.0.0a1",
 ]
 all = ["ltx-2-mlx[trainer,dev]"]
 
@@ -83,3 +85,11 @@ markers = [
 
 [tool.ty]
 # Strict-mode opt-in for PYTHON_QU003 (suzerain). See ADR-0003 for rationale.
+
+[tool.coverage.run]
+source = ["packages"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
