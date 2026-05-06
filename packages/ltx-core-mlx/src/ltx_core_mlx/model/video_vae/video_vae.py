@@ -117,11 +117,15 @@ class VideoDecoder(nn.Module):
             default), uses symmetric zero-padding and no frame removal.
     """
 
-    def __init__(self, causal: bool = False):
+    def __init__(self, causal: bool = False, spatial_padding_mode: str = "zeros"):
         super().__init__()
         self._causal = causal
 
-        sp_mode = "reflect"
+        # LTX-2.3 model was trained with zero padding (per embedded_config.json
+        # "spatial_padding_mode": "zeros"). Previously hardcoded "reflect" which
+        # caused cumulative temporal divergence in decoder forward (visible as
+        # the keyframe hold-cut-decay regression at the latent boundary).
+        sp_mode = spatial_padding_mode
 
         # Input convolution: 128 latent channels -> 1024
         self.conv_in = Conv3dBlock(
