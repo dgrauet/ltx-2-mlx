@@ -219,10 +219,19 @@ class StreamingLTXModel(nn.Module):
             compiled = object.__getattribute__(self, "_compiled_block")
             prev_idx: list[int | None] = [None]
 
+            # mx.compile can only trace functions that take pytrees of
+            # arrays / constants. ``perturbations`` (a custom dataclass)
+            # passed through the model's __call__ to each block breaks
+            # tracing. Fall back to the eager block when guidance
+            # perturbations are active. This loses the compile speedup
+            # but the eager block's per-step latency is dominated by
+            # attention compute, so the regression is small (~5-10%).
+            use_compiled = kwargs.get("perturbations") is None
+
             def provider(idx: int) -> nn.Module:
                 streamer.bind(shared, idx, evict_previous=prev_idx[0])
                 prev_idx[0] = idx
-                return compiled
+                return compiled if use_compiled else shared
 
             kwargs["block_provider"] = provider
         return self.inner(*args, **kwargs)
