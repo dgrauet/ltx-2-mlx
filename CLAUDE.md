@@ -176,8 +176,8 @@ Weights are pre-converted by [mlx-forge](https://github.com/dgrauet/mlx-forge) a
 
 | Variant | HuggingFace | Size | Notes |
 |---------|-------------|------|-------|
-| bf16 | [dgrauet/ltx-2.3-mlx](https://huggingface.co/dgrauet/ltx-2.3-mlx) | ~42GB | Full precision, requires 64GB+ RAM |
-| int8 | [dgrauet/ltx-2.3-mlx-q8](https://huggingface.co/dgrauet/ltx-2.3-mlx-q8) | ~26GB | Recommended for 32GB+ |
+| bf16 | [dgrauet/ltx-2.3-mlx](https://huggingface.co/dgrauet/ltx-2.3-mlx) | ~42GB | Full precision, fits 32GB with `--low-ram` (one-stage), 64GB+ otherwise |
+| int8 | [dgrauet/ltx-2.3-mlx-q8](https://huggingface.co/dgrauet/ltx-2.3-mlx-q8) | ~26GB | Recommended for 32GB+; fits 16GB with `--low-ram` |
 | int4 | [dgrauet/ltx-2.3-mlx-q4](https://huggingface.co/dgrauet/ltx-2.3-mlx-q4) | ~12GB | Lower quality, fits 16GB |
 
 ### MLX Layout Conventions
@@ -360,6 +360,25 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 | `preprocess` | Data preprocessing | Encode raw videos into latents + conditions for training |
 
 All pipelines except one-stage T2V/I2V use the dev model with CFG guidance. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet`.
+
+### Low-RAM Example
+
+```bash
+# bf16 inference on a 32 GB Mac via block streaming
+ltx-2-mlx generate \
+  --model dgrauet/ltx-2.3-mlx \
+  --prompt "a fox in the forest" \
+  --low-ram \
+  -H 480 -W 704 -f 33 -o fox.mp4
+
+# q8 inference fits 16 GB Macs
+ltx-2-mlx generate \
+  --model dgrauet/ltx-2.3-mlx-q8 \
+  --prompt "a fox in the forest" \
+  --low-ram -o fox.mp4
+```
+
+`--low-ram` currently supports one-stage T2V/I2V only. Incompatible with `--lora` (use a pre-fused safetensors). See `## Block Streaming` below for details.
 
 ### IC-LoRA Example
 
@@ -635,6 +654,46 @@ Uses the distilled model (no CFG) with LoRA fused for Stage 1 only.
 - `conditioning/types/attention_strength_wrapper.py` — `ConditioningItemAttentionStrengthWrapper`
 - `loader/fuse_loras.py` — LoRA weight fusion with quantization support
 - `loader/sd_ops.py` — `LTXV_LORA_COMFY_RENAMING_MAP`
+
+---
+
+## Block Streaming (`--low-ram`)
+
+Stream transformer blocks from a memory-mapped safetensors file so peak Metal memory stays at ~one block instead of ~num_layers blocks. MLX-native equivalent of upstream PyTorch's CUDA-stream-based block_streaming, but ~10x simpler (~250 lines vs ~840) because the upstream "CPU pinned + GPU pool" model doesn't apply to Apple Silicon's unified memory.
+
+### How it works
+
+Three pieces combine to make per-block streaming work without tripping the macOS Metal "Impacting Interactivity" watchdog:
+
+1. **`mx.set_cache_limit(0)`** in pipeline `__init__`: tells MLX to immediately return freed Metal buffers to the OS instead of keeping them in a heap. Without this, MLX retains "recently freed" buffers and the page-cache can't evict mmap'd safetensors pages between forwards.
+
+2. **`mx.compile(shared_block, inputs=shared_block)`** in `StreamingLTXModel`: pre-compiles the shared block forward. The `inputs=block` annotation tells the compiler that the block parameters can vary between calls — `streamer.bind()` rebinds weights without invalidating the compiled graph. Compiled kernels dispatch fast enough that 48 sequential `mx.eval` syncs no longer trip the watchdog.
+
+3. **Per-block `mx.eval` sync** inside `LTXModel.__call__` when `block_provider` is set: forces the lazy compute graph to materialize between blocks so the previous block's weights become evictable. Without sync, the graph holds refs to all 48 blocks within one forward.
+
+The pipeline drops `transformer_blocks[1:]` before quantization so only block 0 is materialized; quantization scales/biases for that one block fit in ~430 MB (q8) / ~875 MB (bf16). The streamer rebinds block i's weights into block 0 for each forward iteration.
+
+### Empirical
+
+LTX-2.3 q8 distilled, 48 blocks, Nv=192 (256x384x9 frames):
+- Without streaming: peak Metal ~10-12 GB (transformer alone).
+- **With `--low-ram`: peak Metal ~2.76 GB** (after Gemma freed). ~75% reduction.
+- Latency: ~5% slower per step (compile overhead).
+
+LTX-2.3 bf16 distilled, 480x704x33: confirmed runs end-to-end on M2 Pro 32 GB. Without streaming this would OOM (44 GB transformer alone).
+
+### Limitations
+
+- One-stage T2V/I2V only currently. Two-stage (`--two-stage`, `--hq`), A2V, IC-LoRA, keyframe pipelines need similar plumbing.
+- Incompatible with `--lora` (no LoRA fusion at bind time yet). Use a pre-fused safetensors instead.
+- The compiled-block forward differs from eager by ~1 fp32 ULP (kernel fusion). `tests/test_block_streaming.py::test_wrapper_matches_baseline` uses `mx.allclose(atol=1e-5, rtol=1e-5)` to capture this.
+
+### Key Files
+
+- `loader/block_streaming.py` — `BlockStreamer` (mmap'd safetensors + per-block key map + bind with eviction + auto-reload) and `StreamingLTXModel` (drop-in wrapper).
+- `model/transformer/model.py` — `block_provider` parameter on `LTXModel.__call__` + per-block sync.
+- `ti2vid_one_stage.py` — pipeline integration: `low_ram_streaming` constructor flag wired to `--low-ram` CLI.
+- `tests/test_block_streaming.py` — 6 unit tests covering bind, block_provider hook, wrapper, eviction + auto-reload.
 
 ---
 
