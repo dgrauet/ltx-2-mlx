@@ -111,11 +111,14 @@ examples:
         "--low-ram",
         action="store_true",
         help=(
-            "One-stage T2V/I2V only: stream transformer blocks from mmap'd "
-            "safetensors instead of materializing all 48 blocks. Cuts "
-            "transformer peak RSS from ~10-12 GB (q8) to ~0.6 GB. Slightly "
-            "slower per step due to ~48 sync points. Incompatible with "
-            "--lora (use a pre-fused safetensors)."
+            "One-stage T2V/I2V only: experimental block streaming. The "
+            "machinery is bit-exact in unit tests and saves up to 95%% "
+            "transformer RAM at tiny shapes, but at production token "
+            "counts the per-block sync needed to actually evict weights "
+            "trips the macOS Metal 'Impacting Interactivity' watchdog. "
+            "Currently runs e2e but with peak RSS similar to non-streaming. "
+            "Tracked in memory/block_streaming_status.md. Incompatible "
+            "with --lora (use a pre-fused safetensors)."
         ),
     )
     gen.add_argument(

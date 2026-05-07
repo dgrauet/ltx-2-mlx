@@ -396,13 +396,12 @@ class LTXModel(nn.Module):
                     perturbations=perturbations,
                     block_idx=block_idx,
                 )
-                if block_provider is not None:
-                    # Streaming: force MLX graph materialization between
-                    # blocks so the previous block's weights become
-                    # evictable. Without this, MLX defers compute and
-                    # peak RSS scales with num_layers.
-                    _materialize = mx.eval
-                    _materialize(video_hidden, audio_hidden)
+                # NOTE: per-block sync was removed — it tripped the macOS
+                # Metal "Impacting Interactivity" watchdog at production
+                # token counts. Without it the lazy compute graph defers
+                # block weights' release until the final eval, so peak RAM
+                # gain is reduced. Future work: investigate command-buffer
+                # batching or mx.compile to re-enable per-block sync.
 
         if tap is not None:
             tap(video_hidden - block_input_v, audio_hidden - block_input_a)
