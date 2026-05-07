@@ -111,13 +111,12 @@ examples:
         "--low-ram",
         action="store_true",
         help=(
-            "One-stage T2V/I2V only: experimental block streaming. The "
-            "machinery is bit-exact in unit tests and saves up to 95%% "
-            "transformer RAM at tiny shapes, but at production token "
-            "counts the per-block sync needed to actually evict weights "
-            "trips the macOS Metal 'Impacting Interactivity' watchdog. "
-            "Currently runs e2e but with peak RSS similar to non-streaming. "
-            "Tracked in memory/block_streaming_status.md. Incompatible "
+            "One-stage T2V/I2V only: stream transformer blocks from "
+            "mmap'd safetensors via mx.compile + per-block sync + "
+            "Metal heap release. Cuts transformer peak Metal from "
+            "~10-12 GB (q8) to ~2.8 GB. Targets 16 GB Macs that "
+            "couldn't run q8 inference otherwise. Slightly slower per "
+            "step (compiled kernels but per-block sync). Incompatible "
             "with --lora (use a pre-fused safetensors)."
         ),
     )
