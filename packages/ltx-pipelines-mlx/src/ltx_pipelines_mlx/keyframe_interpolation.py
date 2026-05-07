@@ -21,7 +21,6 @@ from ltx_core_mlx.components.guiders import (
 )
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
 from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
-from ltx_core_mlx.conditioning.types.latent_cond import LatentState, noise_latent_state
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
 from ltx_core_mlx.utils.image import prepare_image_for_encoding
@@ -29,6 +28,7 @@ from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS, ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_two_stages import TwoStagePipeline
+from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
 
 
@@ -206,38 +206,41 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
         video_positions_1 = compute_video_positions(F, H_half, W_half, fps=fps)
         audio_positions = compute_audio_positions(audio_T)
 
-        # Reference flow: empty state → apply conditioning → noise.
-        # The noiser only affects tokens with denoise_mask=1 (generate).
-        # Keyframe tokens get denoise_mask=0 (preserve) and stay clean.
-        video_state_1 = LatentState(
-            latent=mx.zeros(video_shape_1, dtype=mx.bfloat16),
-            clean_latent=mx.zeros(video_shape_1, dtype=mx.bfloat16),
-            denoise_mask=mx.ones((1, video_shape_1[1], 1), dtype=mx.bfloat16),
-            positions=video_positions_1,
-        )
-        audio_state_1 = LatentState(
-            latent=mx.zeros(audio_shape, dtype=mx.bfloat16),
-            clean_latent=mx.zeros(audio_shape, dtype=mx.bfloat16),
-            denoise_mask=mx.ones((1, audio_shape[1], 1), dtype=mx.bfloat16),
-            positions=audio_positions,
-        )
-
-        # Apply keyframe conditioning at half resolution (appends tokens).
+        # Build keyframe conditioning items at half resolution.
         # Each keyframe encodes a single pixel frame.
-        for tokens, kf_idx in zip(kf_tokens_half, keyframe_indices):
-            kf_condition = VideoConditionByKeyframeIndex(
+        video_kf_conditions_half = [
+            VideoConditionByKeyframeIndex(
                 frame_idx=kf_idx,
                 keyframe_latent=tokens,
                 spatial_dims=(F, H_half, W_half),
                 fps=fps,
                 num_pixel_frames=1,
             )
-            video_state_1 = kf_condition.apply(video_state_1, (F, H_half, W_half))
+            for tokens, kf_idx in zip(kf_tokens_half, keyframe_indices)
+        ]
 
-        # NOW noise: keyframe tokens (denoise_mask=0) stay clean,
-        # generation tokens (denoise_mask=1) get pure noise.
-        video_state_1 = noise_latent_state(video_state_1, sigma=1.0, seed=seed)
-        audio_state_1 = noise_latent_state(audio_state_1, sigma=1.0, seed=seed + 1)
+        # Build noised state via the canonical upstream order:
+        #     init (zeros) -> apply conditionings -> noise.
+        # The noiser respects denoise_mask: keyframe tokens (mask=0) stay
+        # clean, generation tokens (mask=1) get pure noise at sigma=1.0.
+        video_state_1 = create_noised_state(
+            base_shape=video_shape_1,
+            conditionings=video_kf_conditions_half,
+            spatial_dims=(F, H_half, W_half),
+            positions=video_positions_1,
+            seed=seed,
+            sigma=1.0,
+            initial_latent=None,
+        )
+        audio_state_1 = create_noised_state(
+            base_shape=audio_shape,
+            conditionings=[],
+            spatial_dims=(F, H_half, W_half),  # unused (no conditionings)
+            positions=audio_positions,
+            seed=seed + 1,
+            sigma=1.0,
+            initial_latent=None,
+        )
 
         # Stage 1 sigma schedule: dev model uses LTX2Scheduler (dynamic schedule),
         # distilled model uses predefined DISTILLED_SIGMAS.
@@ -322,44 +325,46 @@ class KeyframeInterpolationPipeline(TwoStagePipeline):
         H_full, W_full = H_up, W_up
         video_tokens_up, _ = self.video_patchifier.patchify(video_upscaled)
 
-        # Noise the upscaled latent
+        # Stage 2 orchestration matches upstream `create_noised_state`:
+        #     init (initial_latent=upscaled) -> apply conditionings -> noise.
         sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
         start_sigma = sigmas_2[0]
 
-        mx.random.seed(seed + 2)
-        noise = mx.random.normal(video_tokens_up.shape).astype(mx.bfloat16)
-        noisy_tokens = noise * start_sigma + video_tokens_up * (1.0 - start_sigma)
-
         video_positions_2 = compute_video_positions(F, H_full, W_full, fps=fps)
 
-        video_state_2 = LatentState(
-            latent=noisy_tokens,
-            clean_latent=video_tokens_up,
-            denoise_mask=mx.ones((1, video_tokens_up.shape[1], 1), dtype=mx.bfloat16),
-            positions=video_positions_2,
-        )
-
-        # Apply keyframe conditioning at full resolution.
-        # Each keyframe encodes a single pixel frame.
-        for tokens, kf_idx in zip(kf_tokens_full, keyframe_indices):
-            kf_condition = VideoConditionByKeyframeIndex(
+        # Build keyframe conditioning items at full resolution.
+        video_kf_conditions_full = [
+            VideoConditionByKeyframeIndex(
                 frame_idx=kf_idx,
                 keyframe_latent=tokens,
                 spatial_dims=(F, H_full, W_full),
                 fps=fps,
                 num_pixel_frames=1,
             )
-            video_state_2 = kf_condition.apply(video_state_2, (F, H_full, W_full))
+            for tokens, kf_idx in zip(kf_tokens_full, keyframe_indices)
+        ]
 
-        # Audio state for stage 2
-        audio_tokens_1 = output_1.audio_latent
-        audio_state_2 = LatentState(
-            latent=audio_tokens_1,
-            clean_latent=audio_tokens_1,
-            denoise_mask=mx.ones((1, audio_tokens_1.shape[1], 1), dtype=audio_tokens_1.dtype),
-            positions=audio_positions,
+        video_state_2 = create_noised_state(
+            base_shape=video_tokens_up.shape,
+            conditionings=video_kf_conditions_full,
+            spatial_dims=(F, H_full, W_full),
+            positions=video_positions_2,
+            seed=seed + 2,
+            sigma=start_sigma,
+            initial_latent=video_tokens_up,
         )
-        audio_state_2 = noise_latent_state(audio_state_2, sigma=start_sigma, seed=seed + 2)
+
+        # Audio: no conditionings, just noise on stage-1 audio latent.
+        audio_tokens_1 = output_1.audio_latent
+        audio_state_2 = create_noised_state(
+            base_shape=audio_tokens_1.shape,
+            conditionings=[],
+            spatial_dims=(F, H_full, W_full),  # unused
+            positions=audio_positions,
+            seed=seed + 2,
+            sigma=start_sigma,
+            initial_latent=audio_tokens_1,
+        )
 
         # Stage 2 denoising: simple (no CFG), matching reference
         output_2 = denoise_loop(
