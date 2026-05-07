@@ -14,7 +14,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **HQ generation** — res_2s second-order sampler + CFG/STG guidance
 - **Prompt enhancement** — Gemma 3 12B rewrites short prompts into detailed descriptions
 - **Training** — LoRA fine-tuning with flow matching (T2V and V2V strategies)
-- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (one-stage only)
+- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (generate / `--two-stage` / `--hq` / a2v / keyframe; ic-lora not yet supported)
 - **3 model variants** — bf16, int8, int4 (fits 16GB–64GB Macs)
 - **3 upsamplers** — spatial 2x, spatial 1.5x, temporal 2x
 
@@ -68,11 +68,16 @@ ltx-2-mlx enhance --prompt "a cat" --mode t2v
 # Use int4 model (fits 16GB)
 ltx-2-mlx generate -p "A cat" -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q4
 
-# Block streaming: bf16 model on 32 GB Mac (one-stage only)
+# Block streaming: bf16 model on 32 GB Mac
 ltx-2-mlx generate -p "A cat" -o cat.mp4 --model dgrauet/ltx-2.3-mlx --low-ram
 
 # Block streaming: q8 model on 16 GB Mac
 ltx-2-mlx generate -p "A cat" -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q8 --low-ram
+
+# Block streaming works on two-stage / HQ / a2v / keyframe too
+ltx-2-mlx generate -p "A cat" -o cat.mp4 --two-stage --low-ram
+ltx-2-mlx a2v -p "music video" --audio music.wav -o a2v.mp4 --low-ram
+ltx-2-mlx keyframe -p "transition" --start a.png --end b.png -o kf.mp4 --low-ram
 
 # Model info
 ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q8

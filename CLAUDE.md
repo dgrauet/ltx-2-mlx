@@ -176,7 +176,7 @@ Weights are pre-converted by [mlx-forge](https://github.com/dgrauet/mlx-forge) a
 
 | Variant | HuggingFace | Size | Notes |
 |---------|-------------|------|-------|
-| bf16 | [dgrauet/ltx-2.3-mlx](https://huggingface.co/dgrauet/ltx-2.3-mlx) | ~42GB | Full precision, fits 32GB with `--low-ram` (one-stage), 64GB+ otherwise |
+| bf16 | [dgrauet/ltx-2.3-mlx](https://huggingface.co/dgrauet/ltx-2.3-mlx) | ~42GB | Full precision, fits 32GB with `--low-ram`, 64GB+ otherwise |
 | int8 | [dgrauet/ltx-2.3-mlx-q8](https://huggingface.co/dgrauet/ltx-2.3-mlx-q8) | ~26GB | Recommended for 32GB+; fits 16GB with `--low-ram` |
 | int4 | [dgrauet/ltx-2.3-mlx-q4](https://huggingface.co/dgrauet/ltx-2.3-mlx-q4) | ~12GB | Lower quality, fits 16GB |
 
@@ -682,10 +682,24 @@ LTX-2.3 q8 distilled, 48 blocks, Nv=192 (256x384x9 frames):
 
 LTX-2.3 bf16 distilled, 480x704x33: confirmed runs end-to-end on M2 Pro 32 GB. Without streaming this would OOM (44 GB transformer alone).
 
+### Coverage
+
+`--low-ram` is supported and end-to-end-validated on:
+- `generate` (one-stage T2V/I2V)
+- `generate --two-stage` (Euler + CFG)
+- `generate --hq` (res_2s + CFG)
+- `a2v` (audio-to-video)
+- `keyframe` (interpolation)
+
+For two-stage / HQ / a2v / keyframe, the Stage 1 → Stage 2 transition swaps the streamer from ``transformer-dev.safetensors`` to the pre-fused ``transformer-distilled.safetensors`` (mlx-forge produces this at LoRA strength 1.0) instead of fusing the distilled LoRA in-place. In-place fusion would force materialization of all 48 blocks. The pipeline raises if a non-default ``--distilled-lora-strength`` is requested.
+
+`mx.compile` cannot trace `BatchedPerturbationConfig` (the dataclass passed for STG / modality-isolation passes), so `StreamingLTXModel.__call__` falls back to the eager block whenever ``perturbations`` is non-None. Eager + per-block sync still works thanks to `set_cache_limit(0)`.
+
 ### Limitations
 
-- One-stage T2V/I2V only currently. Two-stage (`--two-stage`, `--hq`), A2V, IC-LoRA, keyframe pipelines need similar plumbing.
-- Incompatible with `--lora` (no LoRA fusion at bind time yet). Use a pre-fused safetensors instead.
+- `ic-lora` does NOT yet support `--low-ram` — Stage 1 fuses an IC-LoRA into the distilled model, which would force materialization of all 48 blocks. Needs bind-time LoRA fusion (planned future work).
+- Incompatible with `--lora` flag (same reason). Use a pre-fused safetensors via mlx-forge.
+- Custom `--distilled-lora-strength` (anything other than 1.0) on two-stage pipelines is also blocked on the same future work.
 - The compiled-block forward differs from eager by ~1 fp32 ULP (kernel fusion). `tests/test_block_streaming.py::test_wrapper_matches_baseline` uses `mx.allclose(atol=1e-5, rtol=1e-5)` to capture this.
 
 ### Key Files
