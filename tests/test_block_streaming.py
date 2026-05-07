@@ -153,3 +153,36 @@ class TestBlockProvider:
             assert mx.array_equal(baseline_v, streamed_v).item()
             assert mx.array_equal(baseline_a, streamed_a).item()
             streamer.close()
+
+    def test_eviction_then_reload_keeps_outputs_bit_exact(self):
+        """Evicting all blocks across one forward + auto-reload on the
+        next forward must yield the same outputs (proves multi-step
+        inference works without leaking memory between calls)."""
+        cfg = _tiny_config(num_layers=3)
+        mx.random.seed(42)
+        model = LTXModel(cfg)
+        mx.eval(model.parameters())
+        common = self._build_inputs(cfg)
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "blocks.safetensors"
+            _save_block_weights_to_safetensors(model, path, prefix="transformer_blocks.")
+            streamer = BlockStreamer(path, block_prefix="transformer_blocks.")
+            shared = _make_block(cfg)
+
+            def make_evicting_provider():
+                prev = [None]
+
+                def provider(idx: int):
+                    streamer.bind(shared, idx, evict_previous=prev[0])
+                    prev[0] = idx
+                    return shared
+
+                return provider
+
+            run1_v, run1_a = model(**common, block_provider=make_evicting_provider())
+            run2_v, run2_a = model(**common, block_provider=make_evicting_provider())
+            mx.eval(run1_v, run1_a, run2_v, run2_a)
+            assert mx.array_equal(run1_v, run2_v).item()
+            assert mx.array_equal(run1_a, run2_a).item()
+            streamer.close()

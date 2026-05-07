@@ -69,14 +69,12 @@ class BlockStreamer:
     ) -> None:
         if isinstance(weight_paths, str | Path):
             weight_paths = [weight_paths]
+        self._weight_paths = [str(p) for p in weight_paths]
         self._block_prefix = block_prefix
 
         # Merge all safetensors files. mx.load mmaps each one, so cost is
         # roughly metadata-only until individual arrays are touched.
-        merged: dict[str, mx.array] = {}
-        for path in weight_paths:
-            merged.update(mx.load(str(path)))
-        self._weights = merged
+        self._weights = self._reload_dict()
 
         # Build per-block key map: idx -> list[(full_key, param_name)].
         self._block_key_map: dict[int, list[tuple[str, str]]] = {}
@@ -112,25 +110,47 @@ class BlockStreamer:
             raise KeyError(f"block {idx} not in streamer (have {sorted(self._block_key_map)})")
         return [param_name for _full, param_name in self._block_key_map[idx]]
 
-    def bind(self, block: nn.Module, idx: int) -> None:
+    def bind(self, block: nn.Module, idx: int, evict_previous: int | None = None) -> None:
         """Load block ``idx``'s weights into ``block`` in-place.
 
         Internally calls :func:`mlx.nn.Module.load_weights`. After this
         returns, ``block``'s parameters reference the safetensors-mapped
         arrays for index ``idx``. A subsequent :meth:`bind` to a
         different ``idx`` rebinds them, releasing the previous arrays
-        for eviction.
+        from the block's parameter tree.
 
         Args:
             block: Target ``BasicAVTransformerBlock``-shaped module.
                 Its parameter tree must match the keys returned by
                 :meth:`block_keys`.
             idx: Block index to load.
+            evict_previous: If given, drop the cached array references
+                for that block index from the internal weight dict
+                before binding. The streamer holds refs to every
+                block's weights; without eviction, those refs prevent
+                GC even after the bound block is replaced. For
+                streaming inference, pass the previously-bound index
+                so peak resident memory stays at ~one block.
         """
         if idx not in self._block_key_map:
             raise KeyError(f"block {idx} not in streamer")
+        if evict_previous is not None and evict_previous in self._block_key_map:
+            for full_key, _ in self._block_key_map[evict_previous]:
+                self._weights.pop(full_key, None)
+        # Re-mmap if the requested block's keys have already been evicted
+        # (typical after a full forward sweep through all 48 blocks).
+        sample_key = self._block_key_map[idx][0][0]
+        if sample_key not in self._weights:
+            self._weights = self._reload_dict()
         weights = [(param_name, self._weights[full_key]) for full_key, param_name in self._block_key_map[idx]]
         block.load_weights(weights, strict=True)
+
+    def _reload_dict(self) -> dict[str, mx.array]:
+        """Re-mmap all weight files into a fresh dict."""
+        merged: dict[str, mx.array] = {}
+        for path in self._weight_paths:
+            merged.update(mx.load(path))
+        return merged
 
     def close(self) -> None:
         """Release the mmap'd dict. After this the streamer is unusable."""
