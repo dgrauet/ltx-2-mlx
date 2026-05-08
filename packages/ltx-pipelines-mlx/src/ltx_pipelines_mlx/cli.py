@@ -531,48 +531,14 @@ def _cmd_generate(args: argparse.Namespace) -> None:
                 kwargs["teacache_thresh"] = args.teacache_thresh
         pipe.generate_and_save(**kwargs)
 
-    elif args.image:
-        from ltx_pipelines_mlx.ti2vid_one_stage import ImageToVideoPipeline
-
-        if not args.quiet:
-            print("Mode: Image-to-Video")
-            print(f"Image: {args.image}")
-
-        pipe = ImageToVideoPipeline(model_dir=args.model, gemma_model_id=args.gemma)
-        if lora_paths:
-            pipe._pending_loras = lora_paths
-        pipe.generate_and_save(
-            prompt=prompt,
-            output_path=args.output,
-            image=args.image,
-            height=args.height,
-            width=args.width,
-            num_frames=args.frames,
-            seed=args.seed,
-            num_steps=args.steps,
-        )
-
     else:
-        from ltx_pipelines_mlx.ti2vid_one_stage import TextToVideoPipeline
-
-        if not args.quiet:
-            print("Mode: Text-to-Video")
-
-        pipe = TextToVideoPipeline(
-            model_dir=args.model,
-            gemma_model_id=args.gemma,
-            low_ram_streaming=getattr(args, "low_ram", False),
-        )
-        if lora_paths:
-            pipe._pending_loras = lora_paths
-        pipe.generate_and_save(
-            prompt=prompt,
-            output_path=args.output,
-            height=args.height,
-            width=args.width,
-            num_frames=args.frames,
-            seed=args.seed,
-            num_steps=args.steps,
+        raise SystemExit(
+            "generate requires one of --one-stage, --two-stage, --hq, --distilled. "
+            "Each maps to an upstream pipeline class:\n"
+            "  --one-stage : TI2VidOneStagePipeline (dev + CFG, full target res)\n"
+            "  --two-stage : TI2VidTwoStagesPipeline (dev + CFG, half-res + upscale, recommended)\n"
+            "  --hq        : TI2VidTwoStagesHQPipeline (res_2s + CFG, half-res + upscale)\n"
+            "  --distilled : DistilledPipeline (distilled half-res + upscale, fastest)"
         )
 
     _print_result(args.output, t0, args.quiet)

@@ -2,7 +2,7 @@
 
 Reference for all CLI subcommands of `ltx-2-mlx`, the pipeline class
 backing each, and which memory / performance flags apply where.
-Current as of **v0.7.1**.
+Current as of **v0.8.0**.
 
 For the underlying architecture and conventions, see
 [CLAUDE.md](../CLAUDE.md). For the high-level user-facing overview,
@@ -12,7 +12,6 @@ see [README.md](../README.md).
 
 | CLI | Pipeline class | Mode(s) | Sampler stage 1 | Sampler stage 2 | Default model | CFG | STG default |
 |---|---|---|---|---|---|---|---|
-| `generate` | `TextToVideoPipeline` | T2V / I2V | Euler distilled (8 steps) | — | q8 | ❌ | — |
 | `generate --one-stage` | `DevOneStagePipeline` | T2V / I2V | Euler + CFG (30 steps) at **full** resolution | — | q8 + dev LoRA | ✅ | 0.0 |
 | `generate --two-stage` | `TwoStagePipeline` | T2V / I2V | Euler + CFG (30 steps) | Euler distilled (3 steps) | q8 + dev LoRA | ✅ | 0.0 |
 | `generate --hq` | `TwoStageHQPipeline` | T2V / I2V | res_2s + CFG (15 steps × 2 sub-steps) | Euler distilled (3) | q8 + dev LoRA | ✅ | 0.0 |
@@ -44,8 +43,7 @@ see [README.md](../README.md).
 
 | Pipeline | Specific flags |
 |---|---|
-| `generate` (one-stage) | `--steps` (default 8), `--lora PATH STRENGTH` (incompatible with `--low-ram`), `--image`, `--enhance-prompt`, `--cfg-scale`, `--stg-scale`, `--rescale-scale` |
-| `generate --one-stage` | `--stage1-steps` aliased to `num_steps` (default 30), `--cfg-scale` (3.0), `--stg-scale` (0.0), `--image`. No stage2 / TeaCache / distilled-lora flags. |
+| `generate --one-stage` | `--stage1-steps` aliased to `num_steps` (default 30), `--cfg-scale` (3.0), `--stg-scale` (0.0), `--image`. No stage2 / TeaCache / distilled-lora flags. Common: `--lora PATH STRENGTH` (incompatible with `--low-ram`), `--enhance-prompt`. |
 | `generate --two-stage` | `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--stg-scale` (0.0), `--image`, `--distilled-lora-strength` (1.0), `--enable-teacache`, `--teacache-thresh` |
 | `generate --hq` | same as two-stage but stage1 default 15 steps, res_2s sampler |
 | `generate --distilled` | `--stage1-steps` (8 default), `--stage2-steps` (3 default), `--image`. No CFG/STG/TeaCache flags (distilled flow). Same DiT in both stages — no LoRA swap. |
@@ -63,5 +61,6 @@ see [README.md](../README.md).
 - TeaCache calibration is sampler-specific (Euler vs res_2s). Don't reuse coefficients across `--two-stage` and `--hq`.
 - HDR LoRA can be combined with regular IC-LoRA control LoRAs in theory but untested — single HDR LoRA per pipeline is the validated path.
 - Modality tiling overhead dominates over memory benefit at default Nv (1650-3168). Use only when targeting 1080p / 8s+ on Mac Studio 64-128 GB; on 32 GB Mac, prefer `--low-ram` alone.
-- `generate` (no flag) vs `generate --distilled`: the no-flag path runs distilled at the **target resolution** in one pass (8 steps). `--distilled` runs distilled at **half resolution** (8 steps) then upscales 2× and refines (3 steps), mirroring upstream `DistilledPipeline`. Use `--distilled` when target res > 480×704 and direct one-stage output shows OOD artifacts; otherwise the simpler one-stage suffices.
+- `generate` requires a mode flag (`--one-stage`, `--two-stage`, `--hq`, or `--distilled`). There is **no implicit default** — every pipeline maps 1:1 to an upstream Lightricks/LTX-2 class.
 - `generate --one-stage` vs `generate --two-stage`: same dev model + CFG, but `--one-stage` runs **once at the target resolution** (no upscaler dependency, simpler latents for downstream). `--two-stage` runs at half-res then upscales 2× and refines (typically faster overall and better at large targets). Pick `--one-stage` for native res ≤ 480×704 or if you don't trust the upsampler; pick `--two-stage` for everything else.
+- `generate --distilled` vs `generate --two-stage`: same half-res + upscale structure, but `--distilled` skips CFG entirely (8 stage 1 steps × 1 forward instead of 30 × 2-4). Fastest mode; quality slightly below the dev+CFG variants.

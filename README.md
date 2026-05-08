@@ -40,23 +40,21 @@ uv sync --all-extras
 ### CLI
 
 ```bash
-# Text-to-Video
-ltx-2-mlx generate --prompt "A sunset over the ocean" --output sunset.mp4
+# Text-to-Video — pick a pipeline mode (one of --two-stage, --hq, --one-stage, --distilled).
+# Two-stage is the upstream-recommended production default.
+ltx-2-mlx generate --prompt "A sunset over the ocean" --two-stage -o sunset.mp4
 
-# Image-to-Video
-ltx-2-mlx generate --prompt "Animate this" --image photo.jpg -o animated.mp4
+# Image-to-Video (any mode supports --image)
+ltx-2-mlx generate --prompt "Animate this" --image photo.jpg --two-stage -o animated.mp4
 
-# Two-stage (higher quality)
-ltx-2-mlx generate --prompt "A scene" --two-stage -o hires.mp4
-
-# HQ (res_2s sampler, best quality)
+# HQ (res_2s sampler, highest quality)
 ltx-2-mlx generate --prompt "A scene" --hq --stage1-steps 20 -o hq.mp4
 
-# Distilled two-stage (fast, half-res + upscale, mirrors upstream DistilledPipeline)
+# Distilled two-stage (fastest, mirrors upstream DistilledPipeline)
 ltx-2-mlx generate --prompt "A scene" --distilled -H 720 -W 1280 -o distilled.mp4
 
-# Dev one-stage (CFG quality at full target resolution, mirrors upstream TI2VidOneStagePipeline)
-ltx-2-mlx generate --prompt "A scene" --one-stage -o dev.mp4
+# One-stage dev + CFG (full target res, mirrors upstream TI2VidOneStagePipeline)
+ltx-2-mlx generate --prompt "A scene" --one-stage -o one_stage.mp4
 
 # Audio-to-Video
 ltx-2-mlx a2v --prompt "Music video" --audio music.wav -o a2v.mp4
@@ -74,15 +72,15 @@ ltx-2-mlx keyframe --prompt "Smooth transition" --start frame1.png --end frame2.
 ltx-2-mlx enhance --prompt "a cat" --mode t2v
 
 # Use int4 model (fits 16GB)
-ltx-2-mlx generate -p "A cat" -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q4
+ltx-2-mlx generate -p "A cat" --distilled -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q4
 
 # Block streaming: bf16 model on 32 GB Mac
-ltx-2-mlx generate -p "A cat" -o cat.mp4 --model dgrauet/ltx-2.3-mlx --low-ram
+ltx-2-mlx generate -p "A cat" --two-stage -o cat.mp4 --model dgrauet/ltx-2.3-mlx --low-ram
 
 # Block streaming: q8 model on 16 GB Mac
-ltx-2-mlx generate -p "A cat" -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q8 --low-ram
+ltx-2-mlx generate -p "A cat" --distilled -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q8 --low-ram
 
-# Block streaming works on two-stage / HQ / a2v / keyframe / ic-lora
+# Block streaming works on every generate mode + a2v / keyframe / ic-lora
 ltx-2-mlx generate -p "A cat" -o cat.mp4 --two-stage --low-ram
 ltx-2-mlx generate -p "A cat" -o cat.mp4 --hq --low-ram
 ltx-2-mlx a2v -p "music video" --audio music.wav -o a2v.mp4 --low-ram
@@ -111,10 +109,15 @@ ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q8
 
 ### Python API
 
-```python
-from ltx_pipelines_mlx import TextToVideoPipeline
+Pick the pipeline class matching your target — every public class
+mirrors an upstream Lightricks/LTX-2 pipeline.
 
-pipe = TextToVideoPipeline(model_dir="dgrauet/ltx-2.3-mlx-q8")
+Two-stage (recommended for most use cases — dev model + CFG + upscale):
+
+```python
+from ltx_pipelines_mlx import TwoStagePipeline
+
+pipe = TwoStagePipeline(model_dir="dgrauet/ltx-2.3-mlx-q8")
 pipe.generate_and_save(
     prompt="A sunset over the ocean with waves crashing",
     output_path="sunset.mp4",
@@ -122,21 +125,15 @@ pipe.generate_and_save(
     width=704,
     num_frames=97,
     seed=42,
+    image="photo.jpg",  # optional I2V
 )
 ```
 
-Image-to-Video:
+For other modes:
 
-```python
-from ltx_pipelines_mlx import ImageToVideoPipeline
-
-pipe = ImageToVideoPipeline(model_dir="dgrauet/ltx-2.3-mlx-q8")
-pipe.generate_and_save(
-    prompt="Animate this scene with gentle motion",
-    output_path="animated.mp4",
-    image="photo.jpg",
-)
-```
+- `DistilledPipeline` — fastest (distilled half-res + upscale).
+- `TwoStageHQPipeline` — highest quality (res_2s + CFG + upscale).
+- `DevOneStagePipeline` — full-res CFG, no upscaler dependency.
 
 Audio-to-Video:
 
