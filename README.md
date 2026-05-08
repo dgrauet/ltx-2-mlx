@@ -171,6 +171,8 @@ video_lat, audio_lat = pipe.extend_from_video(
 
 ## CLI Reference
 
+> **Full pipeline + flag matrix**: see [docs/PIPELINES.md](docs/PIPELINES.md) for a complete matrix of every CLI subcommand, the pipeline class behind it, supported sampler / model defaults, and which memory / perf flags apply where.
+
 ```
 ltx-2-mlx generate   T2V / I2V / two-stage / HQ generation
   --prompt, -p        Text prompt (required)

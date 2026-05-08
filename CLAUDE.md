@@ -344,6 +344,8 @@ Audio latent (B, 8, T, 16)
 
 ## CLI Commands
 
+Full pipeline ↔ option matrix lives at [docs/PIPELINES.md](docs/PIPELINES.md). Quick reference:
+
 Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 
 | Command | Pipeline | Description |
