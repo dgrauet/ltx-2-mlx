@@ -14,12 +14,14 @@ Public pipeline classes mirror upstream Lightricks/LTX-2 pipelines 1:1:
 | ``AudioToVideoPipeline`` | ``a2vid_two_stage.A2VidPipelineTwoStage`` |
 | ``RetakePipeline`` | ``retake.RetakePipeline`` (extend folded in) |
 
-The :class:`BasePipeline` and :class:`ImageToVideoPipeline` classes live
-in the private ``_base`` module — they are shared infrastructure parents
-with no upstream counterpart.
+The :class:`BasePipeline` class lives in the private ``_base`` module —
+it's the shared inheritance parent for all the public pipelines, with
+no upstream counterpart (upstream uses pure composition). I2V is
+supported on every public pipeline by passing ``image=...`` to
+``generate*``; there is no dedicated ``ImageToVideoPipeline``.
 """
 
-from ltx_pipelines_mlx._base import BasePipeline, ImageToVideoPipeline
+from ltx_pipelines_mlx._base import BasePipeline
 from ltx_pipelines_mlx.a2vid_two_stage import AudioToVideoPipeline
 from ltx_pipelines_mlx.distilled import DistilledPipeline
 from ltx_pipelines_mlx.hdr_ic_lora import HDRICLoraPipeline
@@ -48,7 +50,6 @@ __all__ = [
     "HDRICLoraPipeline",
     "ICLoraPipeline",
     "ImageConditioner",
-    "ImageToVideoPipeline",
     "KeyframeInterpolationPipeline",
     "PromptEncoder",
     "RetakePipeline",

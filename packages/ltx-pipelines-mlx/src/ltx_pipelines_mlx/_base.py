@@ -8,19 +8,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import mlx.core as mx
-from PIL import Image
 
 from ltx_core_mlx.components.patchifiers import AudioPatchifier, VideoLatentPatchifier, compute_video_latent_shape
-from ltx_core_mlx.conditioning.types.latent_cond import (
-    VideoConditionByLatentIndex,
-)
 from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
 from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
 from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
-from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
@@ -477,159 +472,3 @@ class BasePipeline:
         from ltx_pipelines_mlx.utils._orchestration import save_waveform as _impl
 
         _impl(waveform, path, sample_rate=sample_rate)
-
-
-class ImageToVideoPipeline(BasePipeline):
-    """Image-to-Video generation pipeline.
-
-    Extends :class:`BasePipeline` to condition on a reference image.
-    The first frame is encoded and preserved during denoising.
-
-    Args:
-        model_dir: Path to model weights or HuggingFace repo ID.
-        low_memory: If True, aggressively free memory between stages.
-    """
-
-    def load(self) -> None:
-        """Load all model components including VAE encoder."""
-        super().load()
-        self._load_vae_encoder()
-
-    def generate_from_image(
-        self,
-        prompt: str,
-        image: Image.Image | str,
-        height: int = 480,
-        width: int = 704,
-        num_frames: int = 97,
-        seed: int = 42,
-        num_steps: int | None = None,
-    ) -> tuple[mx.array, mx.array]:
-        """Generate video conditioned on a reference image.
-
-        Args:
-            prompt: Text prompt.
-            image: Reference image (PIL Image or path).
-            height: Video height.
-            width: Video width.
-            num_frames: Number of frames.
-            seed: Random seed.
-            num_steps: Number of denoising steps.
-
-        Returns:
-            Tuple of (video_latent, audio_latent).
-        """
-        # I2V needs both VAE encoder (for image) and text encoder (for prompt).
-        # In low_memory mode, load and use each before loading the transformer.
-
-        # Step 1: Load VAE encoder, encode image, free
-        self._load_vae_encoder()
-
-        img_tensor = prepare_image_for_encoding(image, height, width)
-        ref_latent = self.vae_encoder.encode(img_tensor[:, :, None, :, :])
-        mx.eval(ref_latent)
-        if self.low_memory:
-            self.vae_encoder = None
-            aggressive_cleanup()
-
-        # Step 2: Encode text, then load remaining components
-        video_embeds, audio_embeds = self._encode_text_and_load(prompt)
-        assert self.dit is not None
-
-        # Compute shapes
-        F, H, W = compute_video_latent_shape(num_frames, height, width)
-        video_shape = (1, F * H * W, 128)
-        audio_T = compute_audio_token_count(num_frames)
-        audio_shape = (1, audio_T, 128)
-
-        # Compute positions for RoPE
-        video_positions = compute_video_positions(F, H, W)
-        audio_positions = compute_audio_positions(audio_T)
-
-        # I2V conditioning: preserve first frame (LatentIndex replace).
-        ref_tokens = ref_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
-        condition = VideoConditionByLatentIndex(frame_indices=[0], clean_latent=ref_tokens)
-
-        # legacy_scalar_blend=True bit-matches legacy create_initial_state +
-        # apply_conditioning flow (sigma=1 on uniform mask + LatentIndex replace).
-        video_state = create_noised_state(
-            base_shape=video_shape,
-            conditionings=[condition],
-            spatial_dims=(F, H, W),
-            positions=video_positions,
-            seed=seed,
-            sigma=1.0,
-            initial_latent=None,
-            legacy_scalar_blend=True,
-        )
-        audio_state = create_noised_state(
-            base_shape=audio_shape,
-            conditionings=[],
-            spatial_dims=(F, H, W),  # unused
-            positions=audio_positions,
-            seed=seed + 1,
-            sigma=1.0,
-            initial_latent=None,
-            legacy_scalar_blend=True,
-        )
-
-        # Denoise
-        sigmas = DISTILLED_SIGMAS[: num_steps + 1] if num_steps else DISTILLED_SIGMAS
-        x0_model = X0Model(self.dit)
-
-        output = denoise_loop(
-            model=x0_model,
-            video_state=video_state,
-            audio_state=audio_state,
-            video_text_embeds=video_embeds,
-            audio_text_embeds=audio_embeds,
-            sigmas=sigmas,
-        )
-        if self.low_memory:
-            aggressive_cleanup()
-
-        video_latent = self.video_patchifier.unpatchify(output.video_latent, (F, H, W))
-        audio_latent = self.audio_patchifier.unpatchify(output.audio_latent)
-
-        return video_latent, audio_latent
-
-    def generate_and_save(
-        self,
-        prompt: str,
-        output_path: str,
-        image: Image.Image | str | None = None,
-        height: int = 480,
-        width: int = 704,
-        num_frames: int = 97,
-        seed: int = 42,
-        num_steps: int | None = None,
-    ) -> str:
-        """Generate and save I2V video+audio.
-
-        Args:
-            prompt: Text prompt.
-            output_path: Output video path.
-            image: Reference image. If None, falls back to T2V.
-            height: Video height.
-            width: Video width.
-            num_frames: Number of frames.
-            seed: Random seed.
-            num_steps: Number of denoising steps.
-
-        Returns:
-            Path to output video.
-        """
-        if image is None:
-            return super().generate_and_save(prompt, output_path, height, width, num_frames, seed, num_steps)
-
-        video_latent, audio_latent = self.generate_from_image(
-            prompt=prompt,
-            image=image,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            seed=seed,
-            num_steps=num_steps,
-        )
-
-        return self._decode_and_save_video(video_latent, audio_latent, output_path)
