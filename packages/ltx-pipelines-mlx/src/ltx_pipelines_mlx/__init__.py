@@ -29,17 +29,30 @@ from ltx_pipelines_mlx.retake import RetakePipeline
 from ltx_pipelines_mlx.ti2vid_one_stage import TI2VidOneStagePipeline
 from ltx_pipelines_mlx.ti2vid_two_stages import TwoStagePipeline
 from ltx_pipelines_mlx.ti2vid_two_stages_hq import TwoStageHQPipeline
+from ltx_pipelines_mlx.utils.blocks import (
+    AudioDecoder,
+    ImageConditioner,
+    PromptEncoder,
+    VideoDecoder,
+    VideoUpsampler,
+)
 
 __all__ = [
+    # Composition blocks (mirror upstream utils/blocks.py)
+    "AudioDecoder",
     "AudioToVideoPipeline",
     "BasePipeline",
     "DistilledPipeline",
     "HDRICLoraPipeline",
     "ICLoraPipeline",
+    "ImageConditioner",
     "ImageToVideoPipeline",
     "KeyframeInterpolationPipeline",
+    "PromptEncoder",
     "RetakePipeline",
     "TI2VidOneStagePipeline",
     "TwoStageHQPipeline",
     "TwoStagePipeline",
+    "VideoDecoder",
+    "VideoUpsampler",
 ]

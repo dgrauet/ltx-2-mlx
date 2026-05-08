@@ -128,7 +128,15 @@ class BasePipeline:
     # ------------------------------------------------------------------
 
     def _load_text_encoder(self) -> None:
-        """Load Gemma text encoder and feature extractor connector if not already loaded."""
+        """Load Gemma text encoder and feature extractor connector if not already loaded.
+
+        Inheritance-API equivalent of :class:`PromptEncoder` block (see
+        :mod:`ltx_pipelines_mlx.utils.blocks`). The block class is the
+        upstream-isomorphic surface; this method is kept for the
+        existing inheritance subclasses (TwoStagePipeline, RetakePipeline,
+        ICLoraPipeline, ...) that read ``self.text_encoder`` /
+        ``self.feature_extractor`` directly.
+        """
         if self.text_encoder is None:
             self.text_encoder = GemmaLanguageModel()
             self.text_encoder.load(self._gemma_model_id)
