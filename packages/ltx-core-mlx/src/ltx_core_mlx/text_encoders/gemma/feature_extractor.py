@@ -180,11 +180,16 @@ class TextEncoderConnector(nn.Module):
         """
         # Project to separate video/audio dimensions
         video_embeds, audio_embeds = self.text_embedding_projection(hidden_states)
+        _materialize(video_embeds, audio_embeds)
+        mx.synchronize()
 
         # Refine through transformer connectors
         video_embeds = self.video_embeddings_connector(video_embeds, attention_mask=attention_mask)
         _materialize(video_embeds)
+        mx.synchronize()
         audio_embeds = self.audio_embeddings_connector(audio_embeds, attention_mask=attention_mask)
+        _materialize(audio_embeds)
+        mx.synchronize()
 
         return video_embeds, audio_embeds
 

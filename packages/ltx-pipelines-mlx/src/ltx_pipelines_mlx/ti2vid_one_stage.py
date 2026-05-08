@@ -389,8 +389,15 @@ class TextToVideoPipeline:
         assert self.text_encoder is not None
         assert self.feature_extractor is not None
 
-        # Extract ALL 49 layer hidden states with attention mask
-        all_hidden_states, attention_mask = self.text_encoder.encode_all_layers(prompt)
+        # Extract ALL 49 layer hidden states with attention mask.
+        # Optional max_length override via env var to dodge the macOS Metal
+        # watchdog when post-boot indexing slows Gemma below 10 s/forward.
+        # Note: shorter pad shifts left-padded RoPE positions and may degrade
+        # quality vs the LTX training distribution (1024 default).
+        import os as _os
+
+        _max_length = int(_os.environ.get("LTX2_GEMMA_MAX_LENGTH", "1024"))
+        all_hidden_states, attention_mask = self.text_encoder.encode_all_layers(prompt, max_length=_max_length)
         # Materialize Gemma outputs and flush before the connector forward.
         # Splits the Metal command buffer so Gemma + connector don't pile
         # into a single dispatch that exceeds the macOS watchdog under
