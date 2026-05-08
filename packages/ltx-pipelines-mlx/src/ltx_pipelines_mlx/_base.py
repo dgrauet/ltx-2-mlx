@@ -70,18 +70,105 @@ class BasePipeline:
 
         self._dev_transformer: str | None = None
 
-        # Components (lazy-loaded)
+        # Composition blocks — own each component's load/free lifecycle. The
+        # ``self.text_encoder`` / ``self.vae_encoder`` / etc. attributes
+        # below are properties that proxy these blocks for backward compat
+        # with subclasses that read/write them directly.
+        from ltx_pipelines_mlx.utils.blocks import (
+            AudioDecoder as _AudioDecoderBlock,
+        )
+        from ltx_pipelines_mlx.utils.blocks import (
+            ImageConditioner as _ImageConditionerBlock,
+        )
+        from ltx_pipelines_mlx.utils.blocks import (
+            PromptEncoder as _PromptEncoderBlock,
+        )
+        from ltx_pipelines_mlx.utils.blocks import (
+            VideoDecoder as _VideoDecoderBlock,
+        )
+
+        self._prompt_encoder = _PromptEncoderBlock(self.model_dir, gemma_model_id)
+        self._image_conditioner = _ImageConditionerBlock(self.model_dir)
+        self._video_decoder = _VideoDecoderBlock(self.model_dir)
+        self._audio_decoder_block = _AudioDecoderBlock(self.model_dir)
+
+        # Audio encoder block is loaded lazily by retake/extend only.
+        self._audio_encoder: object | None = None
+        self._audio_processor: object | None = None
+
         self.dit: LTXModel | None = None
-        self.vae_decoder: VideoDecoder | None = None
-        self.vae_encoder: VideoEncoder | None = None
-        self.audio_decoder: AudioVAEDecoder | None = None
-        self.vocoder: VocoderWithBWE | None = None
-        self.text_encoder: GemmaLanguageModel | None = None
-        self.feature_extractor: GemmaFeaturesExtractorV2 | None = None
-        self.audio_encoder: object | None = None
-        self.audio_processor: object | None = None
         self.video_patchifier = VideoLatentPatchifier()
         self.audio_patchifier = AudioPatchifier()
+
+    # -------------------- proxy properties to blocks --------------------
+    # Subclasses still read/write these as direct attributes; the property
+    # tier proxies them onto the underlying composition blocks so memory
+    # frees propagate (e.g. ``self.text_encoder = None`` releases the
+    # block's strong ref too).
+
+    @property
+    def text_encoder(self) -> GemmaLanguageModel | None:
+        return self._prompt_encoder._text_encoder
+
+    @text_encoder.setter
+    def text_encoder(self, value: GemmaLanguageModel | None) -> None:
+        self._prompt_encoder._text_encoder = value
+
+    @property
+    def feature_extractor(self) -> GemmaFeaturesExtractorV2 | None:
+        return self._prompt_encoder._feature_extractor
+
+    @feature_extractor.setter
+    def feature_extractor(self, value: GemmaFeaturesExtractorV2 | None) -> None:
+        self._prompt_encoder._feature_extractor = value
+
+    @property
+    def vae_encoder(self) -> VideoEncoder | None:
+        return self._image_conditioner._encoder
+
+    @vae_encoder.setter
+    def vae_encoder(self, value: VideoEncoder | None) -> None:
+        self._image_conditioner._encoder = value
+
+    @property
+    def vae_decoder(self) -> VideoDecoder | None:
+        return self._video_decoder._decoder
+
+    @vae_decoder.setter
+    def vae_decoder(self, value: VideoDecoder | None) -> None:
+        self._video_decoder._decoder = value
+
+    @property
+    def audio_decoder(self) -> AudioVAEDecoder | None:
+        return self._audio_decoder_block._audio_decoder
+
+    @audio_decoder.setter
+    def audio_decoder(self, value: AudioVAEDecoder | None) -> None:
+        self._audio_decoder_block._audio_decoder = value
+
+    @property
+    def vocoder(self) -> VocoderWithBWE | None:
+        return self._audio_decoder_block._vocoder
+
+    @vocoder.setter
+    def vocoder(self, value: VocoderWithBWE | None) -> None:
+        self._audio_decoder_block._vocoder = value
+
+    @property
+    def audio_encoder(self) -> object | None:
+        return self._audio_encoder
+
+    @audio_encoder.setter
+    def audio_encoder(self, value: object | None) -> None:
+        self._audio_encoder = value
+
+    @property
+    def audio_processor(self) -> object | None:
+        return self._audio_processor
+
+    @audio_processor.setter
+    def audio_processor(self, value: object | None) -> None:
+        self._audio_processor = value
 
     @staticmethod
     def _resolve_model_dir(model_dir: str) -> Path:
@@ -128,25 +215,8 @@ class BasePipeline:
     # ------------------------------------------------------------------
 
     def _load_text_encoder(self) -> None:
-        """Load Gemma text encoder and feature extractor connector if not already loaded.
-
-        Inheritance-API equivalent of :class:`PromptEncoder` block (see
-        :mod:`ltx_pipelines_mlx.utils.blocks`). The block class is the
-        upstream-isomorphic surface; this method is kept for the
-        existing inheritance subclasses (TwoStagePipeline, RetakePipeline,
-        ICLoraPipeline, ...) that read ``self.text_encoder`` /
-        ``self.feature_extractor`` directly.
-        """
-        if self.text_encoder is None:
-            self.text_encoder = GemmaLanguageModel()
-            self.text_encoder.load(self._gemma_model_id)
-            aggressive_cleanup()
-
-        if self.feature_extractor is None:
-            self.feature_extractor = GemmaFeaturesExtractorV2()
-            connector_weights = load_split_safetensors(self.model_dir / "connector.safetensors", prefix="connector.")
-            self.feature_extractor.connector.load_weights(list(connector_weights.items()))
-            aggressive_cleanup()
+        """Load Gemma + connector via the :class:`PromptEncoder` block."""
+        self._prompt_encoder.load()
 
     def _encode_text_with_negative(self, prompt: str) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         """Load text encoder, encode prompt + negative prompt, materialize, free encoder.
@@ -169,17 +239,8 @@ class BasePipeline:
         return video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds
 
     def _load_vae_encoder(self) -> None:
-        """Load VAE encoder with key remapping if not already loaded."""
-        if self.vae_encoder is not None:
-            return
-        self.vae_encoder = VideoEncoder()
-        enc_weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
-        enc_weights = {
-            k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
-            for k, v in enc_weights.items()
-        }
-        self.vae_encoder.load_weights(list(enc_weights.items()))
-        aggressive_cleanup()
+        """Load VAE encoder via the :class:`ImageConditioner` block."""
+        self._image_conditioner.load()
 
     def _load_audio_encoder(self) -> None:
         """Load audio VAE encoder + processor if not already loaded."""
@@ -199,32 +260,9 @@ class BasePipeline:
         aggressive_cleanup()
 
     def _load_decoders(self) -> None:
-        """Load VAE decoder, audio decoder, and vocoder if not already loaded."""
-        model_dir = self.model_dir
-
-        if self.vae_decoder is None:
-            self.vae_decoder = VideoDecoder()
-            vae_weights = load_split_safetensors(model_dir / "vae_decoder.safetensors", prefix="vae_decoder.")
-            self.vae_decoder.load_weights(list(vae_weights.items()))
-            aggressive_cleanup()
-
-        if self.audio_decoder is None:
-            self.audio_decoder = AudioVAEDecoder()
-            audio_weights = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.decoder.")
-            all_audio = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.")
-            for k, v in all_audio.items():
-                if k.startswith("per_channel_statistics."):
-                    audio_weights[k] = v
-            audio_weights = remap_audio_vae_keys(audio_weights)
-            self.audio_decoder.load_weights(list(audio_weights.items()))
-            aggressive_cleanup()
-
-        if self.vocoder is None:
-            self.vocoder = VocoderWithBWE()
-            vocoder_weights = load_split_safetensors(model_dir / "vocoder.safetensors", prefix="vocoder.")
-            self.vocoder.load_weights(list(vocoder_weights.items()))
-            self.vocoder.upcast_weights_to_fp32()
-            aggressive_cleanup()
+        """Load VAE decoder + audio decoder + vocoder via composition blocks."""
+        self._video_decoder.load()
+        self._audio_decoder_block.load()
 
     def _load_dev_transformer(self) -> LTXModel:
         """Load the dev (non-distilled) transformer weights.
@@ -393,26 +431,12 @@ class BasePipeline:
         return video_embeds, audio_embeds
 
     def _encode_text(self, prompt: str) -> tuple[mx.array, mx.array]:
-        """Encode text prompt to video and audio embeddings."""
-        assert self.text_encoder is not None
-        assert self.feature_extractor is not None
+        """Encode prompt to (video, audio) embeddings via the PromptEncoder block.
 
-        # Extract ALL 49 layer hidden states with attention mask.
-        # Optional max_length override via env var to dodge the macOS Metal
-        # watchdog when post-boot indexing slows Gemma below 10 s/forward.
-        # Note: shorter pad shifts left-padded RoPE positions and may degrade
-        # quality vs the LTX training distribution (1024 default).
-        import os as _os
-
-        from ltx_core_mlx.utils.metal_watchdog import flush as _watchdog_flush
-
-        _max_length = int(_os.environ.get("LTX2_GEMMA_MAX_LENGTH", "1024"))
-        all_hidden_states, attention_mask = self.text_encoder.encode_all_layers(prompt, max_length=_max_length)
-        # Optional flush between Gemma output and connector — no-op unless
-        # LTX2_METAL_WATCHDOG_GUARD=1.
-        _watchdog_flush(all_hidden_states[-1])
-        video_embeds, audio_embeds = self.feature_extractor(all_hidden_states, attention_mask=attention_mask)
-        return video_embeds, audio_embeds
+        Inheritance-API thin wrapper. New code should prefer
+        ``self._prompt_encoder(prompt)`` directly (composition style).
+        """
+        return self._prompt_encoder.encode(prompt)
 
     def generate(
         self,

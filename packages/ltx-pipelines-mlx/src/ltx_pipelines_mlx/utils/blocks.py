@@ -16,12 +16,18 @@ video_dec.decode_and_stream(video_latent, "out.mp4", audio_path="audio.wav")
 ```
 
 The :class:`BasePipeline` inheritance tree (:class:`TwoStagePipeline`,
-:class:`RetakePipeline`, :class:`ICLoraPipeline`, ...) is the **current
-internal implementation** and does NOT yet delegate to these blocks —
-it duplicates the loader logic for now. Migrating each pipeline to
-compose these blocks instead of inheriting is a follow-up refactor;
-shipping the block API now lets external users adopt composition
-without waiting for the full migration.
+:class:`RetakePipeline`, :class:`ICLoraPipeline`, ...) **delegates** to
+these blocks internally. Each pipeline holds private block instances
+(``self._prompt_encoder``, ``self._image_conditioner``,
+``self._video_decoder``, ``self._audio_decoder_block``); the historical
+attribute names (``self.text_encoder``, ``self.vae_encoder``, ...) are
+properties that proxy onto the block internals so subclass code that
+reads/writes them — including ``self.text_encoder = None`` to free
+memory — continues to work.
+
+The blocks are the single source of truth for loader logic; the
+inheritance API exists purely for backward compat with the current
+subclass bodies.
 
 Differences vs upstream:
 
@@ -52,6 +58,16 @@ from ltx_core_mlx.utils.weights import load_split_safetensors, remap_audio_vae_k
 _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags the literal mx.eval pattern
 
 
+def _resolve_model_dir(model_dir: str | Path) -> Path:
+    """Resolve a model dir — download from HuggingFace if not a local path."""
+    path = Path(model_dir)
+    if path.exists():
+        return path
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(str(model_dir)))
+
+
 class PromptEncoder:
     """Owns Gemma + connector lifecycle. Encodes prompts on call.
 
@@ -65,7 +81,7 @@ class PromptEncoder:
         model_dir: str | Path,
         gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
     ) -> None:
-        self.model_dir = Path(model_dir)
+        self.model_dir = _resolve_model_dir(model_dir)
         self.gemma_model_id = gemma_model_id
         self._text_encoder: GemmaLanguageModel | None = None
         self._feature_extractor: GemmaFeaturesExtractorV2 | None = None
@@ -149,7 +165,7 @@ class ImageConditioner:
     """
 
     def __init__(self, model_dir: str | Path) -> None:
-        self.model_dir = Path(model_dir)
+        self.model_dir = _resolve_model_dir(model_dir)
         self._encoder: _VideoVAEEncoder | None = None
 
     def load(self) -> _VideoVAEEncoder:
@@ -188,7 +204,7 @@ class VideoDecoder:
     """
 
     def __init__(self, model_dir: str | Path) -> None:
-        self.model_dir = Path(model_dir)
+        self.model_dir = _resolve_model_dir(model_dir)
         self._decoder: _VideoVAEDecoder | None = None
 
     def load(self) -> _VideoVAEDecoder:
@@ -226,7 +242,7 @@ class AudioDecoder:
     """
 
     def __init__(self, model_dir: str | Path) -> None:
-        self.model_dir = Path(model_dir)
+        self.model_dir = _resolve_model_dir(model_dir)
         self._audio_decoder: AudioVAEDecoder | None = None
         self._vocoder: VocoderWithBWE | None = None
 
@@ -277,7 +293,7 @@ class VideoUpsampler:
         model_dir: str | Path,
         name: str = "spatial_upscaler_x2_v1_1",
     ) -> None:
-        self.model_dir = Path(model_dir)
+        self.model_dir = _resolve_model_dir(model_dir)
         self.name = name
         self._upsampler: LatentUpsampler | None = None
 
