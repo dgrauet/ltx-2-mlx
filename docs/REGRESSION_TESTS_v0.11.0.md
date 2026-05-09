@@ -18,7 +18,7 @@ Goal: Validate every public pipeline still produces correct outputs after the v0
 ## Run notes
 
 - Common params: `-W 384 -H 256`, `-f 9` (or 17 for two-stage/a2v), reduced steps.
-- All tests with `LTX2_METAL_WATCHDOG_GUARD=1` env var.
+- Initial smoke tests (#02-#16) ran with `LTX2_METAL_WATCHDOG_GUARD=1` (env var since removed in `8877f88` after the auto memory-gated mitigation made it redundant).
 - System under heavy `knowledgeconstructiond` (Apple Intelligence indexer) post-boot. First non-`--low-ram` attempt hit Metal `Impacting Interactivity` watchdog within 14 s during model load. Tests #03–#16 then ran with `--low-ram` (block streaming, ~2.8 GB Metal peak vs 10–12 GB eager). After tests #15/#16 (which don't expose `--low-ram`) succeeded on retry, test #03b re-ran without `--low-ram` to verify the eager path.
 - All q8 (`dgrauet/ltx-2.3-mlx-q8` default).
 

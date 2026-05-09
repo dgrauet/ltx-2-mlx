@@ -35,8 +35,8 @@ see [README.md](../README.md).
 | `--tile-overlap K` | 2 | Token-grid overlap (smoother blend at cost of redundant compute). | when tiling active |
 | `--enable-teacache` | off | Timestep-aware residual caching. ~1.46× speedup (Euler) / ~1.78× (HQ). Conservative thresh 0.5. | `generate --two-stage`, `generate --two-stages-hq` |
 | `--teacache-thresh F` | 0.5 (Euler) / 1.0 (HQ) | Skip aggressiveness. Higher = more skip = faster but quality risk. | with `--enable-teacache` |
-| `LTX2_METAL_WATCHDOG_GUARD=1` | off | Opt-in mx.eval+sync between Gemma layers / connector blocks. Defends macOS Impacting Interactivity (~10s). Limits GPU pipelining. | all pipelines (text encoding shared) |
-| `LTX2_GEMMA_MAX_LENGTH=N` | 1024 | Cap Gemma padded seq_len (escape hatch). Quality risk: shifts left-padded RoPE positions. | all pipelines |
+| `LTX2_GEMMA_EVAL_EVERY=N` | auto (1 on ≤48 GB Macs, 0 otherwise) | Override per-layer eval cadence in Gemma forward. The auto-default keeps each Metal command buffer below the macOS GPU watchdog threshold without sacrificing throughput on capable hardware. Set explicitly only for debugging. | all pipelines (text encoding shared) |
+| `LTX2_GEMMA_MAX_LENGTH=N` | 1024 | Cap Gemma padded seq_len (last-resort escape hatch). Quality risk: shifts left-padded RoPE positions. | all pipelines |
 
 ## Pipeline-specific options
 
