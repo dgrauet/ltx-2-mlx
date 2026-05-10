@@ -198,15 +198,15 @@ def combined_image_conditionings(
     """
     from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
     from ltx_core_mlx.conditioning.types.latent_cond import VideoConditionByLatentIndex
-    from ltx_core_mlx.utils.image import prepare_image_for_encoding
+    from ltx_pipelines_mlx.utils.media_io import DEFAULT_IMAGE_CRF, load_image_and_preprocess
 
     conditionings: list = []
     for img in images:
-        # Forward the per-image CRF so prepare_image_for_encoding applies the
-        # H.264 round-trip (upstream-iso). Falls back to 0 (no compression) if
-        # the image item doesn't expose a CRF field.
-        img_crf = getattr(img, "crf", 0)
-        img_tensor = prepare_image_for_encoding(img.path, enc_h, enc_w, crf=img_crf)
+        # Forward the per-image CRF (upstream-iso). Falls back to the
+        # upstream default (33) if the image item doesn't expose a CRF
+        # field — preserves I2V quality alignment with training.
+        img_crf = getattr(img, "crf", DEFAULT_IMAGE_CRF)
+        img_tensor = load_image_and_preprocess(img.path, enc_h, enc_w, crf=img_crf)
         img_tensor = img_tensor[:, :, None, :, :]  # add F=1 dim
         ref_latent = video_encoder.encode(img_tensor)  # (1, 128, 1, H', W')
         ref_tokens = ref_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)

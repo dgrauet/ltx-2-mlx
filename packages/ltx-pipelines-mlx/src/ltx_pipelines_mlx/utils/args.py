@@ -9,12 +9,10 @@ from __future__ import annotations
 import argparse
 from typing import NamedTuple
 
-# Upstream default: 33 (H.264 medium quality). Used by upstream's
-# load_image_and_preprocess to apply a JPEG-like degradation that
-# matches the LTX training distribution. Our port's
-# prepare_image_for_encoding doesn't apply CRF yet — kept here for
-# CLI-API isomorphism. Plumbed through but currently unused.
-DEFAULT_IMAGE_CRF = 33
+# Re-export for legacy import paths. Single source of truth lives in
+# ``ltx_pipelines_mlx.utils.media_io`` (mirrors upstream's
+# ``ltx_pipelines.utils.media_io.DEFAULT_IMAGE_CRF``).
+from ltx_pipelines_mlx.utils.media_io import DEFAULT_IMAGE_CRF
 
 
 class ImageConditioningInput(NamedTuple):

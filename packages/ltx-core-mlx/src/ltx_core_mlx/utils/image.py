@@ -1,8 +1,20 @@
-"""Image and video preparation utilities for VAE encoding."""
+"""Image and video preparation utilities for VAE encoding.
+
+Image-side helpers (CRF round-trip, resize+crop, normalize) live upstream-iso
+in :mod:`ltx_pipelines_mlx.utils.media_io`. The two thin shims here keep the
+historic ``prepare_image_for_encoding`` import path working — they delegate
+to ``media_io.load_image_and_preprocess`` so the actual logic isn't
+duplicated. Pipelines and new code should import from
+:mod:`ltx_pipelines_mlx.utils.media_io` directly to match upstream paths.
+
+This module also keeps :func:`load_video_frames`, the multi-frame ffmpeg
+loader for video conditioning. Audio-side decode is in
+:mod:`ltx_core_mlx.utils.audio`; ffmpeg discovery in
+:mod:`ltx_core_mlx.utils.ffmpeg`.
+"""
 
 from __future__ import annotations
 
-import math
 import subprocess
 
 import mlx.core as mx
@@ -11,159 +23,55 @@ from PIL import Image
 
 from ltx_core_mlx.utils.ffmpeg import find_ffmpeg
 
-# Match upstream ``ltx_pipelines.utils.args.DEFAULT_IMAGE_CRF``. Round-tripping
-# the input image through libx264 at this CRF brings it close to the LTX-2
-# training distribution (which is trained on real video frames carrying H.264
-# compression artefacts), preventing the model from over-reacting to pristine
-# PNG/JPEG textures during I2V conditioning.
-DEFAULT_IMAGE_CRF = 33
-
-
-def apply_crf_compression(image: Image.Image, crf: int) -> Image.Image:
-    """Round-trip a PIL image through libx264 at the given CRF.
-
-    Mirrors upstream ``ltx_pipelines.utils.media_io.preprocess`` (PyAV-based)
-    using an ``ffmpeg`` subprocess pipeline:
-
-    1. Encode raw RGB pixels into a 1-frame H.264 mp4 with the given CRF.
-    2. Decode the resulting mp4 back to raw RGB.
-
-    The output is the same PIL image with H.264-style compression artefacts
-    (blocking, ringing, slight chroma shift). ``crf == 0`` is a no-op.
-
-    Args:
-        image: Input PIL image (RGB mode).
-        crf: Constant Rate Factor (0 = no compression / passthrough,
-            higher = more compression). Default upstream is 33.
-
-    Returns:
-        New PIL image with the round-trip applied.
-    """
-    if crf == 0:
-        return image
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-
-    width, height = image.size
-    # H.264 requires even dimensions. Pad to next even pixel; we crop back.
-    pad_w = width + (width & 1)
-    pad_h = height + (height & 1)
-    if (pad_w, pad_h) != (width, height):
-        padded = Image.new("RGB", (pad_w, pad_h), (0, 0, 0))
-        padded.paste(image, (0, 0))
-        image_for_encode = padded
-    else:
-        image_for_encode = image
-
-    raw_in = np.asarray(image_for_encode, dtype=np.uint8).tobytes()
-    ffmpeg = find_ffmpeg()
-
-    # Encode raw RGB → H.264 mp4 in memory.
-    encode_cmd = [
-        ffmpeg,
-        "-y",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-s",
-        f"{pad_w}x{pad_h}",
-        "-r",
-        "1",
-        "-i",
-        "pipe:0",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        str(int(crf)),
-        "-frames:v",
-        "1",
-        "-f",
-        "mp4",
-        "-movflags",
-        "frag_keyframe+empty_moov",
-        "pipe:1",
-    ]
-    enc = subprocess.run(encode_cmd, input=raw_in, capture_output=True, timeout=60)
-    if enc.returncode != 0:
-        raise RuntimeError(f"ffmpeg CRF encode failed: {enc.stderr.decode(errors='ignore')}")
-
-    # Decode mp4 → raw RGB.
-    decode_cmd = [
-        ffmpeg,
-        "-i",
-        "pipe:0",
-        "-frames:v",
-        "1",
-        "-pix_fmt",
-        "rgb24",
-        "-f",
-        "rawvideo",
-        "pipe:1",
-    ]
-    dec = subprocess.run(decode_cmd, input=enc.stdout, capture_output=True, timeout=60)
-    if dec.returncode != 0:
-        raise RuntimeError(f"ffmpeg CRF decode failed: {dec.stderr.decode(errors='ignore')}")
-
-    arr = np.frombuffer(dec.stdout, dtype=np.uint8).reshape(pad_h, pad_w, 3)
-    out = Image.fromarray(arr, mode="RGB")
-    if (pad_w, pad_h) != (width, height):
-        out = out.crop((0, 0, width, height))
-    return out
-
 
 def prepare_image_for_encoding(
     image: Image.Image | str,
     height: int,
     width: int,
-    crf: int = DEFAULT_IMAGE_CRF,
+    crf: int = 33,
 ) -> mx.array:
-    """Load and prepare an image for VAE encoding.
+    """Legacy alias for :func:`ltx_pipelines_mlx.utils.media_io.load_image_and_preprocess`.
 
-    1. Optionally round-trips the image through libx264 at ``crf`` to match
-       the LTX-2 training distribution (upstream-iso). Pass ``crf=0`` to skip.
-    2. Aspect-preserving resize + center crop to ``(height, width)``.
-    3. Normalize to ``[-1, 1]``, return as ``(1, 3, H, W)`` bfloat16.
+    Kept as a thin import-stable shim. New call sites should import from
+    ``ltx_pipelines_mlx.utils.media_io`` directly to match upstream's
+    ``ltx_pipelines.utils.media_io.load_image_and_preprocess`` path.
 
-    Args:
-        image: PIL Image or path to image file.
-        height: Target height.
-        width: Target width.
-        crf: H.264 CRF for the round-trip (default 33; pass 0 to skip).
+    Behavior identical to the upstream pipeline:
+
+    1. (str path) decode → uint8 RGB array.
+       (PIL.Image input) bypass decode, use directly.
+    2. H.264 round-trip at ``crf`` (default 33; pass ``crf=0`` to skip).
+    3. Aspect-preserving resize + center crop to ``(height, width)``.
+    4. Normalize ``[0, 1] → [-1, 1]``, ``HWC → BCHW``, bfloat16.
 
     Returns:
-        mx.array of shape (1, 3, H, W) in [-1, 1] range, bfloat16.
+        mx.array of shape ``(1, 3, H, W)`` in ``[-1, 1]``, bfloat16.
     """
+    # Imported lazily to avoid circular: media_io lives in ltx-pipelines-mlx.
+    from ltx_pipelines_mlx.utils.media_io import (
+        decode_image,
+        load_image_and_preprocess,
+        preprocess,
+        resize_and_center_crop,
+    )
+
     if isinstance(image, str):
-        image = Image.open(image)
+        return load_image_and_preprocess(image, height, width, crf=crf)
 
-    image = image.convert("RGB")
-
-    # CRF round-trip (upstream-iso). Applied BEFORE resize so the artefacts
-    # land on full-resolution pixels — matching how upstream's preprocess()
-    # is invoked in load_image_and_preprocess (encode → decode → resize).
+    # PIL.Image was passed directly — replicate the same pipeline manually
+    # since load_image_and_preprocess takes a path. This branch is mostly
+    # used by tests and a few internal call sites that already have a PIL
+    # object in hand.
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    arr = np.asarray(image, dtype=np.uint8)
     if crf and crf > 0:
-        image = apply_crf_compression(image, crf)
+        arr = preprocess(arr, crf=crf)
+    cropped = resize_and_center_crop(arr, height, width)
 
-    # Aspect-ratio-preserving resize + center crop (matches reference)
-    src_w, src_h = image.size
-    scale = max(height / src_h, width / src_w)
-    new_h = math.ceil(src_h * scale)
-    new_w = math.ceil(src_w * scale)
-    image = image.resize((new_w, new_h), Image.LANCZOS)
-    # Center crop to target size
-    crop_left = (new_w - width) // 2
-    crop_top = (new_h - height) // 2
-    image = image.crop((crop_left, crop_top, crop_left + width, crop_top + height))
-
-    # HWC uint8 -> float32 -> [-1, 1]
-    arr = np.array(image, dtype=np.float32) / 255.0
-    arr = arr * 2.0 - 1.0
-
-    # HWC -> CHW -> BCHW
-    tensor = mx.array(arr).transpose(2, 0, 1)[None, ...]
+    f = np.asarray(cropped, dtype=np.float32) / 255.0
+    f = f * 2.0 - 1.0
+    tensor = mx.array(f).transpose(2, 0, 1)[None, ...]
     return tensor.astype(mx.bfloat16)
 
 
