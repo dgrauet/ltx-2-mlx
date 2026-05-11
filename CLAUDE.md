@@ -851,20 +851,21 @@ End-to-end run on M2 Pro 32 GB, dev model + HDR LoRA fused, q8:
 
 ---
 
-## Metal Watchdog Mitigation (auto, memory-gated)
+## Metal Watchdog Mitigation
 
 The macOS GPU watchdog (`kIOGPUCommandBufferCallbackErrorImpactingInteractivity`, ~10 s per Metal command buffer) trips when:
 
 1. A single command buffer takes too long (one giant lazy-graph dispatch).
 2. Many small command buffers queue behind system processes (mds_stores, knowledgeconstructiond, Spotlight, Siri).
 
-LTX-2 mitigates both automatically on `<=48 GB` Macs by inserting `mx.eval` at strategic points so each command buffer is small enough to fit one watchdog window but few enough that queue contention doesn't dominate:
+LTX-2 mitigates both by inserting `mx.eval` at strategic points so each command buffer is small enough to fit one watchdog window but few enough that queue contention doesn't dominate. These guards apply on **all Apple Silicon Macs** — the previous 48 GB threshold was empirically wrong; M2 Max 64 GB machines exhibit `MTLCommandBufferErrorInternal` (code 14) crashes without them:
 
-- **Gemma forward**: per-layer eval (48 layers × ~100 ms each). Override via `LTX2_GEMMA_EVAL_EVERY=N` (default `1` on ≤48 GB, `0` on bigger Macs).
-- **TextEmbeddingProjection**: per-output-projection eval (splits the 188160→4096 video matmul from the 188160→2048 audio matmul). No-op on >48 GB.
-- **Embeddings1DConnector**: per-block eval (8 video + 8 audio blocks). No-op on >48 GB.
+- **Gemma forward**: per-layer eval (48 layers × ~100 ms each). Override via `LTX2_GEMMA_EVAL_EVERY=N` (default `1`).
+- **TextEmbeddingProjection**: per-output-projection eval (splits the 188160→4096 video matmul from the 188160→2048 audio matmul).
+- **Embeddings1DConnector**: per-block eval (8 video + 8 audio blocks).
+- **LTX DiT block loop**: eval every `LTX2_DIT_EVAL_EVERY` blocks (default `8`). Splits the 48-block forward into 6 command buffers of ~6 blocks each (~1–2 s/buffer), well within the watchdog window.
 
-`>48 GB` Macs (Mac Studio, M-series Ultra) keep full lazy-graph pipelining for max throughput.
+Mac Studio / M-series Ultra users who have never seen a watchdog crash may recover full lazy-graph pipelining by setting `LTX2_GEMMA_EVAL_EVERY=0` and `LTX2_DIT_EVAL_EVERY=0`. This disables all eval guards and restores maximum throughput at the cost of watchdog safety on machines where those guards were needed.
 
 ### `LTX2_GEMMA_MAX_LENGTH`
 
