@@ -160,22 +160,8 @@ def append_ic_lora_reference_video_conditionings(
         conditionings.append(cond)
 
 
-def load_mask_video(mask_path: str, height: int, width: int, num_frames: int) -> mx.array:
-    """Load a grayscale mask video as ``(1, 1, F, H, W)`` bf16 in ``[0, 1]``.
-
-    Mirrors upstream ``ltx_pipelines.ic_lora._load_mask_video``:
-    decode → RGB-average for grayscale → ``[-1, 1]`` → ``[0, 1]`` → clip.
-    """
-    frames = load_video_frames_normalized(mask_path, height, width, num_frames)
-    mask = frames.mean(axis=1, keepdims=True)
-    mask = (mask + 1.0) / 2.0
-    mask = mx.clip(mask, 0.0, 1.0)
-    return mask.astype(mx.bfloat16)
-
-
 __all__ = [
     "append_ic_lora_reference_video_conditionings",
     "downsample_mask_video_to_latent",
-    "load_mask_video",
     "read_lora_reference_downscale_factor",
 ]

@@ -17,14 +17,8 @@ import logging
 from pathlib import Path
 
 import mlx.core as mx
-import numpy as np
-from safetensors import safe_open
 
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
-from ltx_core_mlx.conditioning.types.attention_strength_wrapper import (
-    ConditioningItemAttentionStrengthWrapper,
-)
-from ltx_core_mlx.conditioning.types.reference_video_cond import VideoConditionByReferenceLatent
 from ltx_core_mlx.loader import (
     LTXV_LORA_COMFY_RENAMING_MAP,
     LoraStateDictWithStrength,
@@ -39,6 +33,10 @@ from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_
 from ltx_core_mlx.utils.video import load_video_frames_normalized
 from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
 from ltx_pipelines_mlx._base import BasePipeline
+from ltx_pipelines_mlx.iclora_utils import (
+    append_ic_lora_reference_video_conditionings,
+    read_lora_reference_downscale_factor,
+)
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.samplers import denoise_loop
@@ -86,7 +84,7 @@ class ICLoraPipeline(BasePipeline):
         # so inference can resize reference videos to match training conditions.
         self.reference_downscale_factor = 1
         for lora_path, _ in self._lora_paths:
-            scale = _read_lora_reference_downscale_factor(lora_path)
+            scale = read_lora_reference_downscale_factor(lora_path)
             if scale != 1:
                 if self.reference_downscale_factor not in (1, scale):
                     raise ValueError(
@@ -277,62 +275,19 @@ class ICLoraPipeline(BasePipeline):
                 )
             )
 
-        # IC-LoRA reference video conditionings
-        scale = self.reference_downscale_factor
-        if scale != 1 and (height % scale != 0 or width % scale != 0):
-            raise ValueError(
-                f"Output dimensions ({height}x{width}) must be divisible by reference_downscale_factor ({scale})"
-            )
-        # Compute VAE-compatible reference resolution: the VAE encoder requires
-        # spatial dims divisible by 32. Derive from latent shape (same approach
-        # as keyframe pipeline half-resolution).
-        _, ref_H_lat, ref_W_lat = compute_video_latent_shape(num_frames, height // scale, width // scale)
-        ref_height = ref_H_lat * 32
-        ref_width = ref_W_lat * 32
-
-        for video_path, strength in video_conditioning:
-            # Load video at scaled-down resolution (if scale > 1)
-            video = load_video_frames_normalized(video_path, ref_height, ref_width, num_frames)
-            # Normalize to [-1, 1] for VAE encoding
-            video = (video * 2.0 - 1.0).astype(mx.bfloat16)
-            encoded_video = self.vae_encoder.encode(video)
-            mx.eval(encoded_video)
-
-            # Derive reference latent dims
-            ref_F = encoded_video.shape[2]
-            ref_H = encoded_video.shape[3]
-            ref_W = encoded_video.shape[4]
-            ref_positions = compute_video_positions(ref_F, ref_H, ref_W)
-
-            # Patchify reference to tokens
-            ref_tokens = encoded_video.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)
-
-            # Build attention mask for ConditioningItemAttentionStrengthWrapper
-            if conditioning_attention_mask is not None:
-                latent_mask = _downsample_mask_to_latent(
-                    mask=conditioning_attention_mask,
-                    target_f=ref_F,
-                    target_h=ref_H,
-                    target_w=ref_W,
-                )
-                attn_mask = latent_mask * conditioning_attention_strength
-            elif conditioning_attention_strength < 1.0:
-                attn_mask = conditioning_attention_strength
-            else:
-                attn_mask = None
-
-            cond = VideoConditionByReferenceLatent(
-                reference_latent=ref_tokens,
-                reference_positions=ref_positions,
-                downscale_factor=scale,
-                strength=strength,
-            )
-            if attn_mask is not None:
-                cond = ConditioningItemAttentionStrengthWrapper(
-                    conditioning=cond,
-                    attention_mask=attn_mask,
-                )
-            conditionings.append(cond)
+        # IC-LoRA reference video conditionings (delegated to iclora_utils for parity
+        # with upstream `ltx_pipelines.ic_lora.ICLoraPipeline._create_conditionings`).
+        append_ic_lora_reference_video_conditionings(
+            conditionings,
+            video_conditioning,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            video_encoder=video_encoder,
+            reference_downscale_factor=self.reference_downscale_factor,
+            conditioning_attention_strength=conditioning_attention_strength,
+            conditioning_attention_mask=conditioning_attention_mask,
+        )
 
         if video_conditioning:
             logger.info(f"Added {len(video_conditioning)} video conditioning(s)")
@@ -705,111 +660,3 @@ def _resolve_lora_path(path: str) -> str:
     if len(safetensors_files) > 1:
         logger.warning(f"Multiple .safetensors files found, using first: {safetensors_files[0].name}")
     return str(safetensors_files[0])
-
-
-def _read_lora_reference_downscale_factor(lora_path: str) -> int:
-    """Read reference_downscale_factor from LoRA safetensors metadata.
-
-    Some IC-LoRA models are trained with reference videos at lower resolution than
-    the target output. The downscale factor indicates the ratio between target and
-    reference resolutions (e.g., factor=2 means reference is half the resolution).
-
-    Args:
-        lora_path: Path to the LoRA .safetensors file.
-
-    Returns:
-        The reference downscale factor (1 if not specified in metadata).
-    """
-    try:
-        with safe_open(lora_path, framework="numpy") as f:
-            metadata = f.metadata() or {}
-            return int(metadata.get("reference_downscale_factor", 1))
-    except Exception as e:
-        logger.warning(f"Failed to read metadata from LoRA file '{lora_path}': {e}")
-        return 1
-
-
-def _downsample_mask_to_latent(
-    mask: mx.array,
-    target_f: int,
-    target_h: int,
-    target_w: int,
-) -> mx.array:
-    """Downsample a pixel-space mask to latent space using VAE scale factors.
-
-    Handles causal temporal downsampling: the first frame is kept separately
-    (temporal scale factor = 1 for the first frame), while the remaining
-    frames are downsampled by the VAE's temporal scale factor.
-
-    Args:
-        mask: Pixel-space mask of shape (B, 1, F_pixel, H_pixel, W_pixel).
-            Values in [0, 1].
-        target_f: Target latent temporal dim.
-        target_h: Target latent spatial height.
-        target_w: Target latent spatial width.
-
-    Returns:
-        Flattened latent-space mask of shape (B, F_lat * H_lat * W_lat).
-    """
-    # Use numpy for interpolation (MLX doesn't have F.interpolate with area mode)
-    mask_np = np.array(mask)
-    b, _, f_pix, h_pix, w_pix = mask_np.shape
-
-    # Step 1: Spatial downsampling via area interpolation per frame
-    from PIL import Image as PILImage
-
-    spatial_down = np.zeros((b, 1, f_pix, target_h, target_w), dtype=np.float32)
-    for bi in range(b):
-        for fi in range(f_pix):
-            frame = mask_np[bi, 0, fi]
-            img = PILImage.fromarray((frame * 255).astype(np.uint8))
-            img = img.resize((target_w, target_h), PILImage.Resampling.BOX)
-            spatial_down[bi, 0, fi] = np.array(img).astype(np.float32) / 255.0
-
-    # Step 2: Causal temporal downsampling
-    first_frame = spatial_down[:, :, :1, :, :]  # (B, 1, 1, H_lat, W_lat)
-
-    if f_pix > 1 and target_f > 1:
-        t = (f_pix - 1) // (target_f - 1)  # temporal downscale factor
-        assert (f_pix - 1) % (target_f - 1) == 0, (
-            f"Pixel frames ({f_pix}) not compatible with latent frames ({target_f}): "
-            f"(f_pix - 1) must be divisible by (target_f - 1)"
-        )
-        rest = spatial_down[:, :, 1:, :, :]  # (B, 1, f_pix-1, H, W)
-        # Reshape to groups and average
-        rest = rest.reshape(b, 1, target_f - 1, t, target_h, target_w)
-        rest = rest.mean(axis=3)  # (B, 1, target_f-1, H, W)
-        latent_mask = np.concatenate([first_frame, rest], axis=2)
-    else:
-        latent_mask = first_frame
-
-    # Flatten to (B, F_lat * H_lat * W_lat)
-    latent_mask = latent_mask.reshape(b, target_f * target_h * target_w)
-    return mx.array(latent_mask)
-
-
-def _load_mask_video(
-    mask_path: str,
-    height: int,
-    width: int,
-    num_frames: int,
-) -> mx.array:
-    """Load a mask video and return a pixel-space tensor of shape (1, 1, F, H, W).
-
-    The mask video is loaded, resized to (height, width), converted to
-    grayscale, and normalised to [0, 1].
-
-    Args:
-        mask_path: Path to the mask video file.
-        height: Target height in pixels.
-        width: Target width in pixels.
-        num_frames: Maximum number of frames to load.
-
-    Returns:
-        Tensor of shape (1, 1, F, H, W) with values in [0, 1].
-    """
-    # load_video_frames_normalized returns (1, 3, F, H, W) in [0, 1]
-    mask_video = load_video_frames_normalized(mask_path, height, width, num_frames)
-    # Take mean over channels for grayscale: (1, 3, F, H, W) -> (1, 1, F, H, W)
-    mask = mask_video.mean(axis=1, keepdims=True)
-    return mx.clip(mask, 0.0, 1.0)
