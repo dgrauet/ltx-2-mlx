@@ -144,13 +144,14 @@ class GemmaLanguageModel(nn.Module):
         # command buffer below the macOS GPU watchdog deadline. The
         # downstream feature_extractor projection materializes its inputs
         # in one buffer; without per-layer eval, that buffer pulls all 48
-        # Gemma layers into a single dispatch that exceeds the limit
-        # under sustained system contention (Spotlight, Siri, mds_stores).
-        # No-op on >48 GB devices, which keep full lazy-graph pipelining.
-        # LTX2_GEMMA_EVAL_EVERY=N overrides the auto-default (1 on
-        # <=48 GB, 0 on >48 GB).
-        _split_per_layer = mx.device_info()["memory_size"] <= 48 * 1024**3
-        eval_every = int(os.environ.get("LTX2_GEMMA_EVAL_EVERY", "1" if _split_per_layer else "0"))
+        # Gemma layers into a single dispatch that exceeds the macOS GPU
+        # watchdog limit (~10 s) under sustained system contention.
+        # Originally gated on <=48 GB, but M2 Max 64 GB also crashes
+        # (MTLCommandBufferErrorInternal code 14) at production resolutions
+        # — the prior 48 GB threshold was validated only at 384x256x9 where
+        # the lazy graph fits the watchdog window. Default is now 1 (per-layer)
+        # for all devices. LTX2_GEMMA_EVAL_EVERY=0 disables (full lazy graph).
+        eval_every = int(os.environ.get("LTX2_GEMMA_EVAL_EVERY", "1"))
         for i, layer in enumerate(inner.layers):
             h = layer(h, mask=combined_mask, cache=None)
             if isinstance(h, tuple):

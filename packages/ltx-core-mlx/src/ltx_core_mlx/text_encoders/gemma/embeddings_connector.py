@@ -17,6 +17,7 @@ Weight keys (under ``video_embeddings_connector`` or ``audio_embeddings_connecto
 
 from __future__ import annotations
 
+import os
 import mlx.core as mx
 import mlx.nn as nn
 
@@ -328,14 +329,16 @@ class Embeddings1DConnector(nn.Module):
         # block to keep each block's Metal command buffer below the
         # macOS GPU watchdog: 8 blocks of MHA + GEGLU FF at seq_len 640
         # otherwise concatenate into a single dispatch that exceeds the
-        # 10 s threshold under sustained system contention (Spotlight,
-        # Siri, mds_stores, knowledgeconstructiond). No-op on >48 GB.
-        _split_per_block = mx.device_info()["memory_size"] <= 48 * 1024**3
+        # 10 s threshold under sustained system contention.
+        # Originally gated on <=48 GB, but M2 Max 64 GB also crashes at
+        # production resolutions — eval every block for all devices.
+        # LTX2_GEMMA_EVAL_EVERY=0 in env disables this (full lazy graph).
+        _connector_eval = int(os.environ.get("LTX2_GEMMA_EVAL_EVERY", "1")) > 0
         _mx_eval = getattr(mx, "eval")  # noqa: B009 -- security hook flags mx.eval pattern
 
         for block in self.transformer_1d_blocks:
             hidden_states = block(hidden_states, rope_freqs=rope_freqs, attention_mask=attn_mask)
-            if _split_per_block:
+            if _connector_eval:
                 _mx_eval(hidden_states)
 
         # Optional output normalization (affine-free)
