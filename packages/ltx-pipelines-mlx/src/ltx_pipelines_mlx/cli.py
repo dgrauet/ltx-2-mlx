@@ -387,6 +387,41 @@ examples:
     )
     ic.add_argument("--skip-stage-2", action="store_true", help="Skip stage 2 upsampling (half resolution output)")
 
+    # --- lipdub ---
+    ld = sub.add_parser(
+        "lipdub",
+        help="Lip-dub a reference video: re-generate visuals matching the reference audio.",
+    )
+    _add_base_args(ld)
+    ld.add_argument("--height", "-H", type=int, default=480, help="Output height (default: 480)")
+    ld.add_argument("--width", "-W", type=int, default=704, help="Output width (default: 704)")
+    ld.add_argument(
+        "--low-ram",
+        action="store_true",
+        help="Stream transformer blocks (same semantics as ic-lora --low-ram).",
+    )
+    ld.add_argument(
+        "--reference-video",
+        required=True,
+        help="Reference video (provides visuals + audio for the lip-dub).",
+    )
+    ld.add_argument(
+        "--reference-strength",
+        type=float,
+        default=1.0,
+        help="Reference video conditioning strength (default: 1.0).",
+    )
+    ld.add_argument(
+        "--lora",
+        action="append",
+        nargs=2,
+        metavar=("PATH", "STRENGTH"),
+        required=True,
+        help="Lip-dub IC-LoRA (exactly one required). PATH can be local or HF repo ID.",
+    )
+    ld.add_argument("--stage1-steps", type=int, default=None)
+    ld.add_argument("--stage2-steps", type=int, default=None)
+
     # --- hdr-ic-lora ---
     hdr = sub.add_parser(
         "hdr-ic-lora",
@@ -512,6 +547,7 @@ examples:
         "extend": _cmd_extend,
         "keyframe": _cmd_keyframe,
         "ic-lora": _cmd_ic_lora,
+        "lipdub": _cmd_lipdub,
         "hdr-ic-lora": _cmd_hdr_ic_lora,
         "upscale": _cmd_upscale,
         "enhance": _cmd_enhance,
@@ -913,6 +949,41 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         images=args.images,
         conditioning_attention_strength=args.conditioning_strength,
         skip_stage_2=args.skip_stage_2,
+    )
+    _print_result(args.output, t0, args.quiet)
+
+
+def _cmd_lipdub(args: argparse.Namespace) -> None:
+    """Lip-dub a reference video: re-generate visuals matching its audio."""
+    t0 = time.time()
+
+    from ltx_pipelines_mlx.lipdub import LipDubPipeline
+
+    lora_paths = [(path, float(strength)) for path, strength in args.lora]
+    if len(lora_paths) != 1:
+        raise SystemExit("lipdub: exactly one --lora is required (the lip-dub IC-LoRA).")
+
+    if not args.quiet:
+        print("Mode: LipDub (two-stage, distilled + IC-LoRA + audio reference)")
+        print(f"  Reference video: {args.reference_video}")
+        print(f"  IC-LoRA: {lora_paths[0][0]} (strength={lora_paths[0][1]})")
+
+    pipe = LipDubPipeline(
+        model_dir=args.model,
+        lora_paths=lora_paths,
+        gemma_model_id=args.gemma,
+        low_ram_streaming=getattr(args, "low_ram", False),
+    )
+    pipe.generate_and_save(
+        prompt=args.prompt,
+        output_path=args.output,
+        reference_video_path=args.reference_video,
+        height=args.height,
+        width=args.width,
+        reference_strength=args.reference_strength,
+        seed=args.seed,
+        stage1_steps=args.stage1_steps,
+        stage2_steps=args.stage2_steps,
     )
     _print_result(args.output, t0, args.quiet)
 
