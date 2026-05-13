@@ -12,6 +12,37 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-05-13
+
+Adds `LipDubPipeline` from upstream PR #212 as a new
+**[experimental tier](docs/PIPELINE_MATURITY.md) pipeline**.
+
+### Added
+
+- **`LipDubPipeline`** + `lipdub` CLI subcommand. Two-stage lip-dubbing
+  pipeline that takes a reference video providing both visual structure
+  (via IC-LoRA reference latent appends) and target audio (via the audio
+  VAE encoded as `AudioConditionByReferenceLatent`). Frame count is
+  auto-derived from the reference video metadata (snapped to `8k+1`).
+  Stage 2 keeps the stage-1 audio latent unchanged (`frozen=True`
+  semantics) and only refines the video. Exported from
+  `ltx_pipelines_mlx` as `LipDubPipeline`.
+
+  **Known limitations** (model-level, not a port bug):
+  - Output audio is a **VAE+vocoder reconstruction** of the reference
+    audio, perceptually similar but not bit-identical to the input.
+    Spectral artifacts can be audible on rich musical content. To
+    preserve the original audio bit-exact, remux the source audio over
+    the output mp4 via ffmpeg post-pipeline (loses fine lip-sync but
+    preserves source music).
+  - Lip-sync quality depends on prompt-audio alignment. Generic prompts
+    produce visually plausible but loosely-synced output.
+  - Uses `Lightricks/LTX-2.3-22b-IC-LoRA-LipDub` (currently `v0.9`).
+    Pin a specific app version if depending on the current behaviour.
+
+  Classified as **Experimental** in `docs/PIPELINE_MATURITY.md`. The
+  CLI `--help` output marks it as `[experimental]`.
+
 ## [0.12.0] - 2026-05-13
 
 Upstream sync from Lightricks/LTX-2 PR #212 — surfaces two **default value

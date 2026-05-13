@@ -390,7 +390,7 @@ examples:
     # --- lipdub ---
     ld = sub.add_parser(
         "lipdub",
-        help="Lip-dub a reference video: re-generate visuals matching the reference audio.",
+        help="[experimental] Lip-dub a reference video: re-generate visuals matching the reference audio.",
     )
     _add_base_args(ld)
     ld.add_argument("--height", "-H", type=int, default=480, help="Output height (default: 480)")
