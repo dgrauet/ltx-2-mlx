@@ -6,6 +6,7 @@ from ltx_core_mlx.conditioning.mask_utils import (
     update_attention_mask,
 )
 from ltx_core_mlx.conditioning.types import (
+    AudioConditionByReferenceLatent,
     ConditioningItemAttentionStrengthWrapper,
     LatentState,
     TemporalRegionMask,
@@ -20,6 +21,7 @@ from ltx_core_mlx.conditioning.types import (
 from ltx_core_mlx.conditioning.types.latent_cond import add_noise_with_state
 
 __all__ = [
+    "AudioConditionByReferenceLatent",
     "ConditioningItemAttentionStrengthWrapper",
     "LatentState",
     "TemporalRegionMask",

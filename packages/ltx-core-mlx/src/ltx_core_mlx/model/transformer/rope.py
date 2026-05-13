@@ -88,7 +88,7 @@ def precompute_rope_freqs(
     num_heads: int,
     theta: float = 10000.0,
     max_pos: list[int] | None = None,
-    rope_type: str = "interleaved",
+    rope_type: str = "split",
 ) -> tuple[mx.array, mx.array, str]:
     """Precompute per-head RoPE cos/sin frequencies.
 
@@ -100,7 +100,10 @@ def precompute_rope_freqs(
         num_heads: Number of attention heads.
         theta: Base frequency.
         max_pos: Maximum positions per axis. Defaults to [20, 2048, 2048].
-        rope_type: "interleaved" (default, main transformer) or "split" (connector).
+        rope_type: ``"split"`` (default, LTX-2.3 main transformer + connector)
+            or ``"interleaved"`` (legacy mode, kept for completeness).
+            Upstream switched the default from ``"interleaved"`` to ``"split"``
+            in PR #212 since all production checkpoints use SPLIT.
 
     Returns:
         Tuple of (cos_freqs, sin_freqs, rope_type).

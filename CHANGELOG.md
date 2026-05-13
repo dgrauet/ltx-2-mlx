@@ -12,6 +12,34 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-13
+
+Upstream sync from Lightricks/LTX-2 PR #212 — surfaces two **default value
+changes**. No public API additions or removals; existing callers that pass
+explicit values are unaffected, but consumers that relied on the previous
+defaults should retest before upgrading.
+
+### Changed (potentially breaking for callers relying on defaults)
+
+- **`TilingConfig.default()`** spatial config bumped from `512×512` /
+  `64` overlap to **`768×768` / `64` overlap**; temporal config from
+  `64` frames / `24` overlap to **`80` frames / `24` overlap**. Matches
+  upstream's tradeoff (fewer tile boundaries at production resolutions).
+  Our internal pipelines do not call `TilingConfig.default()` directly,
+  but external consumers using this helper will get the new defaults.
+- **`precompute_rope_freqs` default `rope_type`** switched from
+  `"interleaved"` to `"split"`. All in-repo call sites pass `rope_type=`
+  explicitly so this is a no-op for our pipelines, but external consumers
+  that called `precompute_rope_freqs` without specifying `rope_type` will
+  see different output (the LTX-2.3 checkpoints all use SPLIT — upstream
+  switched the default to match reality).
+
+### Added
+
+- `AudioConditionByReferenceLatent` now exported from
+  `ltx_core_mlx.conditioning` and `ltx_core_mlx.conditioning.types`
+  (was previously importable only from the leaf module).
+
 ## [0.11.1] - 2026-05-13
 
 Additive upstream sync from Lightricks/LTX-2 PR #212 (merged upstream 2026-05-11),

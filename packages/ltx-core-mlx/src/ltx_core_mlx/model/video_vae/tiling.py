@@ -146,10 +146,14 @@ class TilingConfig:
 
     @classmethod
     def default(cls) -> TilingConfig:
-        """Create a default tiling config (512x512 spatial, 64-frame temporal)."""
+        """Create a default tiling config (768x768 spatial, 80-frame temporal).
+
+        Defaults bumped to 768/80 in upstream PR #212 (was 512/64) to reduce
+        the number of tile boundaries on production resolutions.
+        """
         return cls(
-            spatial_config=SpatialTilingConfig(tile_size_in_pixels=512, tile_overlap_in_pixels=64),
-            temporal_config=TemporalTilingConfig(tile_size_in_frames=64, tile_overlap_in_frames=24),
+            spatial_config=SpatialTilingConfig(tile_size_in_pixels=768, tile_overlap_in_pixels=64),
+            temporal_config=TemporalTilingConfig(tile_size_in_frames=80, tile_overlap_in_frames=24),
         )
 
 
