@@ -12,6 +12,31 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-05-13
+
+Removes the standalone `upscale` pipeline and its `upscale` CLI subcommand.
+The pipeline was a local experimental addition with no upstream counterpart
+in `Lightricks/LTX-2`, kept out of scope for this MLX port.
+
+### Removed
+
+- **`UpscalePipeline`** class and `upscale` CLI subcommand. The pipeline
+  exposed the LTX neural latent upsampler (`spatial_upscaler_x2_v1_1` /
+  `spatial_upscaler_x1_5_v1_0`) as a standalone VAE-encode → upsampler →
+  VAE-decode tool with no DiT. It has no upstream equivalent and was only
+  ever a local experiment. Removed from `ltx_pipelines_mlx.__all__`,
+  `ltx-2-mlx --help`, and the maturity matrix.
+
+  **What still works.** The neural latent upsampler module
+  (`ltx_core_mlx/model/upsampler/`) is unchanged — it's a load-bearing
+  component of every two-stage pipeline (`generate --two-stage` /
+  `--two-stages-hq` / `--distilled`, `keyframe`, `ic-lora`, `hdr-ic-lora`,
+  `a2v`, `lipdub`). Only the standalone CLI wrapper is gone.
+
+  **Migration.** No upstream-iso replacement exists. If you relied on
+  standalone latent upscaling, pin `ltx-2-mlx==0.12.1` or re-implement
+  externally on top of `ltx_core_mlx.model.upsampler.LatentUpsampler`.
+
 ## [0.12.1] - 2026-05-13
 
 Adds `LipDubPipeline` from upstream PR #212 as a new

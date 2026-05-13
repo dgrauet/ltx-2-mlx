@@ -33,7 +33,6 @@ from ltx_pipelines_mlx.retake import RetakePipeline
 from ltx_pipelines_mlx.ti2vid_one_stage import TI2VidOneStagePipeline
 from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
 from ltx_pipelines_mlx.ti2vid_two_stages_hq import TI2VidTwoStagesHQPipeline
-from ltx_pipelines_mlx.upscale import UpscalePipeline
 from ltx_pipelines_mlx.utils.blocks import (
     AudioConditioner,
     AudioDecoder,
@@ -60,7 +59,6 @@ __all__ = [
     "TI2VidOneStagePipeline",
     "TI2VidTwoStagesHQPipeline",
     "TI2VidTwoStagesPipeline",
-    "UpscalePipeline",
     "VideoDecoder",
     "VideoUpsampler",
 ]

@@ -354,7 +354,6 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 | `keyframe` | Keyframe interpolation | Stable | Two-stage interpolation between start/end frames |
 | `ic-lora` | IC-LoRA | Stable | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
 | `hdr-ic-lora` | HDR IC-LoRA | Stable | Two-stage HDR generation via IC-LoRA + LogC3 inverse (saves SDR mp4 + linear-HDR `.npz`) |
-| `upscale` | Upscale | Stable | Standalone neural spatial upscale of an existing video (VAE encode → upsampler → VAE decode, no DiT). Defaults to 2x; use `--upsampler spatial_upscaler_x1_5_v1_0` for 1.5x. Audio remuxed if present. |
 | `a2v` | Audio-to-video | Beta | Two-stage audio-conditioned generation (Euler + CFG). Sync quality depends on prompt-audio alignment. |
 | `retake` | Retake | Beta | Regenerate a time segment of an existing video (dev model + CFG) |
 | `extend` | Extend | Beta | Add frames before or after an existing video (dev model + CFG) |

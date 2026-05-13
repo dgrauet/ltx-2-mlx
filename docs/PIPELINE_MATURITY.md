@@ -20,7 +20,6 @@ zero known quality regressions. Safe to rely on in production.
 | `KeyframeInterpolationPipeline` | `keyframe` | Two-stage interp dev + CFG |
 | `ICLoraPipeline` | `ic-lora` | IC-LoRA reference video conditioning |
 | `HDRICLoraPipeline` | `hdr-ic-lora` | Linear HDR via LogC3 inverse |
-| `UpscalePipeline` | `upscale` | Standalone neural spatial upscale |
 
 ### 🟡 Beta
 
