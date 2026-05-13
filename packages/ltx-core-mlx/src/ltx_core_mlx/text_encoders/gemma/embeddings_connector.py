@@ -18,6 +18,7 @@ Weight keys (under ``video_embeddings_connector`` or ``audio_embeddings_connecto
 from __future__ import annotations
 
 import os
+
 import mlx.core as mx
 import mlx.nn as nn
 

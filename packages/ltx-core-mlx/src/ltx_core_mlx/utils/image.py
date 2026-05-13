@@ -49,7 +49,6 @@ def prepare_image_for_encoding(
     """
     # Imported lazily to avoid circular: media_io lives in ltx-pipelines-mlx.
     from ltx_pipelines_mlx.utils.media_io import (
-        decode_image,
         load_image_and_preprocess,
         preprocess,
         resize_and_center_crop,
