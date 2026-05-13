@@ -566,6 +566,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             dev_transformer=args.dev_transformer,
             tile_count=_build_tile_count_config(args),
         )
+        pipe.verbose = not args.quiet
         if lora_paths:
             pipe._pending_loras = lora_paths
         # one-stage accepts only a single legacy `image=path` (frame_idx=0,
@@ -608,6 +609,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             low_ram_streaming=getattr(args, "low_ram", False),
             tile_count=_build_tile_count_config(args),
         )
+        pipe.verbose = not args.quiet
         if lora_paths:
             pipe._pending_loras = lora_paths
         # distilled accepts only a single legacy `image=path` for now.
@@ -651,6 +653,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             distilled_lora_strength=args.distilled_lora_strength,
             tile_count=_build_tile_count_config(args),
         )
+        pipe.verbose = not args.quiet
         if lora_paths:
             pipe._pending_loras = lora_paths
         # two-stage / HQ accept the upstream-iso multi-image conditioning list.
@@ -713,6 +716,7 @@ def _cmd_a2v(args: argparse.Namespace) -> None:
         gemma_model_id=args.gemma,
         low_ram_streaming=getattr(args, "low_ram", False),
     )
+    pipe.verbose = not args.quiet
     kwargs: dict = dict(
         prompt=args.prompt,
         output_path=args.output,
@@ -754,6 +758,7 @@ def _cmd_retake(args: argparse.Namespace) -> None:
         print(f"Video: {args.video}, frames {args.start}-{args.end}")
 
     pipe = RetakePipeline(model_dir=args.model, gemma_model_id=args.gemma)
+    pipe.verbose = not args.quiet
     kwargs: dict = dict(
         prompt=args.prompt,
         video_path=args.video,
@@ -790,6 +795,7 @@ def _cmd_extend(args: argparse.Namespace) -> None:
         print(f"Video: {args.video}, +{args.extend_frames} latent frames")
 
     pipe = RetakePipeline(model_dir=args.model, gemma_model_id=args.gemma)
+    pipe.verbose = not args.quiet
     kwargs: dict = dict(
         prompt=args.prompt,
         video_path=args.video,
@@ -834,6 +840,7 @@ def _cmd_keyframe(args: argparse.Namespace) -> None:
         distilled_lora=args.distilled_lora,
         distilled_lora_strength=args.lora_strength,
     )
+    pipe.verbose = not args.quiet
     # Build guider params (defaults match reference LTX_2_3_PARAMS)
     from ltx_core_mlx.components.guiders import MultiModalGuiderParams
 
@@ -905,6 +912,7 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         low_memory=True,
         low_ram_streaming=getattr(args, "low_ram", False),
     )
+    pipe.verbose = not args.quiet
 
     pipe.generate_and_save(
         prompt=args.prompt,
@@ -944,6 +952,7 @@ def _cmd_lipdub(args: argparse.Namespace) -> None:
         gemma_model_id=args.gemma,
         low_ram_streaming=getattr(args, "low_ram", False),
     )
+    pipe.verbose = not args.quiet
     pipe.generate_and_save(
         prompt=args.prompt,
         output_path=args.output,
@@ -982,6 +991,7 @@ def _cmd_hdr_ic_lora(args: argparse.Namespace) -> None:
         low_memory=True,
         low_ram_streaming=getattr(args, "low_ram", False),
     )
+    pipe.verbose = not args.quiet
 
     pipe.generate_and_save(
         prompt=args.prompt,

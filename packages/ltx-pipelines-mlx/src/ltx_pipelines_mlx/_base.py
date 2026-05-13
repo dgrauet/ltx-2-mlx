@@ -22,6 +22,7 @@ from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensor
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS
 from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
+from ltx_pipelines_mlx.utils.progress import phase
 from ltx_pipelines_mlx.utils.samplers import denoise_loop
 
 
@@ -40,6 +41,9 @@ class BasePipeline:
             slightly slower per step. Currently incompatible with LoRA
             fusion (use the pre-fused ``transformer-distilled.safetensors``
             for distilled-only inference).
+        verbose: If True (default), print phase markers to stderr around
+            long silent stages (Gemma load/encode, transformer load,
+            decoder load, video decode). CLI maps this from ``--quiet``.
     """
 
     def __init__(
@@ -48,11 +52,13 @@ class BasePipeline:
         gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
         low_memory: bool = True,
         low_ram_streaming: bool = False,
+        verbose: bool = True,
     ):
         self.model_dir = self._resolve_model_dir(model_dir)
         self._gemma_model_id = gemma_model_id
         self.low_memory = low_memory
         self.low_ram_streaming = low_ram_streaming
+        self.verbose = verbose
         self._loaded = False
 
         if self.low_ram_streaming:
@@ -187,7 +193,8 @@ class BasePipeline:
 
     def _load_text_encoder(self) -> None:
         """Load Gemma + connector via the :class:`PromptEncoder` block."""
-        self.prompt_encoder.load()
+        with phase("Loading text encoder (Gemma)", verbose=self.verbose):
+            self.prompt_encoder.load()
 
     def _encode_text_with_negative(self, prompt: str) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         """Load text encoder, encode prompt + negative prompt, materialize, free encoder.
@@ -206,10 +213,11 @@ class BasePipeline:
 
         self._load_text_encoder()
 
-        video_embeds, audio_embeds = self._encode_text(prompt)
-        _materialize(video_embeds, audio_embeds)
-        neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
-        _materialize(neg_video_embeds, neg_audio_embeds)
+        with phase("Encoding prompt", verbose=self.verbose):
+            video_embeds, audio_embeds = self._encode_text(prompt)
+            _materialize(video_embeds, audio_embeds)
+            neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
+            _materialize(neg_video_embeds, neg_audio_embeds)
 
         # Free text encoder before loading heavy components
         self.text_encoder = None
@@ -228,21 +236,24 @@ class BasePipeline:
 
     def _load_decoders(self) -> None:
         """Load VAE decoder + audio decoder + vocoder via composition blocks."""
-        self.video_decoder_block.load()
-        self.audio_decoder_block.load()
+        with phase("Loading decoders (VAE + audio + vocoder)", verbose=self.verbose):
+            self.video_decoder_block.load()
+            self.audio_decoder_block.load()
 
     def _load_dev_transformer(self) -> LTXModel:
         """Inheritance wrapper around :func:`utils._orchestration.load_dev_transformer`."""
         from ltx_pipelines_mlx.utils._orchestration import load_dev_transformer as _impl
 
         assert self._dev_transformer is not None, "_dev_transformer must be set before calling _load_dev_transformer()"
-        return _impl(self.model_dir, self._dev_transformer, low_ram_streaming=self.low_ram_streaming)
+        with phase(f"Loading transformer ({self._dev_transformer})", verbose=self.verbose):
+            return _impl(self.model_dir, self._dev_transformer, low_ram_streaming=self.low_ram_streaming)
 
     def _load_transformer_with_optional_streaming(self, transformer_path: Path) -> LTXModel:
         """Inheritance wrapper around :func:`utils._orchestration.load_transformer`."""
         from ltx_pipelines_mlx.utils._orchestration import load_transformer as _impl
 
-        return _impl(transformer_path, low_ram_streaming=self.low_ram_streaming)
+        with phase(f"Loading transformer ({transformer_path.name})", verbose=self.verbose):
+            return _impl(transformer_path, low_ram_streaming=self.low_ram_streaming)
 
     def _decode_and_save_video(
         self,
@@ -254,15 +265,16 @@ class BasePipeline:
         """Inheritance wrapper around :func:`utils._orchestration.decode_and_save_video`."""
         from ltx_pipelines_mlx.utils._orchestration import decode_and_save_video as _impl
 
-        return _impl(
-            self.video_decoder_block,
-            self.audio_decoder_block,
-            video_latent,
-            audio_latent,
-            output_path,
-            fps=fps,
-            low_memory=self.low_memory,
-        )
+        with phase("Decoding video + audio + muxing", verbose=self.verbose):
+            return _impl(
+                self.video_decoder_block,
+                self.audio_decoder_block,
+                video_latent,
+                audio_latent,
+                output_path,
+                fps=fps,
+                low_memory=self.low_memory,
+            )
 
     # ------------------------------------------------------------------
     # Original one-stage pipeline methods
