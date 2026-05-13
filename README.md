@@ -11,6 +11,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **Keyframe interpolation** — smooth transition between reference images
 - **IC-LoRA** — reference video conditioning (depth/pose/edges)
 - **HDR IC-LoRA** — LogC3-compressed HDR generation (V2V upgrade or pure T2V) producing linear HDR `.npz` + SDR mp4 preview
+- **LipDub** *(experimental)* — lip-dub a reference video by re-syncing visuals to the source audio
 - **Two-stage generation** — half-res → neural upscale → refine
 - **HQ generation** — res_2s second-order sampler + CFG/STG guidance
 - **Prompt enhancement** — Gemma 3 12B rewrites short prompts into detailed descriptions
@@ -249,6 +250,13 @@ ltx-2-mlx hdr-ic-lora HDR IC-LoRA (two-stage, LogC3 → linear HDR)
   --skip-stage-2             Skip upscale stage (half-res HDR output)
                   → saves <output>.mp4 + <output>.hdr.npz (fp32 (F,H,W,3) linear HDR)
 
+ltx-2-mlx lipdub     [experimental] Lip-dub a reference video → audio
+  --reference-video          Reference video providing visuals + target audio (required)
+  --lora PATH STRENGTH       LipDub IC-LoRA (e.g. Lightricks/LTX-2.3-22b-IC-LoRA-LipDub), exactly one
+  --reference-strength       Reference video conditioning strength (default: 1.0)
+  --stage1-steps / --stage2-steps
+                  Frame count auto-derived from the reference video (snapped to 8k+1)
+
 ltx-2-mlx enhance    Prompt enhancement (no generation)
   --mode              "t2v" or "i2v" (default: t2v)
 
@@ -257,7 +265,9 @@ ltx-2-mlx info       Model info and memory estimate
 
 ### Environment variables
 
-- `LTX2_GEMMA_EVAL_EVERY=N` — override the auto-default for per-layer eval in Gemma forward (default: `1` on ≤48 GB Macs, `0` on bigger Macs). The auto-default keeps each Metal command buffer below the macOS GPU watchdog threshold without sacrificing throughput on capable hardware. Set explicitly only for debugging.
+- `LTX2_GEMMA_EVAL_EVERY=N` — per-layer `mx.eval` cadence in the Gemma forward (default: `1`, i.e. eval every layer). Keeps each Metal command buffer below the macOS GPU watchdog (~10 s) deadline. Set to `0` on Mac Studio / M-series Ultra owners who never see the watchdog crash to recover full lazy-graph throughput.
+- `LTX2_DIT_EVAL_EVERY=N` — flush the DiT block loop every N blocks (default: `8`, splits 48 blocks into 6 command buffers). Same trade-off as above; set to `0` on machines that don't crash to maximise throughput.
+- `LTX2_GEMMA_MAX_LENGTH=N` — cap Gemma padded sequence length (default: `1024`). Last-resort knob; quality risk on lower values because left-padded RoPE positions drift outside the LTX training distribution.
 - `LTX2_GEMMA_MAX_LENGTH=N` — cap padded Gemma sequence length (default 1024). Reducing to 512/256 speeds Gemma forward proportionally but **shifts left-padded RoPE positions** away from the LTX training distribution (quality risk). Last-resort knob.
 
 ## Frame Count Reference

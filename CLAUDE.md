@@ -348,22 +348,23 @@ Full pipeline ↔ option matrix lives at [docs/PIPELINES.md](docs/PIPELINES.md).
 
 Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 
-| Command | Pipeline | Description |
-|---------|----------|-------------|
-| `generate` | T2V / I2V (mode flag required) | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. |
-| `a2v` | Audio-to-video | Two-stage audio-conditioned generation (Euler + CFG) |
-| `keyframe` | Keyframe interpolation | Two-stage interpolation between start/end frames |
-| `ic-lora` | IC-LoRA | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
-| `hdr-ic-lora` | HDR IC-LoRA | Two-stage HDR generation via IC-LoRA + LogC3 inverse (saves SDR mp4 + linear-HDR `.npz`) |
-| `retake` | Retake | Regenerate a time segment of an existing video (dev model + CFG) |
-| `extend` | Extend | Add frames before or after an existing video (dev model + CFG) |
-| `upscale` | Upscale | Standalone neural spatial upscale of an existing video (VAE encode → upsampler → VAE decode, no DiT). Defaults to 2x; use `--upsampler spatial_upscaler_x1_5_v1_0` for 1.5x. Audio remuxed if present. |
-| `enhance` | Prompt enhancement | Enhance a text prompt using Gemma (no video generation) |
-| `info` | Model info | Show model configuration and memory estimates |
-| `train` | Training | Train a LoRA or full model from YAML config (requires ltx-trainer-mlx) |
-| `preprocess` | Data preprocessing | Encode raw videos into latents + conditions for training |
+| Command | Pipeline | Tier | Description |
+|---------|----------|------|-------------|
+| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. |
+| `keyframe` | Keyframe interpolation | Stable | Two-stage interpolation between start/end frames |
+| `ic-lora` | IC-LoRA | Stable | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
+| `hdr-ic-lora` | HDR IC-LoRA | Stable | Two-stage HDR generation via IC-LoRA + LogC3 inverse (saves SDR mp4 + linear-HDR `.npz`) |
+| `upscale` | Upscale | Stable | Standalone neural spatial upscale of an existing video (VAE encode → upsampler → VAE decode, no DiT). Defaults to 2x; use `--upsampler spatial_upscaler_x1_5_v1_0` for 1.5x. Audio remuxed if present. |
+| `a2v` | Audio-to-video | Beta | Two-stage audio-conditioned generation (Euler + CFG). Sync quality depends on prompt-audio alignment. |
+| `retake` | Retake | Beta | Regenerate a time segment of an existing video (dev model + CFG) |
+| `extend` | Extend | Beta | Add frames before or after an existing video (dev model + CFG) |
+| `lipdub` | LipDub | Experimental | Lip-dub a reference video → re-sync visuals to source audio. Output audio is a VAE+vocoder reconstruction (audible artifacts on rich music). Uses pre-1.0 LipDub IC-LoRA. |
+| `enhance` | Prompt enhancement | Stable | Enhance a text prompt using Gemma (no video generation) |
+| `info` | Model info | Stable | Show model configuration and memory estimates |
+| `train` | Training | Stable | Train a LoRA or full model from YAML config (requires ltx-trainer-mlx) |
+| `preprocess` | Data preprocessing | Stable | Encode raw videos into latents + conditions for training |
 
-All pipelines except one-stage T2V/I2V use the dev model with CFG guidance. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet`.
+All pipelines except one-stage T2V/I2V use the dev model with CFG guidance. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet`. Tier semantics + promotion criteria live in [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md).
 
 ### Low-RAM Example
 
@@ -908,15 +909,94 @@ The fix that actually unblocked production-quality generation was `1a30f74`: eve
 
 ---
 
+## Release Process
+
+The project is pre-1.0 (`0.x.y`). Under that scheme the `0.y` segment serves
+as the major version: **breaking changes bump `y`, strictly additive changes
+bump `z`**. This is documented at the top of [CHANGELOG.md](CHANGELOG.md)
+and applies to every consumer of the package.
+
+### Branch & PR discipline
+
+- `main` is **protected**: PR required, CI green required (`lint` +
+  `syntax` strict, plus `test (3.11)` / `test (3.12)` / `commitlint`),
+  no force-push, no deletion. Direct push is blocked.
+- One PR = one logical concern. Split mixed work into multiple PRs so
+  each carries a coherent version bump (see PR #8/#9/#10 splitting the
+  upstream PR #212 sync into additive / default-changes / new-pipeline).
+- PR titles use conventional-commits prefixes (`feat:`, `fix:`,
+  `chore:`, `refactor:`, `docs:`). `commitlint` enforces this.
+
+### Versioning rules
+
+| Change type | Bump | Example |
+|---|---|---|
+| New pipeline (additive) | `z` | `0.12.0 → 0.12.1` (LipDub) |
+| New helper / primitive (additive) | `z` | `0.11.0 → 0.11.1` (diffusion_steps) |
+| Internal refactor, public API unchanged | `z` | `0.11.0 → 0.11.1` (ic_lora delegation) |
+| Default value change (potentially breaking for callers relying on defaults) | `y` | `0.11.1 → 0.12.0` (TilingConfig / rope defaults) |
+| Removal / signature change | `y` | `0.9.x → 0.10.0` (ImageToVideoPipeline removal) |
+
+### Release artifacts
+
+Every release on `main` produces, in this order:
+
+1. **Merged squash commit** with conventional-commits subject + body.
+2. **Annotated git tag** `vX.Y.Z` on the merge commit (created locally
+   with `git tag -a vX.Y.Z -m '...'`, pushed via `git push origin vX.Y.Z`).
+3. **GitHub Release** auto-created by `.github/workflows/release.yml` (it
+   listens on `v*` tags). After creation, edit the release notes to use
+   the corresponding `CHANGELOG.md` section verbatim via
+   `gh release edit vX.Y.Z --notes-file …`.
+4. **CHANGELOG entry** at the top of the file under
+   `## [X.Y.Z] - YYYY-MM-DD` with `### Added` / `### Changed` /
+   `### Fixed` / `### Removed` sections as needed. Plain prose first
+   paragraph explaining the why; details below.
+5. **`pyproject.toml` version bump** in the workspace root **and** in
+   every sub-package (`packages/ltx-core-mlx/`, `packages/ltx-pipelines-mlx/`,
+   `packages/ltx-trainer/`) — all four must stay in sync.
+6. **`.release-please-manifest.json` bump** so release-please can drive
+   future automated releases from the correct base.
+
+### Pre-releases (release candidates)
+
+When a release introduces visible behavioural changes that downstream
+apps must validate before adopting, cut a **pre-release** first:
+
+- Tag as `vX.Y.Z-rc.N` (e.g. `v0.12.0-rc.1`).
+- Mark as **pre-release** in GitHub Releases UI (or `--prerelease`
+  on `gh release create`).
+- Promote to the stable tag only after downstream validation.
+
+### Maturity tiers
+
+Pipelines are classified Stable / Beta / Experimental in
+[docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md). CLI `--help`
+output for non-Stable subcommands carries a `[beta]` or
+`[experimental]` tag. Tier promotion criteria + per-tier stability
+guarantees live in that doc.
+
+### Downstream communication
+
+**Out of scope.** External communication with consumer apps / integrators
+is owned by Damien. The release process produces the artifacts above —
+notifying consumers, drafting changelog announcements, scheduling
+upgrades, etc., is not done from this repo.
+
+---
+
 ## Conventions
 
 - Python 3.11+
 - Mandatory type hints on all functions
 - Google-style docstrings
-- ruff for formatting/linting
+- ruff for formatting/linting (pre-commit + CI lint job)
 - Tests in `tests/` using pytest
-- Conventional commits (feat:, fix:, docs:, refactor:)
-- Package imports: `ltx_core_mlx.*` for core, `ltx_pipelines_mlx.*` for pipelines
+- **Conventional commits** (`feat:`, `fix:`, `chore:`, `docs:`,
+  `refactor:`, `feat!:` / `fix!:` for breaking) — enforced by
+  `commitlint` in CI.
+- Package imports: `ltx_core_mlx.*` for core, `ltx_pipelines_mlx.*` for pipelines.
+- One PR = one concern + one version bump (see Release Process above).
 
 ---
 
