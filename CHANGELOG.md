@@ -12,6 +12,30 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-05-13
+
+Adds CLI phase markers around previously silent long-running stages
+(Gemma load + prompt encode, transformer load, decoder load, video
+decode). Addresses [issue #5](https://github.com/dgrauet/ltx-2-mlx/issues/5)
+— a UX-only change with no impact on math, performance, or output.
+
+### Added
+
+- **CLI phase markers**. Each pipeline now prints `[phase] ...` /
+  `[phase] done in X.Ys` lines to **stderr** around the five silent
+  stages: loading the text encoder, encoding the prompt, loading the
+  transformer, loading the decoders, and decoding video + audio +
+  muxing. Output goes to stderr so stdout stays clean for callers that
+  pipe pipeline output. Suppressed by `--quiet`.
+- `BasePipeline.verbose` constructor parameter (default `True`)
+  controlling the phase markers. CLI maps `verbose=not args.quiet` after
+  pipeline construction. Programmatic users can set it either via the
+  constructor or by assigning `pipe.verbose = False` after the fact.
+- New `ltx_pipelines_mlx.utils.progress.phase()` context manager. Small
+  helper used internally by `BasePipeline` to wrap silent stages; no-op
+  when `verbose=False`. Public-ish utility, but mainly an internal
+  building block.
+
 ## [0.13.0] - 2026-05-13
 
 Removes the standalone `upscale` pipeline and its `upscale` CLI subcommand.
