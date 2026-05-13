@@ -106,6 +106,8 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
+        *,
+        frame_rate: float,
         seed: int = 42,
         num_steps: int = 30,
         cfg_scale: float = DEFAULT_CFG_SCALE,
@@ -148,10 +150,10 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         # --- Single stage at full target resolution ---
         F, H, W = compute_video_latent_shape(num_frames, height, width)
         video_shape = (1, F * H * W, 128)
-        audio_T = compute_audio_token_count(num_frames)
+        audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
         audio_shape = (1, audio_T, 128)
 
-        video_positions = compute_video_positions(F, H, W)
+        video_positions = compute_video_positions(F, H, W, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_T)
 
         # I2V conditioning at target resolution. ``images`` is the upstream-iso
@@ -172,6 +174,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
                 enc_w=enc_w,
                 spatial_dims=(F, H, W),
                 video_encoder=self.vae_encoder,
+                frame_rate=frame_rate,
             )
 
         video_state = create_noised_state(
@@ -261,6 +264,8 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
+        *,
+        frame_rate: float,
         seed: int = 42,
         num_steps: int = 30,
         cfg_scale: float = DEFAULT_CFG_SCALE,
@@ -282,6 +287,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             height=height,
             width=width,
             num_frames=num_frames,
+            frame_rate=frame_rate,
             seed=seed,
             num_steps=num_steps,
             cfg_scale=cfg_scale,
@@ -302,7 +308,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
 
         self._load_decoders()
 
-        result = self._decode_and_save_video(video_latent, audio_latent, output_path)
+        result = self._decode_and_save_video(video_latent, audio_latent, output_path, frame_rate=frame_rate)
 
         if self.low_memory:
             self.vae_decoder = None

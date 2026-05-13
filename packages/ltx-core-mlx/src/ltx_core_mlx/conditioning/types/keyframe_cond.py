@@ -20,13 +20,13 @@ def _compute_keyframe_positions(
     frame_idx: int,
     height: int,
     width: int,
-    fps: float,
+    frame_rate: float,
     num_pixel_frames: int = 1,
 ) -> mx.array:
     """Compute positions for a single keyframe, matching the reference.
 
     The reference computes positions for a single-frame (1, H, W) shape,
-    then offsets the temporal axis by frame_idx BEFORE dividing by fps.
+    then offsets the temporal axis by frame_idx BEFORE dividing by frame_rate.
     Causal fix is only applied for frame_idx == 0.
 
     This differs from extracting positions from the full video grid because
@@ -39,7 +39,7 @@ def _compute_keyframe_positions(
             the last frame is 96. NOT a latent frame index.
         height: Latent height H.
         width: Latent width W.
-        fps: Frame rate.
+        frame_rate: Frame rate.
         num_pixel_frames: Number of pixel frames the keyframe latent encodes.
             For single-frame keyframes (default), the temporal range is
             narrowed to [start, start+1) instead of the VAE-scaled width.
@@ -52,7 +52,7 @@ def _compute_keyframe_positions(
         Positions (1, H*W, 3) float32.
     """
     # Temporal: compute pixel coords for a single frame, then offset by frame_idx.
-    # Reference: get_pixel_coords on single-frame shape, then += frame_idx, then /= fps.
+    # Reference: get_pixel_coords on single-frame shape, then += frame_idx, then /= frame_rate.
     if frame_idx == 0:
         # With causal fix: pixel range [max(0, 0*8+1-8), 0*8+1] = [0, 1)
         t_start = 0.0
@@ -67,8 +67,8 @@ def _compute_keyframe_positions(
         t_end = t_start + 1.0
 
     t_mid = (t_start + t_end) / 2.0
-    # Add pixel frame_idx offset then divide by fps
-    t_mid = (t_mid + frame_idx) / fps
+    # Add pixel frame_idx offset then divide by frame_rate
+    t_mid = (t_mid + frame_idx) / frame_rate
 
     # Spatial: same as regular positions — pixel midpoints
     h_mids = mx.arange(height).astype(mx.float32) * VIDEO_SPATIAL_SCALE + VIDEO_SPATIAL_SCALE / 2.0
@@ -95,7 +95,7 @@ class VideoConditionByKeyframeIndex:
         frame_idx: Latent frame index for this keyframe (0-based).
         keyframe_latent: Clean latent for this keyframe, (B, H*W, C).
         spatial_dims: (F, H, W) latent spatial dimensions.
-        fps: Frame rate for position computation.
+        frame_rate: Frame rate for position computation.
         strength: Conditioning strength. 1.0 = fully preserved.
         num_pixel_frames: Number of pixel frames the keyframe latent encodes.
             Defaults to 1 (the typical case). See ``_compute_keyframe_positions``.
@@ -106,7 +106,7 @@ class VideoConditionByKeyframeIndex:
         frame_idx: int,
         keyframe_latent: mx.array,
         spatial_dims: tuple[int, int, int],
-        fps: float = 24.0,
+        frame_rate: float,
         strength: float = 1.0,
         num_pixel_frames: int = 1,
     ):
@@ -117,7 +117,9 @@ class VideoConditionByKeyframeIndex:
         # Compute positions matching reference: single-frame positions with
         # frame_idx offset, NOT extracted from the full video grid.
         _, H, W = spatial_dims
-        self.keyframe_positions = _compute_keyframe_positions(frame_idx, H, W, fps, num_pixel_frames=num_pixel_frames)
+        self.keyframe_positions = _compute_keyframe_positions(
+            frame_idx, H, W, frame_rate, num_pixel_frames=num_pixel_frames
+        )
 
     def apply(self, state: LatentState, spatial_dims: tuple[int, int, int]) -> LatentState:
         """Apply keyframe conditioning by appending tokens.

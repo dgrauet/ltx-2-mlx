@@ -351,7 +351,8 @@ class VideoDecoder(nn.Module):
         self,
         latent: mx.array,
         output_path: str,
-        fps: float = 24.0,
+        *,
+        frame_rate: float,
         audio_path: str | None = None,
     ) -> None:
         """Decode latent and stream frames to ffmpeg.
@@ -361,7 +362,7 @@ class VideoDecoder(nn.Module):
         Args:
             latent: (B, C, F, H, W) latent.
             output_path: Path to output video file.
-            fps: Output frames per second.
+            frame_rate: Output frames per second.
             audio_path: Optional audio file to mux.
         """
         ffmpeg = find_ffmpeg()
@@ -384,7 +385,7 @@ class VideoDecoder(nn.Module):
             "-pix_fmt",
             "rgb24",
             "-r",
-            str(fps),
+            str(frame_rate),
             "-i",
             "-",
         ]

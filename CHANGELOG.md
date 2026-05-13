@@ -12,6 +12,80 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-05-13
+
+Ultra-strict upstream-iso pass on the `frame_rate` parameter. Mirrors
+`Lightricks/LTX-2`'s pipeline signatures byte-for-byte: every public
+pipeline method now takes `frame_rate: float` as a **mandatory
+keyword-only** parameter (no default, matches upstream's required
+`frame_rate=` kwarg). The legacy `fps=` kwarg is renamed throughout the
+pipelines layer + immediate core helpers. Closes the audit gap
+identified on [issue #6](https://github.com/dgrauet/ltx-2-mlx/issues/6).
+
+### Changed
+
+- **Breaking**: every pipeline public method (`generate*`,
+  `generate_and_save`, `interpolate`, `retake`, `extend`,
+  `generate_lipdub`) renames `fps: float = 24.0` →
+  `frame_rate: float` (mandatory keyword-only). 8 pipelines affected:
+  `TI2VidOneStagePipeline`, `TI2VidTwoStagesPipeline`,
+  `TI2VidTwoStagesHQPipeline`, `DistilledPipeline`,
+  `A2VidPipelineTwoStage`, `KeyframeInterpolationPipeline`,
+  `ICLoraPipeline`, `HDRICLoraPipeline`. The 2 pipelines that derive
+  `frame_rate` from the source video metadata (`RetakePipeline`,
+  `LipDubPipeline`) still don't expose a public kwarg, but their
+  internal `extend(...)` accepts `frame_rate` keyword-only too.
+
+- **Breaking**: every CLI subcommand that previously accepted `--fps`
+  now accepts `--frame-rate` and makes it **required**. Coverage
+  changes: `--frame-rate` is now also required on `generate`
+  (all four modes), `ic-lora`, and `hdr-ic-lora` — fixing the silent
+  24fps default that was unintentionally baked into the temporal RoPE
+  on those pipelines. `retake`, `extend`, and `lipdub` derive
+  `frame_rate` from the source video and need no flag.
+
+- **Breaking** (core helpers): `compute_video_positions`,
+  `compute_audio_token_count`, `decode_and_stream`,
+  `VideoConditionByKeyframeIndex` constructor, `_decode_and_save_video`,
+  `combined_image_conditionings` all rename `fps` → `frame_rate`. The
+  `fps` field on `RetakePipeline._SourceMeta` is renamed to
+  `frame_rate`. `VideoInfo.fps` (ffprobe metadata carrier) **keeps
+  its `fps` name** — it describes a source video file's metadata, not
+  a pipeline parameter, and aligns with how ffprobe and upstream's
+  `VideoPixelShape(fps=...)` data class label the concept.
+
+### Migration
+
+Python API callers:
+
+```python
+# 0.13.x
+pipe.generate_and_save(prompt="...", num_frames=97, fps=24.0)
+# 0.14.0
+pipe.generate_and_save(prompt="...", num_frames=97, frame_rate=24.0)
+```
+
+`frame_rate` is mandatory and keyword-only — positional callers and
+callers relying on the implicit 24.0 default will hit a `TypeError`.
+
+CLI users:
+
+```bash
+# 0.13.x
+ltx-2-mlx a2v --audio music.wav --fps 24 ...
+# 0.14.0
+ltx-2-mlx a2v --audio music.wav --frame-rate 24 ...
+
+# 0.13.x silently assumed 24
+ltx-2-mlx generate --two-stage -p "..." -o out.mp4
+# 0.14.0 requires it explicitly
+ltx-2-mlx generate --two-stage --frame-rate 24 -p "..." -o out.mp4
+```
+
+LTX-2.3 was trained at 24 fps. Values far from 24 drift out of the
+temporal RoPE training distribution — quality risk. ComfyUI exposes
+the same knob with the same caveat.
+
 ## [0.13.1] - 2026-05-13
 
 Adds CLI phase markers around previously silent long-running stages

@@ -99,7 +99,8 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
-        fps: float = 24.0,
+        *,
+        frame_rate: float,
         seed: int = 42,
         stage1_steps: int = 30,
         stage2_steps: int | None = None,
@@ -122,7 +123,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             height: Video height.
             width: Video width.
             num_frames: Number of frames.
-            fps: Frame rate.
+            frame_rate: Frame rate.
             seed: Random seed.
             stage1_steps: Stage 1 denoising steps (default: 20).
             stage2_steps: Stage 2 denoising steps.
@@ -139,7 +140,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             raise ValueError("audio_path is required for A2VidPipelineTwoStage")
 
         if audio_max_duration is None:
-            audio_max_duration = num_frames / fps
+            audio_max_duration = num_frames / frame_rate
 
         # --- Encode audio ---
         self._load_audio_encoder()
@@ -163,7 +164,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         )
 
         # Patchify audio to tokens
-        audio_T = compute_audio_token_count(num_frames, fps)
+        audio_T = compute_audio_token_count(num_frames, frame_rate)
         audio_latent = audio_latent[:, :, :audio_T, :]
         audio_tokens, _ = self.audio_patchifier.patchify(audio_latent)  # (1, audio_T, 128)
         mx.synchronize()
@@ -354,7 +355,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         # Trim to exact video duration to ensure sync
         import tempfile
 
-        video_duration = num_frames / fps
+        video_duration = num_frames / frame_rate
         audio_data_48k = load_audio(
             audio_path,
             target_sample_rate=48000,
@@ -375,7 +376,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         self.vae_decoder.decode_and_stream(
             video_latent,
             output_path,
-            fps=fps,
+            frame_rate=frame_rate,
             audio_path=temp_audio,
         )
 

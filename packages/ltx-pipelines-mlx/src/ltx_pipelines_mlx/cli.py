@@ -92,6 +92,15 @@ def _add_generation_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--width", "-W", type=int, default=704, help="Video width (default: 704)")
     parser.add_argument("--frames", "-f", type=int, default=97, help="Number of frames (default: 97)")
     parser.add_argument(
+        "--frame-rate",
+        type=float,
+        required=True,
+        help=(
+            "Output frame rate (mandatory; matches upstream `frame_rate=` on every pipeline). "
+            "LTX-2.3 was trained at 24; values far from that drift out of distribution."
+        ),
+    )
+    parser.add_argument(
         "--tile-frames",
         type=int,
         default=1,
@@ -262,7 +271,6 @@ examples:
     a2v = sub.add_parser("a2v", help="[beta] Generate video from audio + text prompt")
     _add_generation_args(a2v)
     a2v.add_argument("--audio", "-a", required=True, help="Input audio file (WAV/MP3/etc.)")
-    a2v.add_argument("--fps", type=float, default=24.0, help="Frame rate (default: 24)")
     a2v.add_argument("--audio-start", type=float, default=0.0, help="Audio start time in seconds (default: 0)")
     a2v.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30)")
     a2v.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 steps (default: 3)")
@@ -327,7 +335,6 @@ examples:
         default=1.0,
         help="End keyframe conditioning strength in [0, 1] (default: 1.0 — upstream-iso). Lower values give the prompt more freedom to diverge from the end fixture.",
     )
-    kf.add_argument("--fps", type=float, default=24.0, help="Frame rate (default: 24)")
     kf.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
     kf.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
     kf.add_argument("--cfg-scale", type=float, default=None, help="Override CFG scale (default: 3.0 video, 7.0 audio)")
@@ -581,6 +588,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             height=args.height,
             width=args.width,
             num_frames=args.frames,
+            frame_rate=args.frame_rate,
             seed=args.seed,
             image=legacy_image,
         )
@@ -620,6 +628,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             height=args.height,
             width=args.width,
             num_frames=args.frames,
+            frame_rate=args.frame_rate,
             seed=args.seed,
             image=legacy_image,
         )
@@ -665,6 +674,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             height=args.height,
             width=args.width,
             num_frames=args.frames,
+            frame_rate=args.frame_rate,
             seed=args.seed,
             images=args.images,
         )
@@ -724,7 +734,7 @@ def _cmd_a2v(args: argparse.Namespace) -> None:
         height=args.height,
         width=args.width,
         num_frames=args.frames,
-        fps=args.fps,
+        frame_rate=args.frame_rate,
         seed=args.seed,
         images=args.images,
         audio_start_time=args.audio_start,
@@ -870,7 +880,7 @@ def _cmd_keyframe(args: argparse.Namespace) -> None:
         height=args.height,
         width=args.width,
         num_frames=args.frames,
-        fps=args.fps,
+        frame_rate=args.frame_rate,
         seed=args.seed,
         stage1_steps=args.stage1_steps,
         stage2_steps=args.stage2_steps,
@@ -921,6 +931,7 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         height=args.height,
         width=args.width,
         num_frames=args.frames,
+        frame_rate=args.frame_rate,
         seed=args.seed,
         stage1_steps=args.stage1_steps,
         stage2_steps=args.stage2_steps,
@@ -1000,6 +1011,7 @@ def _cmd_hdr_ic_lora(args: argparse.Namespace) -> None:
         height=args.height,
         width=args.width,
         num_frames=args.frames,
+        frame_rate=args.frame_rate,
         seed=args.seed,
         stage1_steps=args.stage1_steps,
         stage2_steps=args.stage2_steps,

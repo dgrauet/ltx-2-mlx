@@ -134,7 +134,7 @@ def decode_and_save_video(
     audio_latent: mx.array,
     output_path: str,
     *,
-    fps: float = 24.0,
+    frame_rate: float,
     low_memory: bool = True,
 ) -> str:
     """Decode audio+video latents and mux to mp4 via ffmpeg.
@@ -145,7 +145,7 @@ def decode_and_save_video(
         video_latent: Encoded video latent.
         audio_latent: Encoded audio latent.
         output_path: Destination mp4 path.
-        fps: Frame rate.
+        frame_rate: Output frame rate.
         low_memory: When ``True`` aggressively releases intermediate
             buffers between audio and video decode.
     """
@@ -159,7 +159,7 @@ def decode_and_save_video(
         audio_path = _tmp.name
     save_waveform(waveform, audio_path, sample_rate=48000)
 
-    video_decoder.decode_and_stream(video_latent, output_path, fps=fps, audio_path=audio_path)
+    video_decoder.decode_and_stream(video_latent, output_path, frame_rate=frame_rate, audio_path=audio_path)
 
     Path(audio_path).unlink(missing_ok=True)
     aggressive_cleanup()
@@ -174,7 +174,7 @@ def combined_image_conditionings(
     enc_w: int,
     spatial_dims: tuple[int, int, int],
     video_encoder,
-    fps: float = 24.0,
+    frame_rate: float,
 ):
     """Build a list of conditioning items from a list of input images.
 
@@ -191,7 +191,7 @@ def combined_image_conditionings(
         enc_w: Encoder spatial width.
         spatial_dims: ``(F, H, W)`` latent shape of the target video.
         video_encoder: VAE encoder instance (must expose ``encode``).
-        fps: Frame rate for keyframe positions.
+        frame_rate: Frame rate for keyframe positions.
 
     Returns:
         List of conditioning items ready to feed into
@@ -226,7 +226,7 @@ def combined_image_conditionings(
                     frame_idx=img.frame_idx,
                     keyframe_latent=ref_tokens,
                     spatial_dims=spatial_dims,
-                    fps=fps,
+                    frame_rate=frame_rate,
                     strength=img.strength,
                 )
             )

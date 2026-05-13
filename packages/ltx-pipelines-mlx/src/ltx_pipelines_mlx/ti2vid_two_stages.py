@@ -277,6 +277,8 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
+        *,
+        frame_rate: float,
         seed: int = 42,
         stage1_steps: int = 30,
         stage2_steps: int | None = None,
@@ -337,10 +339,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         half_h, half_w = height // 2, width // 2
         F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
         video_shape = (1, F * H_half * W_half, 128)
-        audio_T = compute_audio_token_count(num_frames)
+        audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
         audio_shape = (1, audio_T, 128)
 
-        video_positions_1 = compute_video_positions(F, H_half, W_half)
+        video_positions_1 = compute_video_positions(F, H_half, W_half, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_T)
 
         # I2V conditioning at half resolution. ``images`` is the upstream-iso
@@ -362,6 +364,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
                 enc_w=enc_w_half,
                 spatial_dims=(F, H_half, W_half),
                 video_encoder=self.vae_encoder,
+                frame_rate=frame_rate,
             )
 
         # Stage 1: scalar-blend-then-cond for video matches legacy create_initial_state
@@ -479,6 +482,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
                 enc_w=enc_w_full,
                 spatial_dims=(F, H_full, W_full),
                 video_encoder=self.vae_encoder,
+                frame_rate=frame_rate,
             )
 
         # Free VAE encoder + upsampler before Stage 2 denoising
@@ -493,7 +497,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
         start_sigma = sigmas_2[0]
 
-        video_positions_2 = compute_video_positions(F, H_full, W_full)
+        video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
 
         # Stage 2 video: scalar blend BEFORE conditionings to bit-match legacy
         # ``noise * 0.05 + video_tokens * 0.95`` Python-scalar arithmetic. Without
@@ -557,6 +561,8 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
+        *,
+        frame_rate: float,
         seed: int = 42,
         stage1_steps: int | None = None,
         stage2_steps: int | None = None,
@@ -580,6 +586,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             height=height,
             width=width,
             num_frames=num_frames,
+            frame_rate=frame_rate,
             seed=seed,
             stage2_steps=stage2_steps,
             cfg_scale=cfg_scale,
@@ -607,7 +614,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         # Load decoders on-demand
         self._load_decoders()
 
-        result = self._decode_and_save_video(video_latent, audio_latent, output_path)
+        result = self._decode_and_save_video(video_latent, audio_latent, output_path, frame_rate=frame_rate)
 
         # Free decoders so a subsequent generate_and_save call on the same
         # pipeline instance doesn't stack DiT (~26 GB q8) on top of decoders

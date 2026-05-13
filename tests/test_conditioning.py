@@ -590,6 +590,7 @@ class TestVideoConditionByKeyframeIndex:
             frame_idx=frame_idx,
             keyframe_latent=latent,
             spatial_dims=(4, 1, 2),
+            frame_rate=24.0,
             strength=strength,
         )
 
@@ -657,6 +658,7 @@ class TestVideoConditionByKeyframeIndex:
             frame_idx=0,
             keyframe_latent=latent,
             spatial_dims=(2, 1, 2),
+            frame_rate=24.0,
         )
         new_state = cond.apply(state, spatial_dims=(2, 1, 2))
         appended = new_state.latent[:, 4:, :].astype(mx.float32)

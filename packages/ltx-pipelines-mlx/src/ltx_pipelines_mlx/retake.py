@@ -59,7 +59,7 @@ class _SourceMeta:
 
     height: int
     width: int
-    fps: float
+    frame_rate: float
     num_frames: int
 
 
@@ -137,13 +137,13 @@ class RetakePipeline(BasePipeline):
             self.audio_conditioner.free()
 
         if audio_latent is None:
-            audio_T = compute_audio_token_count(vae_compatible_frames)
+            audio_T = compute_audio_token_count(vae_compatible_frames, frame_rate=info.fps)
             audio_latent = mx.zeros((1, 8, audio_T, 16), dtype=mx.bfloat16)
 
         meta = _SourceMeta(
             height=info.height,
             width=info.width,
-            fps=info.fps,
+            frame_rate=info.fps,
             num_frames=vae_compatible_frames,
         )
         return video_latent, audio_latent, meta
@@ -187,6 +187,7 @@ class RetakePipeline(BasePipeline):
             height=meta.height,
             width=meta.width,
             num_frames=meta.num_frames,
+            frame_rate=meta.frame_rate,
             seed=seed,
             num_steps=num_steps,
             cfg_scale=cfg_scale,
@@ -233,7 +234,7 @@ class RetakePipeline(BasePipeline):
             height=meta.height,
             width=meta.width,
             num_frames=meta.num_frames,
-            fps=meta.fps,
+            frame_rate=meta.frame_rate,
             seed=seed,
             num_steps=num_steps,
             cfg_scale=cfg_scale,
@@ -250,6 +251,8 @@ class RetakePipeline(BasePipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
+        *,
+        frame_rate: float,
         seed: int = 42,
         num_steps: int = 30,
         cfg_scale: float = DEFAULT_CFG_SCALE,
@@ -292,7 +295,7 @@ class RetakePipeline(BasePipeline):
         audio_tokens, audio_T = self.audio_patchifier.patchify(source_audio_latent)
 
         # Compute positions
-        video_positions = compute_video_positions(F, H, W)
+        video_positions = compute_video_positions(F, H, W, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_T)
 
         # Create video state with temporal mask (1 = regenerate, 0 = preserve)
@@ -382,7 +385,8 @@ class RetakePipeline(BasePipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
-        fps: float = 24.0,
+        *,
+        frame_rate: float,
         seed: int = 42,
         num_steps: int = 30,
         cfg_scale: float = DEFAULT_CFG_SCALE,
@@ -403,7 +407,7 @@ class RetakePipeline(BasePipeline):
             height: Source video height.
             width: Source video width.
             num_frames: Total source pixel-frame count.
-            fps: Source frame rate (used to size the audio extension).
+            frame_rate: Source frame rate (used to size the audio extension).
             seed: Random seed.
             num_steps: Number of denoising steps (default: 30).
             cfg_scale: CFG guidance scale (default: 3.0).
@@ -429,7 +433,7 @@ class RetakePipeline(BasePipeline):
 
         # Compute total pixel frames for audio token count (each latent frame ≈ 8 pixel frames).
         total_pixel_frames = num_frames + extend_frames * 8
-        extend_audio_T = max(0, compute_audio_token_count(total_pixel_frames, fps) - audio_T)
+        extend_audio_T = max(0, compute_audio_token_count(total_pixel_frames, frame_rate=frame_rate) - audio_T)
         audio_total_T = audio_T + extend_audio_T
 
         new_video_shape = (B, extend_frames * tokens_per_frame, 128)
@@ -481,7 +485,7 @@ class RetakePipeline(BasePipeline):
                 axis=1,
             )
 
-        video_positions = compute_video_positions(F_total, H, W)
+        video_positions = compute_video_positions(F_total, H, W, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_total_T)
 
         video_state = LatentState(

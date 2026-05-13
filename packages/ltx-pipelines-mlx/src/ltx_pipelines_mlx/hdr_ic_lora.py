@@ -137,6 +137,8 @@ class HDRICLoraPipeline(ICLoraPipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
+        *,
+        frame_rate: float,
         seed: int = 42,
         stage1_steps: int | None = None,
         stage2_steps: int | None = None,
@@ -156,6 +158,7 @@ class HDRICLoraPipeline(ICLoraPipeline):
             height=height,
             width=width,
             num_frames=num_frames,
+            frame_rate=frame_rate,
             seed=seed,
             stage1_steps=stage1_steps,
             stage2_steps=stage2_steps,
@@ -181,7 +184,7 @@ class HDRICLoraPipeline(ICLoraPipeline):
         del hdr_fhwc
         aggressive_cleanup()
 
-        return self._decode_and_save_video(video_latent, audio_latent, output_path)
+        return self._decode_and_save_video(video_latent, audio_latent, output_path, frame_rate=frame_rate)
 
 
 __all__ = ["HDRICLoraPipeline", "_resolve_lora_path"]

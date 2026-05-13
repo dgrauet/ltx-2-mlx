@@ -87,6 +87,8 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
+        *,
+        frame_rate: float,
         seed: int = 42,
         stage1_steps: int = 15,
         stage2_steps: int | None = None,
@@ -126,10 +128,10 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         half_h, half_w = height // 2, width // 2
         F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
         video_shape = (1, F * H_half * W_half, 128)
-        audio_T = compute_audio_token_count(num_frames)
+        audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
         audio_shape = (1, audio_T, 128)
 
-        video_positions_1 = compute_video_positions(F, H_half, W_half)
+        video_positions_1 = compute_video_positions(F, H_half, W_half, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_T)
 
         # I2V conditioning at half resolution. ``images`` is the upstream-iso
@@ -151,6 +153,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
                 enc_w=enc_w_half,
                 spatial_dims=(F, H_half, W_half),
                 video_encoder=self.vae_encoder,
+                frame_rate=frame_rate,
             )
 
         # Stage 1 video/audio: legacy_scalar_blend=True for bit-exact match
@@ -256,6 +259,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
                 enc_w=enc_w_full,
                 spatial_dims=(F, H_full, W_full),
                 video_encoder=self.vae_encoder,
+                frame_rate=frame_rate,
             )
 
         if self.low_memory:
@@ -269,7 +273,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
         start_sigma = sigmas_2[0]
 
-        video_positions_2 = compute_video_positions(F, H_full, W_full)
+        video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
 
         # Stage 2 video: legacy_scalar_blend=True bit-matches the legacy inline
         # ``noise * sigma + video_tokens * (1 - sigma)`` arithmetic.

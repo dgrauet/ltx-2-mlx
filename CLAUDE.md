@@ -485,7 +485,7 @@ ltx-2-mlx a2v \
   --audio music.wav --two-stages-hq -o output.mp4
 ```
 
-Flags: `--audio` (required), `--image` (optional I2V), `--two-stages-hq` (res_2s), `--cfg-scale`, `--stg-scale`, `--stage1-steps` (default 30 standard, 15 HQ), `--fps`.
+Flags: `--audio` (required), `--frame-rate` (required, mirrors upstream `frame_rate=`), `--image` (optional I2V), `--two-stages-hq` (res_2s), `--cfg-scale`, `--stg-scale`, `--stage1-steps` (default 30 standard, 15 HQ).
 
 ### Retake / Extend Example
 

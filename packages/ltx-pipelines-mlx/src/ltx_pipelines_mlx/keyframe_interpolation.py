@@ -108,7 +108,8 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
-        fps: float = 24.0,
+        *,
+        frame_rate: float,
         seed: int = 42,
         stage1_steps: int | None = None,
         stage2_steps: int | None = None,
@@ -129,7 +130,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
             height: Final video height.
             width: Final video width.
             num_frames: Total number of pixel frames.
-            fps: Frame rate.
+            frame_rate: Frame rate.
             seed: Random seed.
             stage1_steps: Stage 1 denoising steps.
             stage2_steps: Stage 2 denoising steps.
@@ -212,7 +213,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         audio_T = compute_audio_token_count(num_frames)
         audio_shape = (1, audio_T, 128)
 
-        video_positions_1 = compute_video_positions(F, H_half, W_half, fps=fps)
+        video_positions_1 = compute_video_positions(F, H_half, W_half, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_T)
 
         # Build keyframe conditioning items at half resolution.
@@ -222,7 +223,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
                 frame_idx=kf_idx,
                 keyframe_latent=tokens,
                 spatial_dims=(F, H_half, W_half),
-                fps=fps,
+                frame_rate=frame_rate,
                 strength=kf_strength,
                 num_pixel_frames=1,
             )
@@ -338,7 +339,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
         start_sigma = sigmas_2[0]
 
-        video_positions_2 = compute_video_positions(F, H_full, W_full, fps=fps)
+        video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
 
         # Build keyframe conditioning items at full resolution.
         video_kf_conditions_full = [
@@ -346,7 +347,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
                 frame_idx=kf_idx,
                 keyframe_latent=tokens,
                 spatial_dims=(F, H_full, W_full),
-                fps=fps,
+                frame_rate=frame_rate,
                 strength=kf_strength,
                 num_pixel_frames=1,
             )
@@ -410,7 +411,8 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
-        fps: float = 24.0,
+        *,
+        frame_rate: float,
         seed: int = 42,
         stage1_steps: int | None = None,
         stage2_steps: int | None = None,
@@ -429,7 +431,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
             height: Final video height.
             width: Final video width.
             num_frames: Total number of pixel frames.
-            fps: Frame rate.
+            frame_rate: Frame rate.
             seed: Random seed.
             stage1_steps: Stage 1 denoising steps.
             stage2_steps: Stage 2 denoising steps.
@@ -451,7 +453,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
             height=height,
             width=width,
             num_frames=num_frames,
-            fps=fps,
+            frame_rate=frame_rate,
             seed=seed,
             stage1_steps=stage1_steps,
             stage2_steps=stage2_steps,
@@ -471,7 +473,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         # Load decoders on-demand
         self._load_decoders()
 
-        result = self._decode_and_save_video(video_latent, audio_latent, output_path, fps=fps)
+        result = self._decode_and_save_video(video_latent, audio_latent, output_path, frame_rate=frame_rate)
 
         if self.low_memory:
             self.audio_decoder = None

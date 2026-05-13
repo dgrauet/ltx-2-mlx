@@ -55,7 +55,7 @@ def run_case(
         frame_idx=frame_idx,
         keyframe_latent=keyframe_tokens,
         spatial_dims=(5, h, w),
-        fps=fps,
+        frame_rate=fps,
         strength=1.0,
         num_pixel_frames=num_pixel_frames,
     )

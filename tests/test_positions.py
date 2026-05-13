@@ -44,38 +44,38 @@ class TestConstants:
 class TestComputeAudioTokenCount:
     def test_24fps_24frames(self):
         """24 frames at 24 fps = 1 second = 25 tokens."""
-        count = compute_audio_token_count(num_video_frames=24, fps=24.0)
+        count = compute_audio_token_count(num_video_frames=24, frame_rate=24.0)
         assert count == 25
 
     def test_48fps_48frames(self):
         """48 frames at 48 fps = 1 second = 25 tokens."""
-        count = compute_audio_token_count(num_video_frames=48, fps=48.0)
+        count = compute_audio_token_count(num_video_frames=48, frame_rate=48.0)
         assert count == 25
 
     def test_24fps_48frames(self):
         """48 frames at 24 fps = 2 seconds = 50 tokens."""
-        count = compute_audio_token_count(num_video_frames=48, fps=24.0)
+        count = compute_audio_token_count(num_video_frames=48, frame_rate=24.0)
         assert count == 50
 
     def test_24fps_1frame(self):
         """1 frame at 24 fps ~ 0.0417 seconds ~ 1 token."""
-        count = compute_audio_token_count(num_video_frames=1, fps=24.0)
+        count = compute_audio_token_count(num_video_frames=1, frame_rate=24.0)
         assert count == round(1.0 / 24.0 * 25.0)
         assert count == 1
 
     def test_rounding(self):
         """Check rounding behavior for non-integer results."""
         # 10 frames at 24 fps = 0.4167s * 25 = 10.4167 -> round to 10
-        count = compute_audio_token_count(num_video_frames=10, fps=24.0)
+        count = compute_audio_token_count(num_video_frames=10, frame_rate=24.0)
         assert count == 10
 
     def test_zero_frames(self):
-        count = compute_audio_token_count(num_video_frames=0, fps=24.0)
+        count = compute_audio_token_count(num_video_frames=0, frame_rate=24.0)
         assert count == 0
 
     def test_common_generation_length(self):
         """97 frames at 24 fps -> ~4.04s * 25 = ~101 tokens."""
-        count = compute_audio_token_count(num_video_frames=97, fps=24.0)
+        count = compute_audio_token_count(num_video_frames=97, frame_rate=24.0)
         expected = round(97 / 24.0 * 25.0)
         assert count == expected
 
@@ -118,7 +118,7 @@ class TestComputeVideoPositions:
 
     def test_temporal_causal_fix_first_frame(self):
         """First latent frame: start=max(0, 0*8+1-8)=0, end=0*8+1=1. Mid=0.5/fps."""
-        positions = compute_video_positions(num_frames=2, height=1, width=1, fps=24.0)
+        positions = compute_video_positions(num_frames=2, height=1, width=1, frame_rate=24.0)
         t0 = float(positions[0, 0, 0])
         # start = max(0, 0*8 + 1 - 8) = 0
         # end = max(0, (0+1)*8 + 1 - 8) = 1
@@ -128,7 +128,7 @@ class TestComputeVideoPositions:
 
     def test_temporal_causal_fix_second_frame(self):
         """Second latent frame: start=max(0, 1*8+1-8)=1, end=(1+1)*8+1-8=9. Mid=5/fps."""
-        positions = compute_video_positions(num_frames=2, height=1, width=1, fps=24.0)
+        positions = compute_video_positions(num_frames=2, height=1, width=1, frame_rate=24.0)
         t1 = float(positions[0, 1, 0])
         # start = max(0, 1*8 + 1 - 8) = 1
         # end = max(0, 2*8 + 1 - 8) = 9
@@ -160,8 +160,8 @@ class TestComputeVideoPositions:
 
     def test_fps_scaling(self):
         """Different fps should scale temporal positions proportionally."""
-        pos_24 = compute_video_positions(num_frames=2, height=1, width=1, fps=24.0)
-        pos_48 = compute_video_positions(num_frames=2, height=1, width=1, fps=48.0)
+        pos_24 = compute_video_positions(num_frames=2, height=1, width=1, frame_rate=24.0)
+        pos_48 = compute_video_positions(num_frames=2, height=1, width=1, frame_rate=48.0)
         # At double fps, temporal positions should be half
         ratio = float(pos_24[0, 1, 0]) / float(pos_48[0, 1, 0])
         assert abs(ratio - 2.0) < 1e-5

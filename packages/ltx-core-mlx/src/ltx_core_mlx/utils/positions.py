@@ -1,6 +1,6 @@
 """Position computation for video and audio tokens.
 
-Video positions are 3D (time, height, width) in pixel-space with causal fix, time/fps.
+Video positions are 3D (time, height, width) in pixel-space with causal fix, time/frame_rate.
 Audio positions are 1D (time) in real-time seconds.
 """
 
@@ -17,17 +17,17 @@ AUDIO_SAMPLE_RATE = 16000
 AUDIO_LATENTS_PER_SECOND = AUDIO_SAMPLE_RATE / AUDIO_HOP_LENGTH / AUDIO_DOWNSAMPLE_FACTOR  # 25.0
 
 
-def compute_audio_token_count(num_video_frames: int, fps: float = 24.0) -> int:
+def compute_audio_token_count(num_video_frames: int, frame_rate: float = 24.0) -> int:
     """Compute the number of audio latent tokens for a given video length.
 
     Args:
         num_video_frames: Number of pixel frames.
-        fps: Video frame rate.
+        frame_rate: Video frame rate.
 
     Returns:
         Number of audio tokens.
     """
-    duration = num_video_frames / fps
+    duration = num_video_frames / frame_rate
     return round(duration * AUDIO_LATENTS_PER_SECOND)
 
 
@@ -35,17 +35,17 @@ def compute_video_positions(
     num_frames: int,
     height: int,
     width: int,
-    fps: float = 24.0,
+    frame_rate: float = 24.0,
 ) -> mx.array:
     """Compute 3D positions for video tokens in pixel-space with causal fix.
 
-    Matches reference: get_pixel_coords(causal_fix=True) -> midpoints -> temporal/fps.
+    Matches reference: get_pixel_coords(causal_fix=True) -> midpoints -> temporal/frame_rate.
 
     Args:
         num_frames: Number of latent frames F.
         height: Latent height H.
         width: Latent width W.
-        fps: Video frame rate (default 24.0).
+        frame_rate: Video frame rate (default 24.0).
 
     Returns:
         positions: (1, F*H*W, 3) float32 positions [time, height, width].
@@ -53,11 +53,11 @@ def compute_video_positions(
     # Temporal: pixel coords with causal fix
     # latent frame i -> pixel range [max(0, i*8 + 1 - 8), (i+1)*8 + 1 - 8]
     #                             = [max(0, (i-1)*8 + 1), i*8 + 1]
-    # Midpoint = (start + end) / 2, then divide by fps
+    # Midpoint = (start + end) / 2, then divide by frame_rate
     idx = mx.arange(num_frames).astype(mx.float32)
     f_starts = mx.maximum(idx * VIDEO_TEMPORAL_SCALE + 1 - VIDEO_TEMPORAL_SCALE, 0.0)
     f_ends = mx.maximum((idx + 1) * VIDEO_TEMPORAL_SCALE + 1 - VIDEO_TEMPORAL_SCALE, 0.0)
-    f_mids = (f_starts + f_ends) / 2.0 / fps
+    f_mids = (f_starts + f_ends) / 2.0 / frame_rate
 
     # Spatial: simple pixel midpoints (no causal fix)
     # latent h -> pixel range [h*32, (h+1)*32], midpoint = h*32 + 16

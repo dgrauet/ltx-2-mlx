@@ -127,7 +127,7 @@ class LipDubPipeline(ICLoraPipeline):
         stage1_steps: int | None = None,
         stage2_steps: int | None = None,
     ) -> tuple[mx.array, mx.array, float]:
-        """Run the lipdub pipeline. Returns ``(video_latent, audio_latent, fps)``.
+        """Run the lipdub pipeline. Returns ``(video_latent, audio_latent, frame_rate)``.
 
         Args:
             prompt: Text prompt.
@@ -142,8 +142,10 @@ class LipDubPipeline(ICLoraPipeline):
         """
         meta = probe_video_info(reference_video_path)
         num_frames = _snap_frames_to_8k1(meta.num_frames)
-        fps = float(meta.fps)
-        logger.info(f"LipDub: reference video {meta.num_frames} frames at {fps} fps -> {num_frames} frames (8k+1 snap)")
+        frame_rate = float(meta.fps)
+        logger.info(
+            f"LipDub: reference video {meta.num_frames} frames at {frame_rate} fps -> {num_frames} frames (8k+1 snap)"
+        )
 
         self._load_text_encoder()
         video_embeds, audio_embeds = self._encode_text(prompt)
@@ -172,10 +174,10 @@ class LipDubPipeline(ICLoraPipeline):
         half_h, half_w = height // 2, width // 2
         F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
         video_shape = (1, F * H_half * W_half, 128)
-        audio_T = compute_audio_token_count(num_frames)
+        audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
         audio_shape = (1, audio_T, 128)
 
-        video_positions_1 = compute_video_positions(F, H_half, W_half, fps=fps)
+        video_positions_1 = compute_video_positions(F, H_half, W_half, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_T)
 
         from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
@@ -300,7 +302,7 @@ class LipDubPipeline(ICLoraPipeline):
         sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
         start_sigma = sigmas_2[0]
 
-        video_positions_2 = compute_video_positions(F, H_full, W_full, fps=fps)
+        video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
 
         video_state_2 = create_noised_state(
             base_shape=video_tokens_up.shape,
@@ -342,7 +344,7 @@ class LipDubPipeline(ICLoraPipeline):
         # Upstream discards stage-2 audio output and decodes s1 audio.
         audio_latent = self.audio_patchifier.unpatchify(s1_audio_latent_tokens)
 
-        return video_latent, audio_latent, fps
+        return video_latent, audio_latent, frame_rate
 
     def generate_and_save(  # type: ignore[override]
         self,
@@ -358,7 +360,7 @@ class LipDubPipeline(ICLoraPipeline):
         stage2_steps: int | None = None,
         **_unused,
     ) -> str:
-        video_latent, audio_latent, fps = self.generate_lipdub(
+        video_latent, audio_latent, frame_rate = self.generate_lipdub(
             prompt=prompt,
             reference_video_path=reference_video_path,
             height=height,
@@ -378,7 +380,7 @@ class LipDubPipeline(ICLoraPipeline):
             aggressive_cleanup()
 
         self._load_decoders()
-        result = self._decode_and_save_video(video_latent, audio_latent, output_path, fps=fps)
+        result = self._decode_and_save_video(video_latent, audio_latent, output_path, frame_rate=frame_rate)
         if self.low_memory:
             self.audio_decoder = None
             self.vocoder = None

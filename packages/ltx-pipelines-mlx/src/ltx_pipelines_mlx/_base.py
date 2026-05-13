@@ -260,7 +260,8 @@ class BasePipeline:
         video_latent: mx.array,
         audio_latent: mx.array,
         output_path: str,
-        fps: float = 24.0,
+        *,
+        frame_rate: float,
     ) -> str:
         """Inheritance wrapper around :func:`utils._orchestration.decode_and_save_video`."""
         from ltx_pipelines_mlx.utils._orchestration import decode_and_save_video as _impl
@@ -272,7 +273,7 @@ class BasePipeline:
                 video_latent,
                 audio_latent,
                 output_path,
-                fps=fps,
+                frame_rate=frame_rate,
                 low_memory=self.low_memory,
             )
 

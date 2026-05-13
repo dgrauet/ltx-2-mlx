@@ -46,13 +46,13 @@ by tier, see [PIPELINE_MATURITY.md](PIPELINE_MATURITY.md).
 
 | Pipeline | Specific flags |
 |---|---|
-| `generate --one-stage` | `--stage1-steps` aliased to `num_steps` (default 30), `--cfg-scale` (3.0), `--stg-scale` (0.0), `--image`. No stage2 / TeaCache / distilled-lora flags. Common: `--lora PATH STRENGTH` (incompatible with `--low-ram`), `--enhance-prompt`. |
-| `generate --two-stage` | `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--stg-scale` (0.0), `--image`, `--distilled-lora-strength` (1.0), `--enable-teacache`, `--teacache-thresh` |
+| `generate --one-stage` | `--frame-rate` (required), `--stage1-steps` aliased to `num_steps` (default 30), `--cfg-scale` (3.0), `--stg-scale` (0.0), `--image`. No stage2 / TeaCache / distilled-lora flags. Common: `--lora PATH STRENGTH` (incompatible with `--low-ram`), `--enhance-prompt`. |
+| `generate --two-stage` | `--frame-rate` (required), `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--stg-scale` (0.0), `--image`, `--distilled-lora-strength` (1.0), `--enable-teacache`, `--teacache-thresh` |
 | `generate --two-stages-hq` | same as two-stage but stage1 default 15 steps, res_2s sampler |
-| `generate --distilled` | `--stage1-steps` (8 default), `--stage2-steps` (3 default), `--image`. No CFG/STG/TeaCache flags (distilled flow). Same DiT in both stages — no LoRA swap. |
-| `a2v` | `--audio` (required), `--image`, `--audio-start`, `--fps`, all two-stage flags |
-| `keyframe` | `--start` / `--end` (image paths, required), `--fps`, all two-stage flags |
-| `ic-lora` | `--lora PATH STRENGTH` (required, repeatable), `--video-conditioning PATH STRENGTH` (required, repeatable), `--conditioning-strength` (1.0), `--image`, `--skip-stage-2`, `--stage1-steps`, `--stage2-steps` |
+| `generate --distilled` | `--frame-rate` (required), `--stage1-steps` (8 default), `--stage2-steps` (3 default), `--image`. No CFG/STG/TeaCache flags (distilled flow). Same DiT in both stages — no LoRA swap. |
+| `a2v` | `--audio` (required), `--image`, `--audio-start`, `--frame-rate` (required), all two-stage flags |
+| `keyframe` | `--start` / `--end` (image paths, required), `--frame-rate` (required), all two-stage flags |
+| `ic-lora` | `--frame-rate` (required), `--lora PATH STRENGTH` (required, repeatable), `--video-conditioning PATH STRENGTH` (required, repeatable), `--conditioning-strength` (1.0), `--image`, `--skip-stage-2`, `--stage1-steps`, `--stage2-steps` |
 | `hdr-ic-lora` | same as `ic-lora`, but `--video-conditioning` is **optional** (omit for pure T2V HDR). Auto-detects HDR transform from LoRA metadata. Outputs `.mp4` SDR + `.hdr.npz` linear HDR fp32 |
 | `lipdub` *(experimental)* | `--reference-video PATH` (required, provides visuals + audio), `--lora PATH STRENGTH` (exactly one LipDub IC-LoRA, required), `--reference-strength` (1.0), `--stage1-steps` / `--stage2-steps`. Frame count auto-derived from the reference video metadata (snapped to `8k+1`). Output audio is VAE+vocoder reconstruction — remux original audio for music-fidelity use cases. |
 | `retake` | `--video` (required), `--start` / `--end` (latent frame indices, required), `--steps` (30), `--no-regen-audio`, `--cfg-scale`, `--stg-scale` |

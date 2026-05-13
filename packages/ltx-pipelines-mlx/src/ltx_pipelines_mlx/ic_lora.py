@@ -221,6 +221,8 @@ class ICLoraPipeline(BasePipeline):
         height: int,
         width: int,
         num_frames: int,
+        *,
+        frame_rate: float,
         video_encoder=None,
         conditioning_attention_strength: float = 1.0,
         conditioning_attention_mask: mx.array | None = None,
@@ -272,6 +274,7 @@ class ICLoraPipeline(BasePipeline):
                     enc_w=width,
                     spatial_dims=(F_lat, H_lat, W_lat),
                     video_encoder=video_encoder,
+                    frame_rate=frame_rate,
                 )
             )
 
@@ -301,6 +304,8 @@ class ICLoraPipeline(BasePipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
+        *,
+        frame_rate: float,
         seed: int = 42,
         stage1_steps: int | None = None,
         stage2_steps: int | None = None,
@@ -360,10 +365,10 @@ class ICLoraPipeline(BasePipeline):
         half_h, half_w = height // 2, width // 2
         F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
         video_shape = (1, F * H_half * W_half, 128)
-        audio_T = compute_audio_token_count(num_frames)
+        audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
         audio_shape = (1, audio_T, 128)
 
-        video_positions_1 = compute_video_positions(F, H_half, W_half)
+        video_positions_1 = compute_video_positions(F, H_half, W_half, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_T)
 
         # Encode conditionings before denoising (reduce peak memory)
@@ -373,6 +378,7 @@ class ICLoraPipeline(BasePipeline):
             height=half_h,
             width=half_w,
             num_frames=num_frames,
+            frame_rate=frame_rate,
             conditioning_attention_strength=conditioning_attention_strength,
             conditioning_attention_mask=conditioning_attention_mask,
         )
@@ -468,6 +474,7 @@ class ICLoraPipeline(BasePipeline):
                     enc_w=enc_w_full,
                     spatial_dims=(F_full, H_full_lat, W_full_lat),
                     video_encoder=self.vae_encoder,
+                    frame_rate=frame_rate,
                 )
             )
 
@@ -483,7 +490,7 @@ class ICLoraPipeline(BasePipeline):
         sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
         start_sigma = sigmas_2[0]
 
-        video_positions_2 = compute_video_positions(F, H_full, W_full)
+        video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
 
         # Stage 2 video: scalar-blend bit-matches legacy inline arithmetic.
         # IC-LoRA Stage 1 already accepts a small RNG-shift drift due to the
@@ -536,6 +543,8 @@ class ICLoraPipeline(BasePipeline):
         height: int = 480,
         width: int = 704,
         num_frames: int = 97,
+        *,
+        frame_rate: float,
         seed: int = 42,
         stage1_steps: int | None = None,
         stage2_steps: int | None = None,
@@ -568,6 +577,7 @@ class ICLoraPipeline(BasePipeline):
             height=height,
             width=width,
             num_frames=num_frames,
+            frame_rate=frame_rate,
             seed=seed,
             stage1_steps=stage1_steps,
             stage2_steps=stage2_steps,
@@ -588,7 +598,7 @@ class ICLoraPipeline(BasePipeline):
         # Load decoders on-demand (not loaded during generate to save memory)
         self._load_decoders()
 
-        return self._decode_and_save_video(video_latent, audio_latent, output_path)
+        return self._decode_and_save_video(video_latent, audio_latent, output_path, frame_rate=frame_rate)
 
     # Upstream parity: ``pipe(prompt=..., ...)`` style invocation.
     __call__ = generate
