@@ -1,6 +1,6 @@
 [project]
 name = "ltx-2-mlx"
-version = "0.11.0"
+version = "0.11.1"
 description = "Pure MLX port of LTX-2 for Apple Silicon — inference, pipelines, and training"
 readme = "README.md"
 license = "MIT"

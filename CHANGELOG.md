@@ -12,6 +12,36 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-05-13
+
+Additive upstream sync from Lightricks/LTX-2 PR #212 (merged upstream 2026-05-11),
+plus a low-risk internal refactor. No public default values change in this
+release.
+
+### Added
+
+- `iclora_utils.py` module exposing the shared IC-LoRA helpers from upstream
+  PR #212: `read_lora_reference_downscale_factor`,
+  `downsample_mask_video_to_latent`, `append_ic_lora_reference_video_conditionings`.
+  Used by ic-lora and the upcoming lip-dub pipeline.
+- `AudioConditionByReferenceLatent` conditioning type for appending
+  reference audio tokens with negative-shifted RoPE positions. Audio-side
+  mirror of `VideoConditionByReferenceLatent`.
+- `ltx_core_mlx.components.diffusion_steps` — `EulerDiffusionStep`,
+  `Res2sDiffusionStep`, `EulerCfgPpDiffusionStep` primitives + protocol +
+  `_get_ancestral_step` helper. Available as standalone primitives;
+  existing samplers still inline this math (no behaviour change for
+  current pipelines).
+- `ltx_core_mlx.utils.diffusion` — `to_velocity` / `to_denoised` helpers
+  matching upstream.
+
+### Changed
+
+- `ic_lora.py` refactored to delegate the IC-LoRA reference video
+  conditioning to `iclora_utils.append_ic_lora_reference_video_conditionings`.
+  -151 LOC net. Public API unchanged. Bit-exact regression validated
+  against the pre-refactor Q20 baseline (SHA256 match).
+
 ## [0.11.0] - 2026-05-11
 
 ### Added
