@@ -259,7 +259,7 @@ examples:
     )
 
     # --- a2v (Audio-to-Video) ---
-    a2v = sub.add_parser("a2v", help="Generate video from audio + text prompt")
+    a2v = sub.add_parser("a2v", help="[beta] Generate video from audio + text prompt")
     _add_generation_args(a2v)
     a2v.add_argument("--audio", "-a", required=True, help="Input audio file (WAV/MP3/etc.)")
     a2v.add_argument("--fps", type=float, default=24.0, help="Frame rate (default: 24)")
@@ -286,7 +286,7 @@ examples:
     )
 
     # --- retake ---
-    ret = sub.add_parser("retake", help="Regenerate a time segment of an existing video")
+    ret = sub.add_parser("retake", help="[beta] Regenerate a time segment of an existing video")
     _add_base_args(ret)
     ret.add_argument("--video", "-v", required=True, help="Source video file")
     ret.add_argument("--start", type=int, required=True, help="Start latent frame index (inclusive)")
@@ -299,7 +299,7 @@ examples:
     ret.add_argument("--no-regen-audio", action="store_true", help="Preserve original audio (don't regenerate)")
 
     # --- extend ---
-    ext = sub.add_parser("extend", help="Add frames before or after an existing video")
+    ext = sub.add_parser("extend", help="[beta] Add frames before or after an existing video")
     _add_base_args(ext)
     ext.add_argument("--video", "-v", required=True, help="Source video file")
     ext.add_argument("--extend-frames", type=int, required=True, help="Number of latent frames to add")

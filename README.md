@@ -20,6 +20,12 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **3 model variants** — bf16, int8, int4 (fits 16GB–64GB Macs)
 - **3 upsamplers** — spatial 2x, spatial 1.5x, temporal 2x
 
+> **Production readiness**: pipelines are classified as Stable / Beta /
+> Experimental. See [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md)
+> before relying on a pipeline in production code. CLI subcommands flagged
+> `[beta]` or `[experimental]` in `--help` may have known quality
+> limitations or pre-1.0 LoRA dependencies.
+
 ## Requirements
 
 - macOS with Apple Silicon (M1/M2/M3/M4)
