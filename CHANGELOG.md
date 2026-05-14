@@ -12,6 +12,28 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-05-14
+
+Accurate transformer-load phase timing. Before this patch, the
+``[Loading transformer (...)] done in 0.1s`` marker reported ~0.1s for
+a 10+ GB load — MLX is lazy, so ``apply_quantization`` + ``load_weights``
+build a graph but defer the real work. The marker measured graph
+construction, not loading.
+
+### Fixed
+
+- Force MLX graph materialisation immediately after ``load_weights`` in
+  both the orchestration helper (``utils._orchestration.load_transformer``)
+  and the LoRA-fusion path (``_base.py``). Both branches now report
+  real load time (~1.8s empirically observed by the reporter on a
+  typical run).
+
+### Credit
+
+Bug surfaced by [@plz12345](https://github.com/plz12345) in
+[#18](https://github.com/dgrauet/ltx-2-mlx/pull/18). Release PR
+adds the symmetric guard to the LoRA-fusion path for consistency.
+
 ## [0.14.2] - 2026-05-14
 
 Hotfix for a long-standing latent bug: setting ``pipe._pending_loras = [...]``

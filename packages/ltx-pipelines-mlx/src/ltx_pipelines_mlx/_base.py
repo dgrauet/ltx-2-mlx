@@ -283,6 +283,11 @@ class BasePipeline:
             dit = LTXModel()
             apply_quantization(dit, transformer_weights)
             dit.load_weights(list(transformer_weights.items()))
+            # Force materialisation so the phase marker reports actual load
+            # work (MLX is lazy — load_weights builds a graph only). Mirrors
+            # the same guard in utils._orchestration.load_transformer.
+            _materialize = getattr(mx, "eval")  # noqa: B009 -- mx.eval is the MLX graph materialiser
+            _materialize(dit.parameters())
             aggressive_cleanup()
             return dit
 
