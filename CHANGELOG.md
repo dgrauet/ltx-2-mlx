@@ -12,6 +12,37 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-05-14
+
+Hotfix for a long-standing latent bug: setting ``pipe._pending_loras = [...]``
+from the CLI was silently dropped by every pipeline whose ``load()`` method
+overrides :meth:`BasePipeline.load` — that is, ``--distilled``, ``--one-stage``,
+``--two-stage``, and ``--two-stages-hq``. Only the ``BasePipeline.load()``
+path (no longer reached by any T2V/I2V CLI mode) honored the flag, so T2V
+generation with ``--lora`` produced output indistinguishable from a
+base-model run.
+
+### Fixed
+
+- ``BasePipeline._load_transformer_with_optional_streaming`` now honors
+  ``_pending_loras`` directly. Every pipeline whose ``load()`` routes
+  through this wrapper (or through ``_load_dev_transformer``, which
+  transitively calls the wrapper) automatically picks up LoRA fusion —
+  no subclass-level boilerplate required. Pre-existing pipelines fixed:
+  ``DistilledPipeline``, ``TI2VidOneStagePipeline``, ``TI2VidTwoStagesPipeline``,
+  ``TI2VidTwoStagesHQPipeline``.
+- New regression test (``tests/test_pending_loras_dispatch.py``) locks the
+  contract: every pipeline ``load()`` override must route DiT construction
+  through the wrapper. Catches future overrides that would silently
+  reintroduce the bug.
+
+### Credit
+
+Bug surfaced by [@colinbdesign](https://github.com/colinbdesign) in
+[#16](https://github.com/dgrauet/ltx-2-mlx/pull/16) (closed in favor of
+this PR's wrapper-level fix, which is upstream-iso friendly and covers
+all four affected pipelines instead of just ``DistilledPipeline``).
+
 ## [0.14.1] - 2026-05-14
 
 Hotfix for a regression introduced by the v0.14.0 `fps` → `frame_rate`
