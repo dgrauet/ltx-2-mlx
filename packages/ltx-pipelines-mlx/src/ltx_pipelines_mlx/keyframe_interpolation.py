@@ -280,6 +280,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
             video_factory = create_multimodal_guider_factory(vgp, negative_context=video_neg)
             audio_factory = create_multimodal_guider_factory(agp, negative_context=audio_neg)
 
+            self._pre_denoise_flush(video_state_1, audio_state_1)
             output_1 = guided_denoise_loop(
                 model=x0_model,
                 video_state=video_state_1,
@@ -291,6 +292,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
                 sigmas=sigmas_1,
             )
         else:
+            self._pre_denoise_flush(video_state_1, audio_state_1)
             output_1 = denoise_loop(
                 model=x0_model,
                 video_state=video_state_1,
@@ -377,6 +379,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         )
 
         # Stage 2 denoising: simple (no CFG), matching reference
+        self._pre_denoise_flush(video_state_2, audio_state_2)
         output_2 = denoise_loop(
             model=x0_model,
             video_state=video_state_2,

@@ -236,6 +236,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             self.image_conditioner.free()
             aggressive_cleanup()
 
+        self._pre_denoise_flush(video_state, audio_state)
         output = guided_denoise_loop(
             model=x0_model,
             video_state=video_state,

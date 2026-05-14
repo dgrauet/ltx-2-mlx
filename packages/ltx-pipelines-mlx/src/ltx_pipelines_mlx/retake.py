@@ -357,6 +357,7 @@ class RetakePipeline(BasePipeline):
         video_factory = create_multimodal_guider_factory(video_gp, negative_context=neg_video_embeds)
         audio_factory = create_multimodal_guider_factory(audio_gp, negative_context=neg_audio_embeds)
 
+        self._pre_denoise_flush(video_state, audio_state)
         output = guided_denoise_loop(
             model=x0_model,
             video_state=video_state,
@@ -526,6 +527,7 @@ class RetakePipeline(BasePipeline):
         video_factory = create_multimodal_guider_factory(video_gp, negative_context=neg_video_embeds)
         audio_factory = create_multimodal_guider_factory(audio_gp, negative_context=neg_audio_embeds)
 
+        self._pre_denoise_flush(video_state, audio_state)
         output = guided_denoise_loop(
             model=x0_model,
             video_state=video_state,

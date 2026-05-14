@@ -413,6 +413,7 @@ class ICLoraPipeline(BasePipeline):
         sigmas_1 = DISTILLED_SIGMAS[: stage1_steps + 1] if stage1_steps else DISTILLED_SIGMAS
         x0_model = X0Model(self.dit)
 
+        self._pre_denoise_flush(video_state, audio_state)
         output_1 = denoise_loop(
             model=x0_model,
             video_state=video_state,
@@ -519,6 +520,7 @@ class ICLoraPipeline(BasePipeline):
             initial_latent=audio_tokens_1,
         )
 
+        self._pre_denoise_flush(video_state_2, audio_state_2)
         output_2 = denoise_loop(
             model=x0_model,
             video_state=video_state_2,
