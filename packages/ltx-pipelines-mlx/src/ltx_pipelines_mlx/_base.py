@@ -10,6 +10,7 @@ from pathlib import Path
 import mlx.core as mx
 
 from ltx_core_mlx.components.patchifiers import AudioPatchifier, VideoLatentPatchifier, compute_video_latent_shape
+from ltx_core_mlx.conditioning.types.latent_cond import LatentState
 from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
 from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
@@ -380,6 +381,23 @@ class BasePipeline:
         """
         return self.prompt_encoder.encode(prompt)
 
+    @staticmethod
+    def _pre_denoise_flush(video_state: LatentState, audio_state: LatentState) -> None:
+        """Force-materialise noised states before starting the denoise loop.
+
+        Flushing here prevents the macOS Metal GPU watchdog from firing
+        (``MTLCommandBufferErrorInternal`` code 14) when a large lazy graph
+        — VAE encoding, conditioning blend, or noise addition — accumulates
+        and is submitted as a single oversized command buffer.  Completing
+        the graph in its own buffer before the denoise loop starts keeps each
+        subsequent Metal command buffer within the watchdog window.
+
+        Applies to all Apple Silicon Macs: the bug has been observed on
+        M2 Max 64 GB and is not specific to the <=48 GB tier.
+        """
+        # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
+        mx.eval(video_state.latent, video_state.clean_latent, audio_state.latent)
+
     def generate(
         self,
         prompt: str,
@@ -443,7 +461,7 @@ class BasePipeline:
         # Denoise
         sigmas = DISTILLED_SIGMAS[: num_steps + 1] if num_steps else DISTILLED_SIGMAS
         x0_model = X0Model(self.dit)
-
+        self._pre_denoise_flush(video_state, audio_state)
         output = denoise_loop(
             model=x0_model,
             video_state=video_state,

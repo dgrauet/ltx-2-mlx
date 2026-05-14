@@ -210,6 +210,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         if enable_teacache:
             teacache_controller = _build_hq_teacache_controller(stage1_steps, teacache_thresh)
             teacache_controller.reset()
+        self._pre_denoise_flush(video_state, audio_state)
         output_1 = res2s_denoise_loop(
             model=x0_model,
             video_state=video_state,
@@ -301,6 +302,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         )
 
         # Stage 2: simple denoising (no CFG)
+        self._pre_denoise_flush(video_state_2, audio_state_2)
         output_2 = denoise_loop(
             model=x0_model,
             video_state=video_state_2,

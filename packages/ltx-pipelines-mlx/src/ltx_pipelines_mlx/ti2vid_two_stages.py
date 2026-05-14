@@ -435,6 +435,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             teacache_controller = _build_teacache_controller(stage1_steps, teacache_thresh)
             teacache_controller.reset()
 
+        self._pre_denoise_flush(video_state, audio_state)
         output_1 = guided_denoise_loop(
             model=x0_model,
             video_state=video_state,
@@ -537,6 +538,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             tiler_2 = VideoModalityTiler(self._tile_count, latent_shape=(F, H_full, W_full))
             stage2_x0_model = X0Model(TiledLTXModel(self.dit, tiler_2))
 
+        self._pre_denoise_flush(video_state_2, audio_state_2)
         output_2 = denoise_loop(
             model=stage2_x0_model,
             video_state=video_state_2,
