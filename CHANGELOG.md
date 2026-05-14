@@ -12,6 +12,27 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-05-14
+
+Hotfix for a regression introduced by the v0.14.0 `fps` → `frame_rate`
+rename. The `VideoDecoder.decode_and_stream` wrapper in
+`ltx_pipelines_mlx/utils/blocks.py` was missed during the audit and
+kept the old `fps=` kwarg, while the inner `ltx_core_mlx`
+`VAE.decode_and_stream` now requires `frame_rate=` mandatory
+keyword-only. Every decode path raised `TypeError: ... got an
+unexpected keyword argument 'frame_rate'` at mux time.
+
+### Fixed
+
+- `VideoDecoder.decode_and_stream` wrapper accepts and forwards
+  `frame_rate=` (was still `fps=`). Affects every pipeline that goes
+  through the orchestration helper: `--two-stage`, `--two-stages-hq`,
+  `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora`. One-stage was
+  unaffected — bug was isolated to the decode hop.
+  Closes [#17](https://github.com/dgrauet/ltx-2-mlx/pull/17).
+  Thanks to [@plz12345](https://github.com/plz12345) for the catch +
+  patch.
+
 ## [0.14.0] - 2026-05-13
 
 Ultra-strict upstream-iso pass on the `frame_rate` parameter. Mirrors

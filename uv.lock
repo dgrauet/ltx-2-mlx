@@ -427,7 +427,7 @@ wheels = [
 
 [[package]]
 name = "ltx-2-mlx"
-version = "0.14.0"
+version = "0.14.1"
 source = { virtual = "." }
 dependencies = [
     { name = "ltx-core-mlx" },
@@ -467,7 +467,7 @@ provides-extras = ["trainer", "dev", "all"]
 
 [[package]]
 name = "ltx-core-mlx"
-version = "0.14.0"
+version = "0.14.1"
 source = { editable = "packages/ltx-core-mlx" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -490,7 +490,7 @@ requires-dist = [
 
 [[package]]
 name = "ltx-pipelines-mlx"
-version = "0.14.0"
+version = "0.14.1"
 source = { editable = "packages/ltx-pipelines-mlx" }
 dependencies = [
     { name = "ltx-core-mlx" },
@@ -509,7 +509,7 @@ requires-dist = [
 
 [[package]]
 name = "ltx-trainer-mlx"
-version = "0.14.0"
+version = "0.14.1"
 source = { editable = "packages/ltx-trainer" }
 dependencies = [
     { name = "ltx-core-mlx" },
