@@ -12,6 +12,42 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-05-14
+
+Apple Silicon Metal watchdog hardening for the denoise loop. On
+M2 Max 64 GB (and any Apple Silicon under load), the macOS GPU
+watchdog could fire with ``MTLCommandBufferErrorInternal`` (code 14)
+at the start of a denoise loop when the accumulated pre-denoise lazy
+graph — VAE encoding, conditioning blend, and noise addition — was
+submitted as a single oversized Metal command buffer exceeding the
+~10s watchdog window.
+
+### Fixed
+
+- Add ``BasePipeline._pre_denoise_flush(video_state, audio_state)``
+  that calls ``mx.eval`` on the noised latent states to force-materialise
+  the accumulated graph in its own command buffer before the denoise
+  loop begins. Each subsequent denoise-step buffer is then within the
+  watchdog window.
+- Wire the flush at every denoise call site across all pipelines
+  (18 sites total): ``BasePipeline.generate`` (one-stage distilled),
+  ``TI2VidOneStagePipeline`` (dev one-stage + CFG), ``DistilledPipeline``
+  (two-stage), ``TI2VidTwoStagesPipeline`` and ``TI2VidTwoStagesHQPipeline``
+  (both stages), ``A2VidPipelineTwoStage`` (both stages),
+  ``ICLoraPipeline`` and ``HDRICLoraPipeline`` (both stages, via
+  inheritance), ``RetakePipeline`` (retake + extend), ``KeyframeInterpolationPipeline``
+  (stage 1 dev/distilled branches + stage 2), and ``LipDubPipeline``
+  (both stages).
+
+### Credit
+
+Initial fix and validation on M2 Max 64 GB by
+[@colinbdesign](https://github.com/colinbdesign) in
+[#22](https://github.com/dgrauet/ltx-2-mlx/pull/22) — covered
+``BasePipeline.generate`` plus the two two-stage variants. Coverage
+extended to the remaining 14 call sites in
+[#23](https://github.com/dgrauet/ltx-2-mlx/pull/23).
+
 ## [0.14.3] - 2026-05-14
 
 Accurate transformer-load phase timing. Before this patch, the
