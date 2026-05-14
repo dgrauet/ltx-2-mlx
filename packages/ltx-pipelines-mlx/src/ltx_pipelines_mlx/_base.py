@@ -241,19 +241,50 @@ class BasePipeline:
             self.audio_decoder_block.load()
 
     def _load_dev_transformer(self) -> LTXModel:
-        """Inheritance wrapper around :func:`utils._orchestration.load_dev_transformer`."""
-        from ltx_pipelines_mlx.utils._orchestration import load_dev_transformer as _impl
-
+        """Load the dev (non-distilled) transformer; honors ``_pending_loras``."""
         assert self._dev_transformer is not None, "_dev_transformer must be set before calling _load_dev_transformer()"
-        with phase(f"Loading transformer ({self._dev_transformer})", verbose=self.verbose):
-            return _impl(self.model_dir, self._dev_transformer, low_ram_streaming=self.low_ram_streaming)
+        dev_path = self.model_dir / self._dev_transformer
+        if not dev_path.exists():
+            raise FileNotFoundError(
+                f"Dev transformer not found: {dev_path}\n"
+                "This pipeline requires the dev model for CFG guidance.\n"
+                "Use: --model dgrauet/ltx-2.3-mlx-q8"
+            )
+        return self._load_transformer_with_optional_streaming(dev_path)
 
     def _load_transformer_with_optional_streaming(self, transformer_path: Path) -> LTXModel:
-        """Inheritance wrapper around :func:`utils._orchestration.load_transformer`."""
-        from ltx_pipelines_mlx.utils._orchestration import load_transformer as _impl
+        """Load a transformer from ``transformer_path``; honors ``_pending_loras``.
 
+        The single entry point for DiT construction across every pipeline's
+        ``load()``. Routes through :func:`utils._orchestration.load_transformer`
+        when no LoRAs are pending, or fuses LoRA deltas into the weight dict
+        before quantization when ``self._pending_loras`` is set by the CLI.
+        Subclasses that override ``load()`` get LoRA fusion for free as long
+        as they call into this method (no special-casing required).
+
+        LoRA fusion is intentionally incompatible with ``low_ram_streaming``:
+        deltas must be fused into a fully-materialised weight dict before
+        block-stream eviction starts.
+        """
+        pending_loras = getattr(self, "_pending_loras", None)
         with phase(f"Loading transformer ({transformer_path.name})", verbose=self.verbose):
-            return _impl(transformer_path, low_ram_streaming=self.low_ram_streaming)
+            if not pending_loras:
+                from ltx_pipelines_mlx.utils._orchestration import load_transformer as _impl
+
+                return _impl(transformer_path, low_ram_streaming=self.low_ram_streaming)
+
+            if self.low_ram_streaming:
+                raise NotImplementedError(
+                    "low_ram_streaming is incompatible with on-the-fly LoRA fusion. "
+                    "Either disable streaming or pre-fuse LoRAs into the safetensors file."
+                )
+            transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
+            transformer_weights = self._fuse_pending_loras(transformer_weights, pending_loras)
+            dit = LTXModel()
+            apply_quantization(dit, transformer_weights)
+            dit.load_weights(list(transformer_weights.items()))
+            aggressive_cleanup()
+            return dit
 
     def _decode_and_save_video(
         self,
@@ -297,29 +328,14 @@ class BasePipeline:
 
         model_dir = self.model_dir
 
-        # Stage 1: DiT (largest component)
+        # Stage 1: DiT (largest component); LoRA fusion happens inside the wrapper.
         if self.dit is None:
             transformer_path = model_dir / "transformer.safetensors"
             if not transformer_path.exists():
                 # Fallback: try transformer-distilled.safetensors (mlx-forge dual-variant layout)
                 transformer_path = model_dir / "transformer-distilled.safetensors"
 
-            # Fuse pending LoRA weights before loading into model
-            pending_loras = getattr(self, "_pending_loras", None)
-            if pending_loras:
-                if self.low_ram_streaming:
-                    raise NotImplementedError(
-                        "low_ram_streaming is incompatible with on-the-fly LoRA fusion. "
-                        "Either disable streaming or pre-fuse LoRAs into the safetensors file."
-                    )
-                transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
-                transformer_weights = self._fuse_pending_loras(transformer_weights, pending_loras)
-                self.dit = LTXModel()
-                apply_quantization(self.dit, transformer_weights)
-                self.dit.load_weights(list(transformer_weights.items()))
-                aggressive_cleanup()
-            else:
-                self.dit = self._load_transformer_with_optional_streaming(transformer_path)
+            self.dit = self._load_transformer_with_optional_streaming(transformer_path)
 
         # Stage 2: VAE + audio (smaller components)
         self._load_decoders()
