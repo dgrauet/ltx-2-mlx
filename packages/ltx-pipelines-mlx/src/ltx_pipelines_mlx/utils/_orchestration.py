@@ -85,6 +85,7 @@ def load_transformer(
     else:
         apply_quantization(dit, weights)
         dit.load_weights(list(weights.items()))
+    mx.eval(dit.parameters())
     aggressive_cleanup()
     return dit
 
