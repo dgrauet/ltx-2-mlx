@@ -222,12 +222,12 @@ class VideoDecoder:
         self,
         video_latent: mx.array,
         output_path: str,
-        fps: float = 24.0,
+        frame_rate: float = 24.0,
         audio_path: str | None = None,
     ) -> str:
         """Stream-decode the latent into an mp4 with optional audio mux."""
         decoder = self.load()
-        decoder.decode_and_stream(video_latent, output_path, fps=fps, audio_path=audio_path)
+        decoder.decode_and_stream(video_latent, output_path, frame_rate=frame_rate, audio_path=audio_path)
         return output_path
 
 
