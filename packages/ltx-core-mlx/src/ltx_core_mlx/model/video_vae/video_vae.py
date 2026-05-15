@@ -45,6 +45,7 @@ from ltx_core_mlx.model.video_vae.sampling import (
     unpatchify_spatial,
 )
 from ltx_core_mlx.model.video_vae.tiling import (
+    TemporalTilingConfig,
     Tile,
     TilingConfig,
     prepare_tiles_for_decoding,
@@ -54,6 +55,46 @@ from ltx_core_mlx.utils.ffmpeg import find_ffmpeg
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+def _compute_decode_tiling(
+    latent_shape: tuple[int, ...],
+    peak_budget_gb: float = 8.0,
+    frame_rate: float = 24.0,
+) -> TilingConfig | None:
+    """Return a TilingConfig that keeps peak VAE decode memory under budget, or None.
+
+    Peak memory occurs at the block-3 intermediate tensor (the second DepthToSpaceUpsample), which has shape (1, 512, F_lat*4, H_lat*4, W_lat*4) at float32. We size tiles so thi tensor stays within budget. Returns None when the full video already fits — no tiling,
+    no overhead.
+    """
+    _, _, F_lat, H_lat, W_lat = latent_shape
+    budget_bytes = int(peak_budget_gb * 1024**3)
+
+    # Block-3 peak memory: 512 channels × 4 temporal frames × (4H spatial) × (4W spatial) × 4 bytes
+    block3_bytes_per_lat_frame = 512 * 4 * (H_lat * 4) * (W_lat * 4) * 4
+
+    if block3_bytes_per_lat_frame * F_lat <= budget_bytes:
+        return None  # Full video fits in budget — no tiling needed
+
+    # How many latent frames fit within the budget?
+    max_lat_frames = max(2, budget_bytes // block3_bytes_per_lat_frame)
+
+    # Convert latent frames → output pixel frames (8× temporal upsampling), with a 16-frame minimum
+    tile_frames = max(16, max_lat_frames * 8)
+
+    # Overlap ≈ 1 second of pixel frames at the given frame rate, rounded down to a multiple of 8,
+    # at most 25% of tile size. Scaling with frame_rate keeps the blend window a consistent
+    # duration regardless of fps (e.g. 24→24 frames, 30→24, 48→40, 60→56).
+    one_second_frames = max(8, (int(frame_rate) // 8) * 8)
+    overlap = min(one_second_frames, (tile_frames // 32) * 8)
+    if overlap >= tile_frames:
+        overlap = 0
+
+    return TilingConfig(
+        temporal_config=TemporalTilingConfig(
+            tile_size_in_frames=tile_frames,
+            tile_overlap_in_frames=overlap,
+        )
+    )
 
 
 def _add_at(buffer: mx.array, coords: tuple[slice, ...], values: mx.array) -> mx.array:
@@ -254,7 +295,11 @@ class VideoDecoder(nn.Module):
             Video chunks (B, 3, T, H, W) in [-1, 1], by temporal slices.
         """
         if tiling_config is None:
-            yield self.decode(latent)
+            pixels = self.decode(latent)
+            mx.eval(pixels)      # materialize now — frees block-3 intermediate activations
+            aggressive_cleanup() # release GPU cache before caller begins streaming
+            yield pixels
+            del pixels
             return
 
         tiles = prepare_tiles_for_decoding(latent.shape, tiling_config)
@@ -281,8 +326,11 @@ class VideoDecoder(nn.Module):
             weights = mx.zeros_like(buffer)
 
             for tile in temporal_group_tiles:
-                # Decode tile
+                # Decode tile and immediately materialize to free intermediate activations
                 decoded_tile = self.decode(latent[tile.in_coords])
+                mx.eval(decoded_tile)
+                aggressive_cleanup()
+
                 mask = tile.blend_mask
 
                 temporal_offset = tile.out_coords[2].start - curr_temporal_slice.start
@@ -305,6 +353,8 @@ class VideoDecoder(nn.Module):
 
                 buffer = _add_at(buffer, chunk_coords, decoded_slice * mask_slice)
                 weights = _add_at(weights, chunk_coords, mask_slice)
+                # Force accumulation buffers to materialize so decoded_tile's graph can be freed
+                mx.eval(buffer, weights)
 
                 del decoded_tile, mask, decoded_slice, mask_slice
                 aggressive_cleanup()
@@ -357,7 +407,10 @@ class VideoDecoder(nn.Module):
     ) -> None:
         """Decode latent and stream frames to ffmpeg.
 
-        Decodes one temporal chunk at a time to avoid OOM.
+        Automatically applies temporal tiling when the full-volume decode would
+        exceed 8 GB peak activation memory (block 3 intermediate). At typical
+        resolutions (≤720p, ≤20s) this falls through to a single-pass decode
+        with no tiling overhead.
 
         Args:
             latent: (B, C, F, H, W) latent.
@@ -366,6 +419,7 @@ class VideoDecoder(nn.Module):
             audio_path: Optional audio file to mux.
         """
         ffmpeg = find_ffmpeg()
+        tiling = _compute_decode_tiling(latent.shape, frame_rate=frame_rate)
 
         # Estimate output dimensions from latent
         _, _, _F_lat, H_lat, W_lat = latent.shape
@@ -397,22 +451,23 @@ class VideoDecoder(nn.Module):
         assert proc.stdin is not None
 
         try:
-            # Decode full volume and stream frames
-            pixels = self.decode(latent)
-            mx.async_eval(pixels)
-
-            num_frames = pixels.shape[2]
-            for i in range(num_frames):
-                frame = pixels[:, :, i, :, :]  # (B, 3, H, W)
-                frame = mx.clip(frame, -1.0, 1.0)
-                frame = ((frame + 1.0) * 127.5).astype(mx.uint8)
-                # (1, 3, H, W) -> (H, W, 3)
-                frame_hwc = frame[0].transpose(1, 2, 0)
-                mx.eval(frame_hwc)  # must be sync — async_eval can write before data is ready
-                proc.stdin.write(bytes(memoryview(frame_hwc)))
-                del frame, frame_hwc
-                if i % 8 == 0:
-                    aggressive_cleanup()
+            for chunk in self.tiled_decode(latent, tiling):  # (B, 3, T, H, W)
+                # chunk is already materialized by tiled_decode — async_eval is a no-op
+                # but kept for compatibility if the yield path changes.
+                mx.async_eval(chunk)
+                num_frames = chunk.shape[2]
+                for i in range(num_frames):
+                    frame = chunk[:, :, i, :, :]
+                    frame = mx.clip(frame, -1.0, 1.0)
+                    frame = ((frame + 1.0) * 127.5).astype(mx.uint8)
+                    frame_hwc = frame[0].transpose(1, 2, 0)  # (H, W, 3)
+                    mx.eval(frame_hwc)  # sync before write — async_eval can race memoryview
+                    proc.stdin.write(bytes(memoryview(frame_hwc)))
+                    del frame, frame_hwc
+                    if i % 8 == 0:
+                        aggressive_cleanup()
+                del chunk
+                aggressive_cleanup()
         except BrokenPipeError:
             pass  # ffmpeg may close early with -shortest; output is still valid
         finally:
