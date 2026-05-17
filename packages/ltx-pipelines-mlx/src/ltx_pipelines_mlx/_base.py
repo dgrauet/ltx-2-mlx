@@ -1,6 +1,11 @@
-"""Text-to-Video and Image-to-Video pipelines — prompt (+ optional image) to video+audio.
+"""Shared base class for LTX-2 pipelines — composition blocks + proxy properties + common helpers.
 
-Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_one_stage.py
+Private to ``ltx_pipelines_mlx``. Each public pipeline class
+(``TI2VidOneStagePipeline``, ``TI2VidTwoStagesPipeline``, ``ICLoraPipeline``,
+``A2VidPipelineTwoStage``, ``RetakePipeline``, …) subclasses this facade and
+implements its own ``generate_*`` + ``generate_and_save`` entry points. The
+facade itself does not define a generation method — matching the upstream
+Lightricks/LTX-2 design where each pipeline file owns its API.
 """
 
 from __future__ import annotations
@@ -9,28 +14,29 @@ from pathlib import Path
 
 import mlx.core as mx
 
-from ltx_core_mlx.components.patchifiers import AudioPatchifier, VideoLatentPatchifier, compute_video_latent_shape
+from ltx_core_mlx.components.patchifiers import AudioPatchifier, VideoLatentPatchifier
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState
 from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
-from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
+from ltx_core_mlx.model.transformer.model import LTXModel
 from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
 from ltx_core_mlx.utils.memory import aggressive_cleanup
-from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
-from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS
 from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
-from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.progress import phase
-from ltx_pipelines_mlx.utils.samplers import denoise_loop
 
 
 class BasePipeline:
-    """Text-to-Video generation pipeline.
+    """Shared facade for all LTX-2 pipelines.
 
-    Generates video+audio from a text prompt using the LTX-2.3 model.
+    Owns the composition blocks (prompt encoder, image/audio conditioners,
+    decoders), proxy properties for legacy ``self.text_encoder`` /
+    ``self.vae_*`` attribute access, and the common load / encode / decode
+    helpers. Concrete generation logic lives on subclasses
+    (``TI2VidOneStagePipeline``, ``TI2VidTwoStagesPipeline``, etc.) which
+    define their own ``generate_*`` + ``generate_and_save`` entry points.
 
     Args:
         model_dir: Path to model weights or HuggingFace repo ID.
@@ -397,130 +403,6 @@ class BasePipeline:
         """
         # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
         mx.eval(video_state.latent, video_state.clean_latent, audio_state.latent)
-
-    def generate(
-        self,
-        prompt: str,
-        height: int = 480,
-        width: int = 704,
-        num_frames: int = 97,
-        seed: int = 42,
-        num_steps: int | None = None,
-    ) -> tuple[mx.array, mx.array]:
-        """Generate video and audio latents.
-
-        Args:
-            prompt: Text prompt.
-            height: Video height in pixels.
-            width: Video width in pixels.
-            num_frames: Number of video frames.
-            seed: Random seed.
-            num_steps: Number of denoising steps (defaults to 8).
-
-        Returns:
-            Tuple of (video_latent, audio_latent) in spatial format.
-        """
-        # Encode text first (loads Gemma + connector, then frees Gemma)
-        video_embeds, audio_embeds = self._encode_text_and_load(prompt)
-
-        assert self.dit is not None
-
-        # Compute latent shapes
-        F, H, W = compute_video_latent_shape(num_frames, height, width)
-        video_shape = (1, F * H * W, 128)
-        audio_T = compute_audio_token_count(num_frames)
-        audio_shape = (1, audio_T, 128)
-
-        # Compute positions for RoPE
-        video_positions = compute_video_positions(F, H, W)
-        audio_positions = compute_audio_positions(audio_T)
-
-        # Create initial noise with positions (legacy_scalar_blend=True for
-        # bit-exact match with the prior create_initial_state code path).
-        video_state = create_noised_state(
-            base_shape=video_shape,
-            conditionings=[],
-            spatial_dims=(F, H, W),
-            positions=video_positions,
-            seed=seed,
-            sigma=1.0,
-            initial_latent=None,
-            legacy_scalar_blend=True,
-        )
-        audio_state = create_noised_state(
-            base_shape=audio_shape,
-            conditionings=[],
-            spatial_dims=(F, H, W),  # unused
-            positions=audio_positions,
-            seed=seed + 1,
-            sigma=1.0,
-            initial_latent=None,
-            legacy_scalar_blend=True,
-        )
-
-        # Denoise
-        sigmas = DISTILLED_SIGMAS[: num_steps + 1] if num_steps else DISTILLED_SIGMAS
-        x0_model = X0Model(self.dit)
-        self._pre_denoise_flush(video_state, audio_state)
-        output = denoise_loop(
-            model=x0_model,
-            video_state=video_state,
-            audio_state=audio_state,
-            video_text_embeds=video_embeds,
-            audio_text_embeds=audio_embeds,
-            sigmas=sigmas,
-        )
-        if self.low_memory:
-            aggressive_cleanup()
-
-        # Unpatchify
-        video_latent = self.video_patchifier.unpatchify(output.video_latent, (F, H, W))
-        audio_latent = self.audio_patchifier.unpatchify(output.audio_latent)
-
-        return video_latent, audio_latent
-
-    def generate_and_save(
-        self,
-        prompt: str,
-        output_path: str,
-        height: int = 480,
-        width: int = 704,
-        num_frames: int = 97,
-        seed: int = 42,
-        num_steps: int | None = None,
-    ) -> str:
-        """Generate and save video+audio to file.
-
-        Args:
-            prompt: Text prompt.
-            output_path: Path to output video file.
-            height: Video height.
-            width: Video width.
-            num_frames: Number of frames.
-            seed: Random seed.
-            num_steps: Number of denoising steps.
-
-        Returns:
-            Path to the output video file.
-        """
-        video_latent, audio_latent = self.generate(
-            prompt=prompt,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            seed=seed,
-            num_steps=num_steps,
-        )
-
-        # Free transformer + text encoder to make room for VAE decode
-        if self.low_memory:
-            self.dit = None
-            self.text_encoder = None
-            self.feature_extractor = None
-            self._loaded = False
-            aggressive_cleanup()
-
-        return self._decode_and_save_video(video_latent, audio_latent, output_path)
 
     @staticmethod
     def _save_waveform(waveform: mx.array, path: str, sample_rate: int = 48000) -> None:
