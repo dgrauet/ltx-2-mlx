@@ -92,8 +92,7 @@ def _compute_decode_tiling(
     # duration regardless of fps (e.g. 24→24 frames, 30→24, 48→40, 60→56).
     one_second_frames = max(8, (int(frame_rate) // 8) * 8)
     overlap = min(one_second_frames, (tile_frames // 32) * 8)
-    if overlap >= tile_frames:
-        overlap = 0
+    assert overlap < tile_frames, f"overlap {overlap} >= tile_frames {tile_frames}"
 
     return TilingConfig(
         temporal_config=TemporalTilingConfig(
