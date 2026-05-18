@@ -8,6 +8,7 @@ from ltx_core_mlx.model.video_vae.convolution import Conv3dBlock
 from ltx_core_mlx.model.video_vae.ops import PerChannelStatistics
 from ltx_core_mlx.model.video_vae.resnet import ResBlock3d, ResBlockStage
 from ltx_core_mlx.model.video_vae.sampling import DepthToSpaceUpsample as UpsampleConv
+from ltx_core_mlx.model.video_vae.tiling import TemporalTilingConfig, TilingConfig
 from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 
 # ---------------------------------------------------------------------------
@@ -173,6 +174,38 @@ class TestVideoDecoder:
         prefixes = {k.split(".")[0] for k in flat}
         expected = {"conv_in", "conv_out", "up_blocks", "per_channel_statistics"}
         assert prefixes == expected, f"Unexpected prefixes: {prefixes - expected}"
+
+    def test_tiled_decode_single_tile_matches_decode(self):
+        """tiled_decode with one tile covering the full latent must match decode exactly.
+
+        A single tile means no blending across boundaries — the accumulated buffer
+        divides by weights of 1.0 everywhere, reducing to identity. Any divergence
+        indicates a bug in the accumulation or yield path.
+        """
+        mx.random.seed(0)
+        decoder = VideoDecoder()
+        mx.eval(decoder.parameters())
+
+        # (B=1, C=128, F_lat=2, H_lat=3, W_lat=3) → 16 pixel frames, 96x96
+        latent = mx.random.normal((1, 128, 2, 3, 3))
+        mx.eval(latent)
+
+        baseline = decoder.decode(latent)
+        mx.eval(baseline)
+
+        # tile_size_in_frames=32 → latent tile size = 32//8 = 4 frames > F_lat=2 → single tile
+        cfg = TilingConfig(
+            temporal_config=TemporalTilingConfig(
+                tile_size_in_frames=32,
+                tile_overlap_in_frames=0,
+            )
+        )
+        chunks = list(decoder.tiled_decode(latent, cfg))
+        tiled_out = mx.concatenate(chunks, axis=2) if len(chunks) > 1 else chunks[0]
+        mx.eval(tiled_out)
+
+        assert tiled_out.shape == baseline.shape
+        assert mx.allclose(baseline, tiled_out, atol=1e-6).item()
 
 
 # ---------------------------------------------------------------------------
