@@ -35,6 +35,7 @@ from ltx_core_mlx.utils.positions import (
 from .scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS
 from .ti2vid_two_stages import TI2VidTwoStagesPipeline
 from .utils.helpers import create_noised_state
+from .utils.progress import phase
 from .utils.samplers import denoise_loop
 
 _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags mx.eval pattern
@@ -138,8 +139,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         """
         # --- Text encoding (positive only — no CFG) ---
         self._load_text_encoder()
-        video_embeds, audio_embeds = self._encode_text(prompt)
-        _materialize(video_embeds, audio_embeds)
+        with phase("Encoding prompt", verbose=self.verbose):
+            video_embeds, audio_embeds = self._encode_text(prompt)
+            _materialize(video_embeds, audio_embeds)
         if self.low_memory:
             self.prompt_encoder.free()
             aggressive_cleanup()
