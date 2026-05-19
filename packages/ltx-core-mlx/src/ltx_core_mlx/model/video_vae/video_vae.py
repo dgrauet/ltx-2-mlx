@@ -231,11 +231,15 @@ class VideoDecoder(nn.Module):
         std = self.per_channel_statistics.std.reshape(1, 1, 1, 1, -1)
         return latent * std + mean
 
-    def decode(self, latent: mx.array) -> mx.array:
+    def decode(self, latent: mx.array, *, _materialize_stages: bool = False) -> mx.array:
         """Decode latent to pixel frames.
 
         Args:
             latent: (B, C, F, H, W) latent in PyTorch layout.
+            _materialize_stages: If True, force-eval after each upsample stage so
+                prior activations can be freed before the next (larger) stage begins.
+                Only set by :meth:`tiled_decode`; the no-tiling path omits this to
+                avoid breaking kernel fusion across upsample stages.
 
         Returns:
             Pixels (B, 3, F, H, W) in [-1, 1], same dtype as ``latent``.
@@ -268,6 +272,9 @@ class VideoDecoder(nn.Module):
                 if tf > 1:
                     x = x[:, 1:, :, :, :]
                 upsample_idx += 1
+                if _materialize_stages:
+                    # Free prior-stage activations before the next, larger stage.
+                    mx.eval(x)
 
         # Pre-activation PixelNorm + SiLU before final conv
         x = self.conv_out(nn.silu(pixel_norm(x)))
@@ -332,7 +339,7 @@ class VideoDecoder(nn.Module):
 
             for tile in temporal_group_tiles:
                 # Decode tile and immediately materialize to free intermediate activations
-                decoded_tile = self.decode(latent[tile.in_coords])
+                decoded_tile = self.decode(latent[tile.in_coords], _materialize_stages=True)
                 mx.eval(decoded_tile)
                 aggressive_cleanup()
 
