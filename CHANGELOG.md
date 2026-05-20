@@ -12,6 +12,50 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.7] - 2026-05-20
+
+Hotfix for a long-standing IC-LoRA reference-video crash. Any caller
+passing an 8k-frame source file (the format LTX itself produces — its
+``_decode_and_save_video`` drops the leading frame on write) into
+``ICLoraPipeline.generate_and_save(video_conditioning=...)`` hit a
+``space_to_depth`` reshape error at ``ltx_core_mlx/model/video_vae/sampling.py:121``
+because the encoder's first temporal-stride-2 block requires a
+``(1 + 8k)``-frame input. Failure was input-content-independent: a raw
+RGB driving video and a canny-edges control map produced byte-identical
+error numbers at the same reshape site.
+
+### Fixed
+
+- ``append_ic_lora_reference_video_conditionings`` in ``iclora_utils.py``
+  now probes the source with ``probe_video_info``, clamps to the
+  caller's target ``num_frames``, and rounds down to the nearest
+  ``(1 + 8k)`` before invoking ``load_video_frames_normalized``.
+  Mirrors ``RetakePipeline._encode_source_video``. Applies to every
+  ``ICLoraPipeline`` subclass — including ``HDRICLoraPipeline`` (where
+  the reporter observed the same crash at a different spatial scale,
+  ``reference_downscale_factor=1``) and ``LipDubPipeline``'s
+  video-reference path.
+
+### Changed
+
+- Lifted the local ``from ltx_core_mlx.components.patchifiers import
+  compute_video_latent_shape`` inside ``append_ic_lora_reference_video_conditionings``
+  to module scope. Same scoping anti-pattern that caused the
+  ``UnboundLocalError`` previously fixed in ``ic_lora.py`` (commit
+  ``23127d6``); not load-bearing here, but matches the cleanup precedent.
+
+### Credit
+
+Bug surfaced and diagnosed by [@R0drig0Diaz](https://github.com/R0drig0Diaz)
+in [#27](https://github.com/dgrauet/ltx-2-mlx/issues/27) — with
+byte-identical reproductions across two input modalities (RGB +
+canny-edges) and two LoRA variants (Union Control with
+``reference_downscale_factor=2``, HDR with ``reference_downscale_factor=1``),
+plus the ``RetakePipeline._encode_source_video`` precedent and a 3-fix
+proposal. The two scoping-trap items called out in #27 (``ic_lora.py:261``
++ ``ic_lora.py:501``) were already resolved on ``main`` since
+``23127d6``; the reporter was on stale HEAD ``0e753b6``.
+
 ## [0.14.6] - 2026-05-20
 
 Automatic temporal tiling for the video VAE decoder. The block-3
