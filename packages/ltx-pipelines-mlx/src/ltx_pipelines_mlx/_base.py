@@ -45,9 +45,8 @@ class BasePipeline:
             mmap'd safetensors instead of materializing all 48 blocks.
             Cuts transformer peak RSS from ~10-12 GB (q8) or ~22 GB
             (bf16) to ~0.6 GB. Adds ~48 sync points per forward, so
-            slightly slower per step. Currently incompatible with LoRA
-            fusion (use the pre-fused ``transformer-distilled.safetensors``
-            for distilled-only inference).
+            slightly slower per step. Compatible with ``_pending_loras``
+            via per-block ``BlockLoraSource`` bind-time fusion.
         verbose: If True (default), print phase markers to stderr around
             long silent stages (Gemma load/encode, transformer load,
             decoder load, video decode). CLI maps this from ``--quiet``.
@@ -266,12 +265,12 @@ class BasePipeline:
         ``load()``. Routes through :func:`utils._orchestration.load_transformer`
         when no LoRAs are pending, or fuses LoRA deltas into the weight dict
         before quantization when ``self._pending_loras`` is set by the CLI.
-        Subclasses that override ``load()`` get LoRA fusion for free as long
-        as they call into this method (no special-casing required).
 
-        LoRA fusion is intentionally incompatible with ``low_ram_streaming``:
-        deltas must be fused into a fully-materialised weight dict before
-        block-stream eviction starts.
+        In ``low_ram_streaming`` mode, LoRAs are attached as
+        :class:`BlockLoraSource` objects on the :class:`StreamingLTXModel`
+        wrapper — fusion happens per-block at each bind rather than
+        materialising the full weight dict. This mirrors
+        :meth:`ICLoraPipeline._fuse_loras`'s streaming branch.
         """
         pending_loras = getattr(self, "_pending_loras", None)
         with phase(f"Loading transformer ({transformer_path.name})", verbose=self.verbose):
@@ -281,10 +280,26 @@ class BasePipeline:
                 return _impl(transformer_path, low_ram_streaming=self.low_ram_streaming)
 
             if self.low_ram_streaming:
-                raise NotImplementedError(
-                    "low_ram_streaming is incompatible with on-the-fly LoRA fusion. "
-                    "Either disable streaming or pre-fuse LoRAs into the safetensors file."
-                )
+                from ltx_core_mlx.loader.block_streaming import BlockLoraSource
+                from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
+                from ltx_pipelines_mlx.utils._orchestration import load_transformer as _load_impl
+                from ltx_pipelines_mlx.utils._orchestration import resolve_lora_path
+
+                model = _load_impl(transformer_path, low_ram_streaming=True)
+                sources: list = list(object.__getattribute__(model, "_lora_sources"))
+                for lora_path, strength in pending_loras:
+                    resolved = resolve_lora_path(lora_path)
+                    sources.append(
+                        BlockLoraSource(
+                            resolved,
+                            block_prefix="transformer.transformer_blocks.",
+                            strength=strength,
+                            sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+                        )
+                    )
+                object.__setattr__(model, "_lora_sources", sources)
+                return model
+
             transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
             transformer_weights = self._fuse_pending_loras(transformer_weights, pending_loras)
             dit = LTXModel()

@@ -36,6 +36,31 @@ def resolve_model_dir(model_dir: str | Path) -> Path:
     return Path(snapshot_download(str(model_dir)))
 
 
+def resolve_lora_path(path: str) -> str:
+    """Resolve a LoRA path — return local path or download from HuggingFace.
+
+    Supports local ``.safetensors`` files and HuggingFace repo IDs
+    (e.g. ``"some-user/my-lora"``).  When a repo is downloaded its
+    ``.safetensors`` files are collected; if there is more than one the
+    first is used with a warning.
+    """
+    import logging
+
+    local = Path(path)
+    if local.exists():
+        return str(local)
+
+    _logger = logging.getLogger(__name__)
+    _logger.info("Downloading LoRA from HuggingFace: %s", path)
+    repo_dir = Path(snapshot_download(path))
+    safetensors_files = list(repo_dir.glob("*.safetensors"))
+    if not safetensors_files:
+        raise FileNotFoundError(f"No .safetensors files found in {repo_dir}")
+    if len(safetensors_files) > 1:
+        _logger.warning("Multiple .safetensors files found, using first: %s", safetensors_files[0].name)
+    return str(safetensors_files[0])
+
+
 def fuse_pending_loras(
     transformer_weights: dict[str, mx.array],
     lora_paths: list[tuple[str, float]],
@@ -51,7 +76,8 @@ def fuse_pending_loras(
 
     lora_sds = []
     for lora_path, strength in lora_paths:
-        lora_sd = loader.load(lora_path, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
+        resolved = resolve_lora_path(lora_path)
+        lora_sd = loader.load(resolved, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
         lora_sds.append(LoraStateDictWithStrength(state_dict=lora_sd, strength=strength))
         print(f"  Fusing LoRA: {lora_path} (strength={strength:.2f})")
 
@@ -240,6 +266,7 @@ __all__ = [
     "fuse_pending_loras",
     "load_dev_transformer",
     "load_transformer",
+    "resolve_lora_path",
     "resolve_model_dir",
     "save_waveform",
 ]

@@ -138,12 +138,12 @@ def _add_generation_args(parser: argparse.ArgumentParser) -> None:
             "transformer peak Metal ~75%% (e.g. q8 ~10-12 GB -> ~2.8 GB). "
             "Targets 16 GB Macs (q8) and 32 GB Macs (bf16). Supported "
             "on generate (one-stage / --two-stage / --two-stages-hq), a2v, "
-            "keyframe, and ic-lora. Two-stage at LoRA strength 1.0 "
-            "swaps to the pre-fused transformer-distilled.safetensors "
-            "at the stage 1->2 transition; custom strengths trigger "
-            "bind-time LoRA fusion (slower but supports any strength). "
-            "Generate's --lora flag is still incompatible (use ic-lora "
-            "for control LoRAs or pre-fuse via mlx-forge)."
+            "keyframe, and ic-lora. Compatible with generate's --lora flag "
+            "via per-block BlockLoraSource bind-time fusion. Two-stage at "
+            "LoRA strength 1.0 swaps to the pre-fused "
+            "transformer-distilled.safetensors at the stage 1->2 transition; "
+            "custom strengths trigger bind-time LoRA fusion (slower but "
+            "supports any strength)."
         ),
     )
 
