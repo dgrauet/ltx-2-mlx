@@ -374,8 +374,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         else:
             temp_audio = None
 
-        assert self.vae_decoder is not None
-        self.vae_decoder.decode_and_stream(
+        self.video_decoder_block.decode_and_stream(
             video_latent,
             output_path,
             frame_rate=frame_rate,
