@@ -17,8 +17,10 @@ import mlx.core as mx
 import numpy as np
 from safetensors import safe_open
 
+from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
 from ltx_core_mlx.conditioning.types.attention_strength_wrapper import ConditioningItemAttentionStrengthWrapper
 from ltx_core_mlx.conditioning.types.reference_video_cond import VideoConditionByReferenceLatent
+from ltx_core_mlx.utils.ffmpeg import probe_video_info
 from ltx_core_mlx.utils.positions import compute_video_positions
 from ltx_core_mlx.utils.video import load_video_frames_normalized
 
@@ -109,8 +111,6 @@ def append_ic_lora_reference_video_conditionings(
     minus the ``tiling_config`` arg (our VAE encoder doesn't expose a tiled-encode
     entry point; tiled video VAE happens at the decoder side via streaming).
     """
-    from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
-
     scale = reference_downscale_factor
     if scale != 1 and (height % scale != 0 or width % scale != 0):
         raise ValueError(
@@ -122,7 +122,17 @@ def append_ic_lora_reference_video_conditionings(
     ref_width = ref_W_lat * 32
 
     for video_path, strength in video_conditioning:
-        video = load_video_frames_normalized(video_path, ref_height, ref_width, num_frames)
+        # The video VAE encoder requires a (1 + 8k)-frame input. Source files
+        # produced by LTX itself are saved 8k-trimmed (``_decode_and_save_video``
+        # drops the leading frame), so feeding them through unchanged fails the
+        # encoder's ``space_to_depth`` reshape. Probe the source, clamp to the
+        # caller's target, and round down to the nearest (1 + 8k). Mirrors
+        # ``RetakePipeline._encode_source_video``.
+        info = probe_video_info(video_path)
+        max_frames = min(num_frames, info.num_frames)
+        k = max(1, (max_frames - 1) // 8)
+        vae_compatible_frames = 1 + k * 8
+        video = load_video_frames_normalized(video_path, ref_height, ref_width, vae_compatible_frames)
         video = (video * 2.0 - 1.0).astype(mx.bfloat16)
         encoded_video = video_encoder.encode(video)
         _mx_eval(encoded_video)
