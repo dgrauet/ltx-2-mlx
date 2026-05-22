@@ -12,6 +12,52 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.8] - 2026-05-22
+
+Enables `generate --lora` on the `--low-ram` block-streaming path.
+Previously, combining the two raised `NotImplementedError` because
+LoRA fusion required a fully-materialised weight dict before
+block-stream eviction started. The streaming path now attaches each
+pending LoRA as a `BlockLoraSource` on the `StreamingLTXModel`
+wrapper — fusion happens per-block at each `bind()`, mirroring the
+pattern already used by `ICLoraPipeline._fuse_loras` for control
+LoRAs. Works for community LoRAs at strength 1.0 and at custom
+strengths. Thanks to [@plz12345](https://github.com/plz12345) for the
+contribution (PR #30, follow-up to #20).
+
+### Added
+
+- `resolve_lora_path` helper in `ltx_pipelines_mlx.utils._orchestration`
+  shared by the streaming and non-streaming LoRA paths. Accepts local
+  `.safetensors` paths and HuggingFace repo IDs. Raises `ValueError`
+  on ambiguous multi-safetensors repos (lists the candidate file
+  names) and `FileNotFoundError` on empty repos.
+- Audio / joint-block LoRA key remappings (`.linear_1.` → `.linear1.`,
+  `.linear_2.` → `.linear2.`, `audio_ff.net.0.proj.` →
+  `audio_ff.proj_in.`, `audio_ff.net.2.` → `audio_ff.proj_out.`)
+  consolidated into the shared `LTXV_LORA_COMFY_RENAMING_MAP` in
+  `ltx_core_mlx.loader.sd_ops` so the streaming path picks them up
+  automatically (it goes through the map directly, no longer through
+  `ti2vid_two_stages._remap_lora_keys`).
+- Tests: streaming dispatch now pins `BlockLoraSource` ctor args and
+  exercises a parametrized two-LoRA case; new `test_resolve_lora_path`
+  covers the 4 resolution branches (local-exists, HF single, HF
+  multi-raises, HF zero-raises); new `test_lora_renaming_map` locks
+  the contract for the 4 audio/joint-block patterns.
+
+### Changed
+
+- CLAUDE.md "Limitations" + CLI `--low-ram` help text updated: the
+  `generate --lora` flag is now compatible with `--low-ram` via
+  per-block bind-time fusion.
+- `_remap_lora_keys` in `ti2vid_two_stages.py` simplified to a single
+  dict comprehension; `or k` fallback removed (verified dead — the
+  shared map's `apply_to_key` always returns a string given
+  `with_matching()` + no `allowed_keys`).
+- `resolve_lora_path` writes its "Downloading LoRA from HuggingFace"
+  notice to stderr via `print(..., file=sys.stderr)` instead of
+  `logging.info` (which was swallowed by the absent logger config).
+
 ## [0.14.7] - 2026-05-20
 
 Hotfix for a long-standing IC-LoRA reference-video crash. Any caller
