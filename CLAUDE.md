@@ -382,7 +382,7 @@ ltx-2-mlx generate \
   --low-ram -o fox.mp4
 ```
 
-`--low-ram` is supported on `generate` (one-stage / `--two-stage` / `--two-stages-hq`), `a2v`, `keyframe`, and `ic-lora`. Bind-time LoRA fusion handles ic-lora's control LoRAs and custom `--distilled-lora-strength`. The `generate --lora` flag is still incompatible (use a pre-fused safetensors via mlx-forge). See `## Block Streaming` below for details.
+`--low-ram` is supported on `generate` (one-stage / `--two-stage` / `--two-stages-hq`), `a2v`, `keyframe`, and `ic-lora`. Bind-time LoRA fusion handles ic-lora's control LoRAs, custom `--distilled-lora-strength`, and `generate --lora` (community LoRAs). See `## Block Streaming` below for details.
 
 ### IC-LoRA Example
 
@@ -755,7 +755,6 @@ For `ic-lora`, each control LoRA is attached as a ``BlockLoraSource`` to the str
 
 ### Limitations
 
-- The `generate --lora` flag (per-pipeline LoRA on the one-stage path) is still incompatible with `--low-ram`. It pre-fuses LoRAs into the weight dict at load time, before streaming is set up. Either drop `--low-ram` or pre-fuse via mlx-forge.
 - Bind-time fusion at custom strength is slower than the strength-1.0 swap path: dequantize + re-quantize for every linear in every block, every step. ~50ms per linear × ~50 linears × 48 blocks × num_forward_passes. For 30 stage-1 steps this adds noticeable wall-clock. For typical strengths between 0.8 and 1.2 the strength-1.0 swap output is visually indistinguishable, so prefer it when possible.
 - The compiled-block forward differs from eager by ~1 fp32 ULP (kernel fusion). `tests/test_block_streaming.py::test_wrapper_matches_baseline` uses `mx.allclose(atol=1e-5, rtol=1e-5)` to capture this.
 

@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
 from ltx_pipelines_mlx._base import BasePipeline
 
 
@@ -80,13 +81,86 @@ def test_pending_loras_takes_fusion_path(pipeline_stub):
     assert pipeline_stub._fuse_spy[1] == [("/fake/lora.safetensors", 0.75)]
 
 
-def test_pending_loras_with_streaming_raises(pipeline_stub):
-    """``low_ram_streaming`` + LoRA fusion is mutually exclusive."""
+def test_pending_loras_with_streaming_attaches_lora_sources(pipeline_stub):
+    """``low_ram_streaming`` + LoRA attaches ``BlockLoraSource`` via bind-time fusion."""
     pipeline_stub._pending_loras = [("/fake/lora.safetensors", 1.0)]
     pipeline_stub.low_ram_streaming = True
 
-    with pytest.raises(NotImplementedError, match=r"low_ram_streaming.*LoRA"):
-        _load_under_test(pipeline_stub, Path("/fake/transformer.safetensors"))
+    mock_model = MagicMock(name="streaming_dit")
+    object.__setattr__(mock_model, "_lora_sources", [])
+    mock_source = MagicMock(name="block_lora_source")
+
+    with (
+        patch(
+            "ltx_pipelines_mlx.utils._orchestration.load_transformer",
+            return_value=mock_model,
+        ) as orch_load,
+        patch(
+            "ltx_core_mlx.loader.block_streaming.BlockLoraSource",
+            return_value=mock_source,
+        ) as BlockLoraSource_cls,
+        patch(
+            "ltx_pipelines_mlx.utils._orchestration.resolve_lora_path",
+            return_value="/fake/lora.safetensors",
+        ),
+    ):
+        result = _load_under_test(pipeline_stub, Path("/fake/transformer.safetensors"))
+
+    orch_load.assert_called_once_with(Path("/fake/transformer.safetensors"), low_ram_streaming=True)
+    BlockLoraSource_cls.assert_called_once_with(
+        "/fake/lora.safetensors",
+        block_prefix="transformer.transformer_blocks.",
+        strength=1.0,
+        sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+    )
+    assert result is mock_model
+    attached = object.__getattribute__(mock_model, "_lora_sources")
+    assert mock_source in attached
+
+
+@pytest.mark.parametrize(
+    "loras",
+    [
+        [("/fake/lora_a.safetensors", 0.8), ("/fake/lora_b.safetensors", 1.2)],
+    ],
+)
+def test_pending_loras_with_streaming_multi_lora(pipeline_stub, loras):
+    """Multiple pending LoRAs each produce one ``BlockLoraSource`` attachment."""
+    pipeline_stub._pending_loras = loras
+    pipeline_stub.low_ram_streaming = True
+
+    mock_model = MagicMock(name="streaming_dit")
+    object.__setattr__(mock_model, "_lora_sources", [])
+
+    mock_sources = [MagicMock(name=f"source_{i}") for i in range(len(loras))]
+
+    with (
+        patch(
+            "ltx_pipelines_mlx.utils._orchestration.load_transformer",
+            return_value=mock_model,
+        ),
+        patch(
+            "ltx_core_mlx.loader.block_streaming.BlockLoraSource",
+            side_effect=mock_sources,
+        ) as BlockLoraSource_cls,
+        patch(
+            "ltx_pipelines_mlx.utils._orchestration.resolve_lora_path",
+            side_effect=[path for path, _ in loras],
+        ),
+    ):
+        result = _load_under_test(pipeline_stub, Path("/fake/transformer.safetensors"))
+
+    assert BlockLoraSource_cls.call_count == len(loras)
+    for (path, strength), _mock_source in zip(loras, mock_sources):
+        BlockLoraSource_cls.assert_any_call(
+            path,
+            block_prefix="transformer.transformer_blocks.",
+            strength=strength,
+            sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+        )
+    attached = object.__getattribute__(mock_model, "_lora_sources")
+    assert set(mock_sources).issubset(set(attached))
+    assert result is mock_model
 
 
 @pytest.mark.parametrize(

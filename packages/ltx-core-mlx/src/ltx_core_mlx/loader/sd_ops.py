@@ -137,6 +137,13 @@ LTXV_LORA_COMFY_RENAMING_MAP = (
     .with_replacement(".to_out.0.", ".to_out.")
     .with_replacement(".ff.net.0.proj.", ".ff.proj_in.")
     .with_replacement(".ff.net.2.", ".ff.proj_out.")
+    # Audio/joint-block keys: moved here from _remap_lora_keys in ti2vid_two_stages.py
+    # so the BlockLoraSource streaming path (which uses this map directly) gets the
+    # same remappings as the non-streaming path.
+    .with_replacement(".linear_1.", ".linear1.")
+    .with_replacement(".linear_2.", ".linear2.")
+    .with_replacement("audio_ff.net.0.proj.", "audio_ff.proj_in.")
+    .with_replacement("audio_ff.net.2.", "audio_ff.proj_out.")
 )
 
 LTXV_LORA_COMFY_TARGET_MAP = (

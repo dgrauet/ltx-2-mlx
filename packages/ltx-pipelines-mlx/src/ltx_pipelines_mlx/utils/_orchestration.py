@@ -12,6 +12,7 @@ Every function takes its dependencies as arguments rather than
 
 from __future__ import annotations
 
+import sys
 import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,6 +37,31 @@ def resolve_model_dir(model_dir: str | Path) -> Path:
     return Path(snapshot_download(str(model_dir)))
 
 
+def resolve_lora_path(path: str) -> str:
+    """Resolve a LoRA path — return local path or download from HuggingFace.
+
+    Supports local ``.safetensors`` files and HuggingFace repo IDs
+    (e.g. ``"some-user/my-lora"``).  When a repo is downloaded its
+    ``.safetensors`` files are collected; exactly one must be present.
+    """
+    local = Path(path)
+    if local.exists():
+        return str(local)
+
+    print(f"Downloading LoRA from HuggingFace: {path}", file=sys.stderr)
+    repo_dir = Path(snapshot_download(path))
+    safetensors_files = list(repo_dir.glob("*.safetensors"))
+    if not safetensors_files:
+        raise FileNotFoundError(f"No .safetensors files found in {repo_dir}")
+    if len(safetensors_files) > 1:
+        names = sorted(f.name for f in safetensors_files)
+        raise ValueError(
+            f"Ambiguous: {len(safetensors_files)} .safetensors files in repo '{path}' "
+            f"({', '.join(names)}); pass the full local path to the specific file instead."
+        )
+    return str(safetensors_files[0])
+
+
 def fuse_pending_loras(
     transformer_weights: dict[str, mx.array],
     lora_paths: list[tuple[str, float]],
@@ -51,9 +77,10 @@ def fuse_pending_loras(
 
     lora_sds = []
     for lora_path, strength in lora_paths:
-        lora_sd = loader.load(lora_path, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
+        resolved = resolve_lora_path(lora_path)
+        lora_sd = loader.load(resolved, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
         lora_sds.append(LoraStateDictWithStrength(state_dict=lora_sd, strength=strength))
-        print(f"  Fusing LoRA: {lora_path} (strength={strength:.2f})")
+        print(f"  Fusing LoRA: {lora_path} (strength={strength:.2f})", file=sys.stderr)
 
     fused_sd = apply_loras(model_sd=model_sd, lora_sd_and_strengths=lora_sds)
     return fused_sd.sd
@@ -240,6 +267,7 @@ __all__ = [
     "fuse_pending_loras",
     "load_dev_transformer",
     "load_transformer",
+    "resolve_lora_path",
     "resolve_model_dir",
     "save_waveform",
 ]
