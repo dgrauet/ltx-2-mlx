@@ -12,6 +12,39 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.9] - 2026-06-02
+
+Handles LTX-2.3 model directories that ship versioned safetensors
+filenames (e.g. `transformer-distilled-1.1.safetensors`). Previously the
+loader hardcoded unversioned names, so it silently ignored LTX's newer
+file revisions — and failed hard if a user kept only the newer file to
+save disk. Resolution is now dynamic: the alphabetically-latest versioned
+file wins over the unversioned exact name when both are present. After an
+upstream sync + re-forge, the code picks up the newer weights with no
+changes. Thanks to [@plz12345](https://github.com/plz12345) for the
+contribution (PR #32).
+
+### Added
+
+- `BasePipeline._resolve_safetensors(model_dir, stem)` — resolves a
+  (possibly versioned) safetensors path, preferring `{stem}-*.safetensors`
+  over `{stem}.safetensors` and returning the canonical exact path when
+  nothing exists (clear `FileNotFoundError`). Wired into transformer,
+  distilled-LoRA, and upscaler resolution across `_base`, `distilled`,
+  `ic_lora`, and `ti2vid_two_stages`.
+- `_load_weights` fallback in `loader/sft_loader.py` — loads extensionless
+  HuggingFace cache blobs via `mx.load(path, format="safetensors")`, which
+  `mx.load` cannot infer by suffix. Reachable when a model dir resolves
+  through a `snapshots/` symlink to the real GUID blob name (custom or
+  refined models).
+- Trainer `model_loader.load_transformer` auto-detect extended to
+  versioned transformer names.
+
+### Fixed
+
+- Upscaler file naming and key-prefix handling: supports both the new
+  v1.1+ bare-key layout and the legacy stem-prefixed layout.
+
 ## [0.14.8] - 2026-05-22
 
 Enables `generate --lora` on the `--low-ram` block-streaming path.
