@@ -67,16 +67,19 @@ def load_transformer(
     if transformer_file is not None:
         tf_path = model_dir / transformer_file
     else:
-        # Auto-detect transformer file
-        for candidate in [
-            "transformer.safetensors",
-            "transformer-distilled.safetensors",
-            "transformer-dev.safetensors",
-        ]:
-            tf_path = model_dir / candidate
-            if tf_path.exists():
+        # Auto-detect transformer file, supporting versioned names (e.g. *-1.1.safetensors)
+        tf_path = None
+        for stem in ["transformer", "transformer-distilled", "transformer-dev"]:
+            exact = model_dir / f"{stem}.safetensors"
+            if exact.exists():
+                tf_path = exact
                 break
-        else:
+            if stem != "transformer":  # bare 'transformer*' glob is too broad
+                versioned = sorted(model_dir.glob(f"{stem}*.safetensors"))
+                if versioned:
+                    tf_path = versioned[-1]
+                    break
+        if tf_path is None:
             raise FileNotFoundError(f"No transformer safetensors found in {model_dir}")
 
     logger.info("Loading transformer from %s", tf_path.name)

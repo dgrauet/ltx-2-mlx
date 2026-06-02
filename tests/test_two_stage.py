@@ -4,6 +4,8 @@ Tests the denorm/renorm roundtrip, res2s with guidance, and pipeline
 instantiation — all without requiring model weights.
 """
 
+from pathlib import Path
+
 import mlx.core as mx
 
 from ltx_core_mlx.model.video_vae.video_vae import EncoderPerChannelStatistics, VideoEncoder
@@ -300,3 +302,56 @@ class TestStage2Dims:
 
         H_full_correct = H_half * 2
         assert H_full_correct == H_target
+
+
+# ---------------------------------------------------------------------------
+# BasePipeline._resolve_safetensors
+# ---------------------------------------------------------------------------
+class TestResolveSafetensors:
+    """Unit tests for BasePipeline._resolve_safetensors."""
+
+    def _resolve(self, model_dir: Path, stem: str) -> Path:
+        from ltx_pipelines_mlx._base import BasePipeline
+
+        return BasePipeline._resolve_safetensors(model_dir, stem)
+
+    def test_exact_only(self, tmp_path: Path) -> None:
+        """Falls back to exact path when no versioned file exists."""
+        (tmp_path / "transformer-distilled.safetensors").touch()
+        result = self._resolve(tmp_path, "transformer-distilled")
+        assert result.name == "transformer-distilled.safetensors"
+
+    def test_versioned_preferred(self, tmp_path: Path) -> None:
+        """Versioned file is returned when present."""
+        (tmp_path / "transformer-distilled-1.1.safetensors").touch()
+        result = self._resolve(tmp_path, "transformer-distilled")
+        assert result.name == "transformer-distilled-1.1.safetensors"
+        assert result.exists()
+
+    def test_versioned_beats_exact(self, tmp_path: Path) -> None:
+        """Versioned wins over unversioned when both exist."""
+        (tmp_path / "transformer-distilled.safetensors").touch()
+        (tmp_path / "transformer-distilled-1.1.safetensors").touch()
+        result = self._resolve(tmp_path, "transformer-distilled")
+        assert result.name == "transformer-distilled-1.1.safetensors"
+
+    def test_latest_version_selected(self, tmp_path: Path) -> None:
+        """When multiple versioned files exist, the alphabetically last is returned."""
+        (tmp_path / "transformer-distilled-1.0.safetensors").touch()
+        (tmp_path / "transformer-distilled-1.1.safetensors").touch()
+        result = self._resolve(tmp_path, "transformer-distilled")
+        assert result.name == "transformer-distilled-1.1.safetensors"
+
+    def test_no_match_returns_canonical(self, tmp_path: Path) -> None:
+        """Returns the canonical (exact) path when nothing exists, for clear error messages."""
+        result = self._resolve(tmp_path, "transformer-distilled")
+        assert result.name == "transformer-distilled.safetensors"
+        assert not result.exists()
+
+    def test_lora_versioned_fallback(self, tmp_path: Path) -> None:
+        """Works for LoRA stems too."""
+        stem = "ltx-2.3-22b-distilled-lora-384"
+        (tmp_path / f"{stem}-1.1.safetensors").touch()
+        result = self._resolve(tmp_path, stem)
+        assert result.name == f"{stem}-1.1.safetensors"
+        assert result.exists()
