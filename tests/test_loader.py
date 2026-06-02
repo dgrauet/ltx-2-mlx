@@ -1,5 +1,7 @@
 """Tests for the loader module: sd_ops, primitives, and fuse_loras."""
 
+from pathlib import Path
+
 import mlx.core as mx
 
 from ltx_core_mlx.loader.fuse_loras import _fuse_delta_with_float, _prepare_deltas, apply_loras
@@ -216,3 +218,45 @@ class TestApplyLoras:
         # scales and biases should not appear as standalone entries
         # (they're handled with their weight key)
         assert "layer.weight" in result.sd
+
+
+# ---------------------------------------------------------------------------
+# _load_weights — extensionless HF cache blob fallback
+# ---------------------------------------------------------------------------
+class TestLoadWeights:
+    """Unit tests for sft_loader._load_weights."""
+
+    def test_loads_extensionless_blob(self, tmp_path: Path) -> None:
+        """An extensionless safetensors blob (HF GUID cache file) loads via explicit format.
+
+        ``mx.load`` cannot infer the format without a known suffix, so the
+        fallback must pass ``format="safetensors"``. Covers the bf16/uint32
+        dtype mix the numpy backend would choke on.
+        """
+        from ltx_core_mlx.loader.sft_loader import _load_weights
+
+        named = tmp_path / "x.safetensors"
+        mx.save_safetensors(
+            str(named),
+            {"w": mx.array([1.5, 2.5], dtype=mx.bfloat16), "q": mx.array([1, 2, 3], dtype=mx.uint32)},
+        )
+        blob = tmp_path / "9f8e7d6c5b4a"  # GUID-like, no extension
+        named.rename(blob)
+
+        weights = _load_weights(str(blob))
+
+        assert set(weights) == {"w", "q"}
+        assert weights["w"].dtype == mx.bfloat16
+        assert mx.allclose(weights["w"], mx.array([1.5, 2.5], dtype=mx.bfloat16)).item()
+
+    def test_known_extension_uses_plain_load(self, tmp_path: Path) -> None:
+        """A normal ``.safetensors`` path still loads via the inferring branch."""
+        from ltx_core_mlx.loader.sft_loader import _load_weights
+
+        path = tmp_path / "x.safetensors"
+        mx.save_safetensors(str(path), {"w": mx.array([1.0, 2.0], dtype=mx.float32)})
+
+        weights = _load_weights(str(path))
+
+        assert list(weights) == ["w"]
+        assert mx.allclose(weights["w"], mx.array([1.0, 2.0])).item()

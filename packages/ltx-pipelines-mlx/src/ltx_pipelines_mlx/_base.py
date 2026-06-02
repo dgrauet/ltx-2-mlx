@@ -268,6 +268,11 @@ class BasePipeline:
         Falls back to ``{stem}.safetensors`` when no versioned file is found,
         and returns the canonical exact path when nothing exists so callers
         surface a clear FileNotFoundError.
+
+        Note: selection is lexicographic, not semantic. This is correct for the
+        current single-digit minor scheme (``1.0`` < ``1.1``) but would order
+        ``-1.10`` *below* ``-1.9``. Revisit with a numeric version key if LTX
+        ever ships double-digit minors.
         """
         versioned = sorted(model_dir.glob(f"{stem}-*.safetensors"))
         if versioned:
