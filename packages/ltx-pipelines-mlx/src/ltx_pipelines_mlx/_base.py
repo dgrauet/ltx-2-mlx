@@ -258,6 +258,27 @@ class BasePipeline:
             )
         return self._load_transformer_with_optional_streaming(dev_path)
 
+    @staticmethod
+    def _resolve_safetensors(model_dir: Path, stem: str) -> Path:
+        """Return the path for a (possibly versioned) safetensors file.
+
+        Prefers explicitly versioned files (``{stem}-*.safetensors``, e.g.
+        ``transformer-distilled-1.1.safetensors``) over the unversioned exact
+        name, taking the alphabetically latest when multiple versions exist.
+        Falls back to ``{stem}.safetensors`` when no versioned file is found,
+        and returns the canonical exact path when nothing exists so callers
+        surface a clear FileNotFoundError.
+
+        Note: selection is lexicographic, not semantic. This is correct for the
+        current single-digit minor scheme (``1.0`` < ``1.1``) but would order
+        ``-1.10`` *below* ``-1.9``. Revisit with a numeric version key if LTX
+        ever ships double-digit minors.
+        """
+        versioned = sorted(model_dir.glob(f"{stem}-*.safetensors"))
+        if versioned:
+            return versioned[-1]
+        return model_dir / f"{stem}.safetensors"
+
     def _load_transformer_with_optional_streaming(self, transformer_path: Path) -> LTXModel:
         """Load a transformer from ``transformer_path``; honors ``_pending_loras``.
 
@@ -359,8 +380,7 @@ class BasePipeline:
         if self.dit is None:
             transformer_path = model_dir / "transformer.safetensors"
             if not transformer_path.exists():
-                # Fallback: try transformer-distilled.safetensors (mlx-forge dual-variant layout)
-                transformer_path = model_dir / "transformer-distilled.safetensors"
+                transformer_path = self._resolve_safetensors(model_dir, "transformer-distilled")
 
             self.dit = self._load_transformer_with_optional_streaming(transformer_path)
 

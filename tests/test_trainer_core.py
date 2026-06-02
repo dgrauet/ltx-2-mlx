@@ -173,14 +173,14 @@ class TestModelLoaderAutoDetect:
 
     def _auto_detect(self, model_dir: Path) -> Path:
         """Run the same auto-detect logic as load_transformer without loading weights."""
-        for candidate in [
-            "transformer.safetensors",
-            "transformer-distilled.safetensors",
-            "transformer-dev.safetensors",
-        ]:
-            tf_path = model_dir / candidate
-            if tf_path.exists():
-                return tf_path
+        for stem in ["transformer", "transformer-distilled", "transformer-dev"]:
+            exact = model_dir / f"{stem}.safetensors"
+            if exact.exists():
+                return exact
+            if stem != "transformer":
+                versioned = sorted(model_dir.glob(f"{stem}*.safetensors"))
+                if versioned:
+                    return versioned[-1]
         raise FileNotFoundError(f"No transformer safetensors found in {model_dir}")
 
     def test_finds_transformer(self, tmp_path: Path) -> None:

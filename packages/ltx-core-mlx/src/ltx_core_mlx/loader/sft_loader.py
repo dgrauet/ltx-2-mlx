@@ -6,12 +6,22 @@ Ported from ltx-core/src/ltx_core/loader/sft_loader.py
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import mlx.core as mx
 from safetensors import safe_open
 
 from ltx_core_mlx.loader.primitives import StateDict
 from ltx_core_mlx.loader.sd_ops import SDOps
+
+_KNOWN_MLX_EXTENSIONS = {".safetensors", ".npz", ".npy", ".gguf"}
+
+
+def _load_weights(path: str) -> dict[str, mx.array]:
+    """Load weights, handling extensionless HF cache blobs via explicit format."""
+    if Path(path).suffix in _KNOWN_MLX_EXTENSIONS:
+        return mx.load(path)
+    return mx.load(path, format="safetensors")
 
 
 class SafetensorsStateDictLoader:
@@ -43,7 +53,7 @@ class SafetensorsStateDictLoader:
 
         model_paths = path if isinstance(path, list) else [path]
         for shard_path in model_paths:
-            weights = mx.load(shard_path)
+            weights = _load_weights(shard_path)
             for name, value in weights.items():
                 expected_name = name if sd_ops is None else sd_ops.apply_to_key(name)
                 if expected_name is None:
