@@ -121,8 +121,13 @@ class UpSample1d(nn.Module):
         """x: (B, T, C) -> (B, T*2, C)"""
         B, T, C = x.shape
         # Insert zeros between samples: (B, T, C) -> (B, T*2, C)
+        # NOTE: strided slice assignment, NOT .at[].add() — the Metal scatter
+        # kernel mis-indexes strided .at[].add() in mlx 0.31.2
+        # (ml-explore/mlx#3477, fix #3483 merged but unreleased), collapsing
+        # audio to ≈-50 dB noise. Destination rows are freshly zeroed, so
+        # assignment is equivalent. See issue #34.
         x_up = mx.zeros((B, T * 2, C))
-        x_up = x_up.at[:, ::2, :].add(x)
+        x_up[:, ::2, :] = x
 
         # Reshape for grouped conv1d: (B*C, T*2, 1)
         x_up = x_up.transpose(0, 2, 1).reshape(B * C, T * 2, 1)
