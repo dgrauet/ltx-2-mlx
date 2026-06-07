@@ -64,12 +64,99 @@ class LTXModelConfig:
     ff_mult: float = 4.0
     timestep_embedding_dim: int = 256
     timestep_scale_multiplier: float = 1000.0
-    av_ca_timestep_scale_multiplier: float = 1.0
+    av_ca_timestep_scale_multiplier: int = 1  # upstream-iso default; checkpoint config supplies 1000
     rope_theta: float = 10000.0
     rope_type: str = "split"
     positional_embedding_max_pos: tuple[int, ...] = (20, 2048, 2048)
     audio_positional_embedding_max_pos: tuple[int, ...] = (20,)
     norm_eps: float = 1e-6
+
+    @classmethod
+    def from_checkpoint_config(cls, config: dict) -> LTXModelConfig:
+        """Build a config from a checkpoint config dict (``config.json`` /
+        ``embedded_config.json``).
+
+        Mirrors upstream ``LTXModelConfigurator.from_config`` field mapping so the
+        runtime hyperparameters track the checkpoint metadata instead of the
+        hardcoded dataclass defaults. The dataclass defaults serve as the
+        per-key fallback, matching upstream's ``config.get(key, default)``.
+
+        This is the fix for the ``av_ca_timestep_scale_multiplier`` divergence
+        (issue #37): every LTX-2.3 checkpoint ships ``1000.0`` but the dataclass
+        default is ``1.0``. The root cause was copying upstream's *dataclass*
+        default (``1``) without wiring upstream's *configurator* (which reads the
+        value from the checkpoint → ``1000``).
+
+        Args:
+            config: Parsed checkpoint config. May be the full dict (with a
+                ``"transformer"`` sub-dict) or the transformer sub-dict itself.
+
+        Returns:
+            An :class:`LTXModelConfig` populated from the checkpoint.
+        """
+        t = config.get("transformer", config)
+        d = cls()
+        return cls(
+            num_layers=t.get("num_layers", d.num_layers),
+            video_dim=t.get("cross_attention_dim", d.video_dim),
+            audio_dim=t.get("audio_cross_attention_dim", d.audio_dim),
+            video_num_heads=t.get("num_attention_heads", d.video_num_heads),
+            audio_num_heads=t.get("audio_num_attention_heads", d.audio_num_heads),
+            video_head_dim=t.get("attention_head_dim", d.video_head_dim),
+            audio_head_dim=t.get("audio_attention_head_dim", d.audio_head_dim),
+            av_cross_num_heads=t.get("audio_num_attention_heads", d.av_cross_num_heads),
+            av_cross_head_dim=t.get("audio_attention_head_dim", d.av_cross_head_dim),
+            video_patch_channels=t.get("in_channels", d.video_patch_channels),
+            audio_patch_channels=t.get("audio_in_channels", d.audio_patch_channels),
+            timestep_scale_multiplier=t.get("timestep_scale_multiplier", d.timestep_scale_multiplier),
+            av_ca_timestep_scale_multiplier=t.get("av_ca_timestep_scale_multiplier", d.av_ca_timestep_scale_multiplier),
+            rope_theta=t.get("positional_embedding_theta", d.rope_theta),
+            rope_type=t.get("rope_type", d.rope_type),
+            positional_embedding_max_pos=tuple(t.get("positional_embedding_max_pos", d.positional_embedding_max_pos)),
+            audio_positional_embedding_max_pos=tuple(
+                t.get("audio_positional_embedding_max_pos", d.audio_positional_embedding_max_pos)
+            ),
+            norm_eps=t.get("norm_eps", d.norm_eps),
+        )
+
+    @classmethod
+    def from_checkpoint_dir(cls, model_dir) -> LTXModelConfig:
+        """Read the transformer config from a checkpoint directory.
+
+        Prefers ``embedded_config.json`` (the richer config, includes
+        ``rope_type``) and falls back to ``config.json``. If neither is present
+        or parseable, warns on stderr and returns the hardcoded defaults — which
+        would reintroduce the ``av_ca_timestep_scale_multiplier`` bug, so the
+        warning is loud.
+
+        Args:
+            model_dir: Directory containing the checkpoint config files.
+
+        Returns:
+            An :class:`LTXModelConfig` read from the checkpoint, or defaults.
+        """
+        import json
+        import sys
+        from pathlib import Path
+
+        model_dir = Path(model_dir)
+        for name in ("embedded_config.json", "config.json"):
+            path = model_dir / name
+            if not path.exists():
+                continue
+            try:
+                return cls.from_checkpoint_config(json.loads(path.read_text()))
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"warning: failed to read {path}: {exc}; using defaults", file=sys.stderr)
+                return cls()
+        print(
+            f"warning: no transformer config (embedded_config.json / config.json) found in "
+            f"{model_dir}; using hardcoded defaults "
+            f"(av_ca_timestep_scale_multiplier={cls().av_ca_timestep_scale_multiplier}). "
+            "Audio cross-modal gating may be wrong — see issue #37.",
+            file=sys.stderr,
+        )
+        return cls()
 
 
 class LTXModel(nn.Module):

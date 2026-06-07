@@ -21,7 +21,7 @@ import mlx.core as mx
 import numpy as np
 from huggingface_hub import snapshot_download
 
-from ltx_core_mlx.model.transformer.model import LTXModel
+from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
 
@@ -97,8 +97,14 @@ def load_transformer(
     quantization (so apply_quantization only materializes block 0),
     loads non-block weights, and wraps the model in StreamingLTXModel
     for per-forward block streaming.
+
+    The model config is read from the checkpoint directory
+    (``embedded_config.json`` / ``config.json``) so hyperparameters such as
+    ``av_ca_timestep_scale_multiplier`` track the checkpoint rather than the
+    hardcoded dataclass defaults (issue #37).
     """
-    dit = LTXModel()
+    config = LTXModelConfig.from_checkpoint_dir(transformer_path.parent)
+    dit = LTXModel(config)
     weights = load_split_safetensors(transformer_path, prefix="transformer.")
     if low_ram_streaming:
         from ltx_core_mlx.loader.block_streaming import BlockStreamer, StreamingLTXModel

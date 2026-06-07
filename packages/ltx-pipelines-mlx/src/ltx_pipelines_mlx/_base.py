@@ -18,7 +18,7 @@ from ltx_core_mlx.components.patchifiers import AudioPatchifier, VideoLatentPatc
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState
 from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
-from ltx_core_mlx.model.transformer.model import LTXModel
+from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
 from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
@@ -323,7 +323,7 @@ class BasePipeline:
 
             transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
             transformer_weights = self._fuse_pending_loras(transformer_weights, pending_loras)
-            dit = LTXModel()
+            dit = LTXModel(LTXModelConfig.from_checkpoint_dir(transformer_path.parent))
             apply_quantization(dit, transformer_weights)
             dit.load_weights(list(transformer_weights.items()))
             # Force materialisation so the phase marker reports actual load

@@ -12,6 +12,49 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.11] - 2026-06-08
+
+Fixes audio cross-modal gating (speech / lip-sync) by reading the
+transformer config from the checkpoint instead of relying on hardcoded
+dataclass defaults. Every LTX-2.3 checkpoint ships
+`av_ca_timestep_scale_multiplier = 1000.0` (in both `config.json` and
+`embedded_config.json`), but the MLX `LTXModelConfig` dataclass default was
+`1.0` and the loaders never read the checkpoint — so the audio↔video
+cross-attention gate AdaLN received `sigma * 1` instead of `sigma * 1000`,
+mis-weighting the cross-modal information that carries voice/dialog. The
+root cause was copying upstream's *dataclass* default (`1`) without wiring
+upstream's *configurator*, which reads the value from the checkpoint
+(`config.get("av_ca_timestep_scale_multiplier", 1)` → `1000`). The fix
+mirrors upstream `LTXModelConfigurator.from_config`: hyperparameters are now
+read from the checkpoint at load time across all pipelines and the trainer.
+Audio output changes for every generation (toward upstream parity);
+validated end-to-end (config-driven output is bit-identical to manually
+setting the multiplier to 1000, and materially different — waveform
+correlation 0.31 — from the previous behaviour). See issue #37; independent
+confirmation in Acelogic/LTX-2-MLX `AUDIO_ISSUES.md`.
+
+### Fixed
+
+- AV cross-attention gate was attenuated by reading
+  `av_ca_timestep_scale_multiplier = 1.0` (dataclass default) instead of the
+  checkpoint's `1000.0`. `load_transformer` (`utils/_orchestration.py`), the
+  LoRA-fused path (`_base.py`) and the trainer loader
+  (`ltx_trainer_mlx/model_loader.py`) now build the model config from the
+  checkpoint via `LTXModelConfig.from_checkpoint_dir()` (#37).
+
+### Added
+
+- `LTXModelConfig.from_checkpoint_config(dict)` and
+  `LTXModelConfig.from_checkpoint_dir(path)` — read transformer
+  hyperparameters from a checkpoint's `embedded_config.json` (preferred) or
+  `config.json`, mirroring upstream `LTXModelConfigurator.from_config`. The
+  dataclass defaults are the per-key fallback, so direct `LTXModel()`
+  construction is unchanged.
+- `tests/test_av_ca_timestep_config.py` — pins the checkpoint-read behaviour,
+  guards against architecture drift (only `av_ca_timestep_scale_multiplier`
+  may differ from defaults on the shipped config), and asserts the gate
+  timestep embedding is load-bearing.
+
 ## [0.14.10] - 2026-06-07
 
 Fixes near-silent audio (mean ≈ −52 dB instead of ≈ −13 dB) in generated

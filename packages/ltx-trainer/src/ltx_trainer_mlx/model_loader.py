@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
-from ltx_core_mlx.model.transformer.model import LTXModel
+from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
 from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
@@ -83,7 +83,10 @@ def load_transformer(
             raise FileNotFoundError(f"No transformer safetensors found in {model_dir}")
 
     logger.info("Loading transformer from %s", tf_path.name)
-    model = LTXModel()
+    # Read hyperparameters from the checkpoint config so values like
+    # av_ca_timestep_scale_multiplier track the checkpoint, not hardcoded
+    # dataclass defaults (issue #37).
+    model = LTXModel(LTXModelConfig.from_checkpoint_dir(model_dir))
     weights = load_split_safetensors(tf_path, prefix="transformer.")
     apply_quantization(model, weights)
     model.load_weights(list(weights.items()))
