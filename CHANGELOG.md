@@ -12,6 +12,34 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.10] - 2026-06-07
+
+Fixes near-silent audio (mean ≈ −52 dB instead of ≈ −13 dB) in generated
+videos on **mlx 0.31.2**. mlx 0.31.2 shipped a Metal scatter-kernel
+regression (ml-explore/mlx#3266, reported as #3477, fixed upstream by
+#3483 but not yet in any release) where `mx.array.at[<strided slice>].add()`
+mis-indexes its *source* on the Metal backend. The audio path used that
+op twice for zero-insert upsampling — in the BigVGAN vocoder
+(`UpSample1d`) and the BWE resampler (`HannSincResampler`) — so the
+corrupted zero-insert fed every SnakeBeta activation and collapsed the
+waveform to noise. Video was unaffected. Both call sites now use plain
+strided assignment, which is equivalent (the destination is freshly
+zeroed) and correct on mlx 0.31.1, 0.31.2 and main. No version pin is
+added: 0.31.1 is itself unsafe on some setups (Metal watchdog crashes at
+text-encode) and `mlx-lm>=0.31.3` requires `mlx>=0.31.2`. See issue #34.
+
+### Fixed
+
+- `audio_vae/vocoder.py` (`UpSample1d`) and `audio_vae/bwe.py`
+  (`HannSincResampler`): replace `at[<strided>].add()` zero-insert with
+  strided assignment to dodge the mlx 0.31.2 Metal scatter bug (#34).
+
+### Added
+
+- `tests/test_audio_scatter_regression.py` — NumPy-reference tests for the
+  two real call sites (`UpSample1d`, `HannSincResampler`) plus a framework
+  canary that skips with a diagnostic on an affected mlx backend.
+
 ## [0.14.9] - 2026-06-02
 
 Handles LTX-2.3 model directories that ship versioned safetensors

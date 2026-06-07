@@ -122,7 +122,11 @@ class UpSample1d(nn.Module):
         B, T, C = x.shape
         # Insert zeros between samples: (B, T, C) -> (B, T*2, C)
         x_up = mx.zeros((B, T * 2, C))
-        x_up = x_up.at[:, ::2, :].add(x)
+        # .at[<strided>].add() mis-indexes the source on Metal in mlx 0.31.2
+        # (ml-explore/mlx#3477, fixed upstream by #3483 but unreleased). The
+        # destination is freshly zeroed, so assignment is equivalent to add and
+        # is correct on all backends/versions. See issue #34.
+        x_up[:, ::2, :] = x
 
         # Reshape for grouped conv1d: (B*C, T*2, 1)
         x_up = x_up.transpose(0, 2, 1).reshape(B * C, T * 2, 1)
