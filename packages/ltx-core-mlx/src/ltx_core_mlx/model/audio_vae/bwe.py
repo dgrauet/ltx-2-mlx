@@ -92,7 +92,11 @@ class HannSincResampler:
         #    output length = (T_padded - 1) * ratio + 1
         zi_len = (T_padded - 1) * ratio + 1
         upsampled = mx.zeros((B, zi_len))
-        upsampled = upsampled.at[:, ::ratio].add(x_padded)
+        # .at[<strided>].add() mis-indexes the source on Metal in mlx 0.31.2
+        # (ml-explore/mlx#3477, fixed upstream by #3483 but unreleased). The
+        # destination is freshly zeroed, so assignment is equivalent to add and
+        # is correct on all backends/versions. See issue #34.
+        upsampled[:, ::ratio] = x_padded
 
         # 3. Full convolution via zero-pad + valid conv1d
         #    Full conv output = zi_len + K - 1
