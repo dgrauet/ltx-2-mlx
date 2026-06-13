@@ -7,6 +7,7 @@ instantiation — all without requiring model weights.
 from pathlib import Path
 
 import mlx.core as mx
+import pytest
 
 from ltx_core_mlx.model.video_vae.video_vae import EncoderPerChannelStatistics, VideoEncoder
 
@@ -270,6 +271,36 @@ class TestTwoStagePipelineInstantiation:
         from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
 
         assert issubclass(KeyframeInterpolationPipeline, TI2VidTwoStagesPipeline)
+
+
+# ---------------------------------------------------------------------------
+# Upsampler weights must be present — silent fallback is forbidden
+# ---------------------------------------------------------------------------
+class TestUpsamplerMissingWeights:
+    """Regression: a missing spatial upscaler must fail loud, not run untrained.
+
+    When ``spatial_upscaler_x2_v1_1.safetensors`` was absent from the model
+    dir, ``_load_upsampler`` silently kept a randomly-initialised
+    ``LatentUpsampler`` (no ``load_weights`` call). Stage 2 then ran the latent
+    through an untrained Conv3d + pixel-shuffle, decoding into a periodic grid
+    ("mosaic") with no error or warning. The loader must raise instead.
+    """
+
+    def test_missing_weights_raises_filenotfound(self, tmp_path):
+        from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
+
+        model_dir = tmp_path / "fake_model"
+        model_dir.mkdir()
+        pipe = TI2VidTwoStagesPipeline(model_dir=str(model_dir), low_memory=True)
+        assert pipe.upsampler is None
+
+        with pytest.raises(FileNotFoundError) as exc:
+            pipe._load_upsampler()
+
+        # The message must name the missing file so the user knows what to fetch.
+        assert "spatial_upscaler_x2_v1_1" in str(exc.value)
+        # And no untrained upsampler may be left behind for stage 2 to use.
+        assert pipe.upsampler is None
 
 
 # ---------------------------------------------------------------------------
