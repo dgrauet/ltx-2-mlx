@@ -218,6 +218,13 @@ class VideoDecoder(nn.Module):
             (2, 1),  # block 7: 512 / (2*2*1) = 128
         ]
 
+    def _ensure_compute_dtype(self, dtype: mx.Dtype) -> None:
+        """Promote stored weights to ``dtype`` once (decode uses fp32 for PT parity)."""
+        flat = mlx.utils.tree_flatten(self.parameters())
+        if not flat or flat[0][1].dtype == dtype:
+            return
+        self.load_weights([(name, param.astype(dtype)) for name, param in flat])
+
     def denormalize_latent(self, latent: mx.array) -> mx.array:
         """Reverse per-channel normalization: x * std + mean.
 
@@ -244,14 +251,15 @@ class VideoDecoder(nn.Module):
         Returns:
             Pixels (B, 3, F, H, W) in [-1, 1], same dtype as ``latent``.
         """
-        # Cast input to weights dtype and remember caller dtype to restore on
-        # return. Matches Lightricks/LTX-2 PR #179 commit b604d3f — defensive
-        # guard against dtype mismatch between the caller and weights.
+        # Decode in float32: bf16 activations diverge from the PyTorch fp32
+        # reference (up to ~12% on keyframe-sharp latents). Weights on disk
+        # may be bf16/q8; promote once on first decode. Restore caller dtype
+        # on return (Lightricks/LTX-2 PR #179 parity).
         output_dtype = latent.dtype
-        flat_params = mlx.utils.tree_flatten(self.parameters())
-        weights_dtype = flat_params[0][1].dtype if flat_params else output_dtype
-        if latent.dtype != weights_dtype:
-            latent = latent.astype(weights_dtype)
+        compute_dtype = mx.float32
+        self._ensure_compute_dtype(compute_dtype)
+        if latent.dtype != compute_dtype:
+            latent = latent.astype(compute_dtype)
 
         # Convert BCFHW -> BFHWC for MLX convolutions
         x = latent.transpose(0, 2, 3, 4, 1)
@@ -478,7 +486,9 @@ class VideoDecoder(nn.Module):
             "-",
         ]
         if audio_path:
-            cmd.extend(["-i", audio_path, "-c:a", "aac", "-shortest"])
+            # Do not use -shortest: reconstructed audio can be slightly shorter than
+            # the decoded video stream and would truncate tail frames on extend/retake.
+            cmd.extend(["-i", audio_path, "-c:a", "aac"])
         cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", output_path])
 
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
