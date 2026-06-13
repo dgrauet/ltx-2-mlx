@@ -22,6 +22,11 @@ class ModelConfig(ConfigBaseModel):
         description="Model path - local path to safetensors checkpoint file",
     )
 
+    transformer_file: str | None = Field(
+        default=None,
+        description="Explicit transformer safetensors filename (e.g. 'transformer-dev.safetensors'). "
+        "If None, auto-detects (distilled before dev).",
+    )
     text_encoder_path: str | Path | None = Field(
         default=None,
         description="Path to text encoder (required for LTX-2/Gemma models)",
@@ -41,16 +46,20 @@ class ModelConfig(ConfigBaseModel):
     @field_validator("model_path")
     @classmethod
     def validate_model_path(cls, v: str | Path) -> str | Path:
-        """Validate that model_path is an existing local path (not a URL)."""
+        """Validate that model_path is an existing local path (not a URL).
+
+        Expands ``~`` so configs can use home-relative paths.
+        """
         is_url = str(v).startswith(("http://", "https://"))
 
         if is_url:
             raise ValueError(f"Model path cannot be a URL: {v}")
 
-        if not Path(v).exists():
+        expanded = Path(v).expanduser()
+        if not expanded.exists():
             raise ValueError(f"Model path does not exist: {v}")
 
-        return v
+        return str(expanded)
 
 
 class LoraConfig(ConfigBaseModel):

@@ -489,6 +489,11 @@ examples:
     # --- train ---
     trn = sub.add_parser("train", help="Train a LoRA or full model (requires ltx-trainer-mlx)")
     trn.add_argument("--config", "-c", required=True, help="Path to training config YAML file")
+    trn.add_argument(
+        "--low-ram",
+        action="store_true",
+        help="Enable gradient checkpointing (recompute blocks in backward) to fit the dev model on 64 GB",
+    )
 
     # --- preprocess ---
     pre = sub.add_parser("preprocess", help="Preprocess videos into latents + conditions for training")
@@ -505,6 +510,48 @@ examples:
     )
     pre.add_argument("--captions", default=None, help="Directory with .txt caption files (same stems as videos)")
     pre.add_argument("--caption-ext", default=".txt", help="Caption file extension (default: .txt)")
+    pre.add_argument(
+        "--with-audio",
+        action="store_true",
+        help="Also encode each clip's audio into audio_latents/ for joint audio-video training",
+    )
+    pre.add_argument(
+        "--frame-rate",
+        type=float,
+        default=None,
+        help="Override fps written into latents + used to size audio tokens (default: probed per clip)",
+    )
+
+    # --- slice ---
+    slc = sub.add_parser("slice", help="Slice long videos into normalized training clips (audio retained)")
+    slc.add_argument("sources", nargs="+", help="Video files or directories to slice")
+    slc.add_argument("--output", "-o", required=True, help="Root output directory (one subfolder per source)")
+    slc.add_argument("--interval", type=float, default=4.0, help="Clip length in seconds (default: 4.0)")
+    slc.add_argument("--timecodes", default=None, help="Optional start,end timecode list file (overrides --interval)")
+    slc.add_argument("--res", default="384x384", help="Target resolution WxH, both divisible by 32 (default: 384x384)")
+    slc.add_argument("--fps", type=float, default=24.0, help="Output frame rate (default: 24.0)")
+    slc.add_argument(
+        "--fit",
+        choices=["crop", "pad"],
+        default="crop",
+        help="Aspect handling: crop=center-crop (default), pad=letterbox",
+    )
+    slc.add_argument("--min-length", type=float, default=2.0, help="Drop clips shorter than this (default: 2.0s)")
+    slc.add_argument(
+        "--max-clips", type=int, default=None, help="Cap clips per source (build a pool to cull; default: all)"
+    )
+    slc.add_argument(
+        "--sample",
+        choices=["even", "sequential"],
+        default="even",
+        help="When --max-clips is set: even=spread across source (default), sequential=first N",
+    )
+    slc.add_argument("--skip-start", type=float, default=0.0, help="Skip N seconds at the start of each source (intro)")
+    slc.add_argument("--skip-end", type=float, default=0.0, help="Skip N seconds at the end of each source (outro)")
+    slc.add_argument(
+        "--caption-template", default=None, help="If set, write this text to a .txt next to each clip for editing"
+    )
+    slc.add_argument("--crf", type=int, default=18, help="x264 quality, lower = better (default: 18)")
 
     args = parser.parse_args()
 
@@ -531,6 +578,7 @@ examples:
         "info": _cmd_info,
         "train": _cmd_train,
         "preprocess": _cmd_preprocess,
+        "slice": _cmd_slice,
     }
     commands[args.command](args)
 
@@ -1105,8 +1153,17 @@ def _cmd_train(args: argparse.Namespace) -> None:
 
     config = LtxTrainerConfig(**raw_config)
 
+    if getattr(args, "low_ram", False):
+        # Gradient checkpointing: recompute transformer blocks in the backward
+        # pass to cap activation memory (lets the dev model backprop fit on 64 GB).
+        config.optimization.enable_gradient_checkpointing = True
+        print("Low-RAM training: gradient checkpointing enabled.")
+
     trainer = LtxvTrainer(config)
-    saved_path, stats = trainer.train()
+    # When stdout isn't a TTY (nohup / redirect), the rich progress bar suppresses
+    # itself and shows nothing. Disable it so the per-step logger lines fire instead,
+    # giving redirected/background runs a readable loss trace.
+    saved_path, stats = trainer.train(disable_progress_bars=not sys.stdout.isatty())
 
     print("\nTraining complete!")
     print(f"  Weights saved to: {saved_path}")
@@ -1134,6 +1191,35 @@ def _cmd_preprocess(args: argparse.Namespace) -> None:
         max_frames=args.max_frames,
         captions_dir=args.captions,
         caption_ext=args.caption_ext,
+        with_audio=args.with_audio,
+        frame_rate=args.frame_rate,
+    )
+
+
+def _cmd_slice(args: argparse.Namespace) -> None:
+    """Slice long videos into normalized training clips."""
+    try:
+        from ltx_trainer_mlx.slice_clips import slice_videos
+    except ImportError:
+        print("Error: ltx-trainer-mlx is not installed.")
+        print("Install it with: uv pip install -e 'packages/ltx-trainer[all]'")
+        sys.exit(1)
+
+    slice_videos(
+        sources=args.sources,
+        out_dir=args.output,
+        interval=args.interval,
+        timecodes_file=args.timecodes,
+        res=args.res,
+        fps=args.fps,
+        fit=args.fit,
+        min_length=args.min_length,
+        max_clips=args.max_clips,
+        sample=args.sample,
+        skip_start=args.skip_start,
+        skip_end=args.skip_end,
+        caption_template=args.caption_template,
+        crf=args.crf,
     )
 
 
