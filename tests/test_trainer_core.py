@@ -417,3 +417,143 @@ class TestConfig:
                 validation={"interval": None},
                 data={"preprocessed_data_root": "/tmp/data"},
             )
+
+
+# ---------------------------------------------------------------------------
+# 7. TestGradientCheckpointing
+# ---------------------------------------------------------------------------
+
+
+class TestGradientCheckpointing:
+    """Tests for mx.checkpoint-based gradient checkpointing in LTXModel block loop.
+
+    The critical invariant: block.trainable_parameters() must be passed as an
+    explicit input to the mx.checkpoint closure so that mx.checkpoint can
+    differentiate through them.  If params are captured from the closure instead,
+    mx.checkpoint gives zero gradients for the LoRA params (silent no-op adapter).
+    """
+
+    def test_grads_match_on_off(self) -> None:
+        """Checkpointing gives identical LoRA-param grads to the non-checkpoint path."""
+        mx.random.seed(42)
+        dim, rank = 16, 4
+
+        # Frozen base + trainable LoRA adapter (both non-zero to ensure non-zero grads).
+        # mlx_lm's LoRALinear initializes lora_b=0, which zeros out lora_a's gradient;
+        # we use a custom block so both adapter matrices are randomly initialized.
+        class LoRAStyleBlock(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.base = nn.Linear(dim, dim, bias=False)  # frozen below
+                self.lora_a = mx.random.normal((dim, rank)) * 0.1
+                self.lora_b = mx.random.normal((rank, dim)) * 0.1
+
+            def __call__(self, x: mx.array) -> mx.array:
+                return self.base(x) + (x @ self.lora_a) @ self.lora_b
+
+        block = LoRAStyleBlock()
+        block.base.freeze()  # only the base Linear is frozen; lora_a/lora_b stay trainable
+
+        x = mx.random.normal((2, dim))
+        target = mx.random.normal((2, dim))
+
+        def loss_no_ckpt(params: dict, x: mx.array, target: mx.array) -> mx.array:
+            block.update(params)
+            return mx.mean((block(x) - target) ** 2)
+
+        # Mirrors the pattern in model.py:
+        #   def _run_block(params, vh, ah, _block=block, _bidx=block_idx):
+        #       _block.update(params); return _block(...)
+        #   video_hidden, audio_hidden = mx.checkpoint(_run_block)(
+        #       block.trainable_parameters(), video_hidden, audio_hidden
+        #   )
+        def loss_ckpt(params: dict, x: mx.array, target: mx.array) -> mx.array:
+            def _run(params: dict, x: mx.array, _b: nn.Module = block) -> mx.array:
+                _b.update(params)
+                return _b(x)
+
+            return mx.mean((mx.checkpoint(_run)(params, x) - target) ** 2)
+
+        params = block.trainable_parameters()
+        grads_normal = mx.grad(loss_no_ckpt)(params, x, target)
+        grads_ckpt = mx.grad(loss_ckpt)(params, x, target)
+        mx.eval(grads_normal, grads_ckpt)
+
+        flat_normal = dict(nn.utils.tree_flatten(grads_normal))
+        flat_ckpt = dict(nn.utils.tree_flatten(grads_ckpt))
+
+        assert flat_ckpt, "trainable_parameters() returned nothing — freeze setup broken"
+        for name, g_c in flat_ckpt.items():
+            assert mx.any(g_c != 0).item(), f"Zero grad for '{name}' with checkpointing on"
+            g_n = flat_normal[name]
+            assert mx.allclose(g_n, g_c, atol=1e-5).item(), (
+                f"Grad mismatch for '{name}': max_diff={mx.max(mx.abs(g_n - g_c)).item():.2e}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 8. TestFitAudioTokens
+# ---------------------------------------------------------------------------
+
+
+class TestFitAudioTokens:
+    """Tests for _fit_audio_tokens alignment with compute_audio_token_count.
+
+    _fit_audio_tokens must produce a token count that exactly matches
+    compute_audio_token_count(num_frames, fps) regardless of whether the raw
+    encoded latent comes in slightly over or under the canonical length.
+    """
+
+    def test_trim(self) -> None:
+        """Oversized latent is trimmed to target_tokens on the time axis."""
+        from ltx_trainer_mlx.preprocess import _fit_audio_tokens
+
+        latent = mx.zeros((1, 8, 20, 16))
+        result = _fit_audio_tokens(latent, 15)
+        assert result.shape == (1, 8, 15, 16)
+
+    def test_pad(self) -> None:
+        """Undersized latent is edge-padded to target_tokens on the time axis."""
+        from ltx_trainer_mlx.preprocess import _fit_audio_tokens
+
+        latent = mx.zeros((1, 8, 10, 16))
+        result = _fit_audio_tokens(latent, 15)
+        assert result.shape == (1, 8, 15, 16)
+
+    def test_exact_is_noop(self) -> None:
+        """Exactly-sized latent is returned with shape unchanged."""
+        from ltx_trainer_mlx.preprocess import _fit_audio_tokens
+
+        latent = mx.zeros((1, 8, 12, 16))
+        result = _fit_audio_tokens(latent, 12)
+        assert result.shape == (1, 8, 12, 16)
+
+    def test_pad_replicates_last_token(self) -> None:
+        """Padding repeats the last time step rather than injecting zeros."""
+        from ltx_trainer_mlx.preprocess import _fit_audio_tokens
+
+        sentinel = 99.0
+        latent = mx.ones((1, 8, 5, 16)) * sentinel
+        result = _fit_audio_tokens(latent, 8)
+        assert result.shape == (1, 8, 8, 16)
+        padded = result[:, :, 5:, :]
+        assert mx.allclose(padded, mx.ones_like(padded) * sentinel).item()
+
+    def test_matches_compute_audio_token_count(self) -> None:
+        """Output token count equals compute_audio_token_count for canonical params.
+
+        Verifies that trim and pad paths both converge to the exact canonical
+        count that the audio preprocessing pipeline uses.
+        """
+        from ltx_core_mlx.utils.positions import compute_audio_token_count
+        from ltx_trainer_mlx.preprocess import _fit_audio_tokens
+
+        cases = [(33, 24.0), (97, 24.0), (65, 25.0), (9, 24.0)]
+        for num_frames, fps in cases:
+            target = compute_audio_token_count(num_frames, fps)
+            for raw_t in (target - 3, target, target + 3):
+                latent = mx.zeros((1, 8, raw_t, 16))
+                result = _fit_audio_tokens(latent, target)
+                assert result.shape[2] == target, (
+                    f"frames={num_frames} fps={fps}: expected {target}, got {result.shape[2]}"
+                )

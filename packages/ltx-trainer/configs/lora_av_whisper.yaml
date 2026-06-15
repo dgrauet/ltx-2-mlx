@@ -75,7 +75,7 @@ data:
 
 training_strategy:
   name: text_to_video
-  generate_audio: true   # <-- trains the audio branch
+  generate_audio: true # <-- trains the audio branch
 
 flow_matching:
   timestep_sampling_mode: shifted_logit_normal
@@ -83,19 +83,19 @@ flow_matching:
 validation:
   prompts:
     - 'a blonde woman sitting in a chair close to a microphone, (woman, whispering): "can you hear me? come a little closer, I have something to tell you", intimate ASMR'
-  video_dims: [192, 192, 97]  # width, height, frames (~4s @ 24fps); low res = audio LoRA, video is just context
+  video_dims: [192, 192, 97] # width, height, frames (~4s @ 24fps); low res = audio LoRA, video is just context
   frame_rate: 24.0
   inference_steps: 8
-  interval: 200   # validation render ~1 min each (the only real time cost beyond training); still an early sample ~step 200. Checkpoints stay every 100.
+  interval: 200 # validation render ~1 min each (the only real time cost beyond training); still an early sample ~step 200. Checkpoints stay every 100.
   guidance_scale: 4.0
   stg_scale: 0.0
   seed: 42
-  generate_audio: true   # render audio in validation mp4s
+  generate_audio: true # render audio in validation mp4s
   skip_initial_validation: true
 
 checkpoints:
   interval: 100
-  keep_last_n: 25   # keep all 20 (you have the disk); pick the best afterward (~365 MB each ≈ 7 GB)
+  keep_last_n: 20 # keep all 20 (you have the disk); pick the best afterward (~365 MB each ≈ 7 GB)
 
 seed: 42
 output_dir: ./outputs/lora_av_whisper
