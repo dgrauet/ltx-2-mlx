@@ -471,6 +471,36 @@ ltx-2-mlx generate \
 
 Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3), `--image`.
 
+### Multi-Anchor I2V (`--image` repeatable)
+
+All `generate` modes (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distilled`) support multiple `--image` flags. Each anchor takes `PATH FRAME_IDX STRENGTH` where `FRAME_IDX` is the **pixel frame index** (0-based; for a 97-frame video the last frame is 96).
+
+- `frame_idx=0` → `VideoConditionByLatentIndex`: hard-replaces the first latent frame (strongly preserved)
+- `frame_idx>0` → `VideoConditionByKeyframeIndex`: appends soft reference tokens at that temporal position
+
+```bash
+# Anchor both ends — model animates the transition
+ltx-2-mlx generate \
+  --prompt "woman stands up from chair and walks to kitchen sink" \
+  --two-stage \
+  --image sitting.jpg 0 1.0 \
+  --image standing.jpg 96 1.0 \
+  --image at_sink.jpg 136 1.0 \
+  -f 137 --frame-rate 24 -o output.mp4
+
+# Seamless loop — same image at start and end
+ltx-2-mlx generate \
+  --prompt "flowing water rippling" \
+  --two-stage \
+  --image frame.jpg 0 1.0 \
+  --image frame.jpg 96 1.0 \
+  -f 97 --frame-rate 24 -o loop.mp4
+```
+
+**Mode recommendations for multi-anchor:** `--two-stage` or `--two-stages-hq` (dev model + CFG) respects anchors most faithfully. `--distilled` (8 steps, no CFG) also honors them — soft keyframe anchors are hints, not law, so the model may drift from them at longer durations, but a distilled start+end smoke test (512×512×25) tracked both anchors cleanly. `--one-stage` works but is slower than `--two-stage` at large resolutions.
+
+**Frame count constraint:** `(num_frames - 1) % 8 == 0`. Valid counts: 9, 17, 25, 33, 41, 49, 57, 65, 73, 81, 89, 97, 105, 113, 121, 129, 137, …
+
 ### Audio-to-Video Example
 
 ```bash

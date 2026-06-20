@@ -92,7 +92,8 @@ class VideoConditionByKeyframeIndex:
     to tokens from previously appended keyframes.
 
     Args:
-        frame_idx: Latent frame index for this keyframe (0-based).
+        frame_idx: Pixel frame index for this keyframe (0-based). E.g. for a
+            97-frame video the last frame is 96. NOT a latent frame index.
         keyframe_latent: Clean latent for this keyframe, (B, H*W, C).
         spatial_dims: (F, H, W) latent spatial dimensions.
         frame_rate: Frame rate for position computation.
