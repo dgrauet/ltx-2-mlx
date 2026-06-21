@@ -1,0 +1,101 @@
+# LTX-2 Joint Audio+Video LoRA — whisper / ASMR
+#
+# Trains a LoRA with the AUDIO branch loss enabled (generate_audio: true) to bias
+# the joint model toward soft / breathy / whispering acoustics. LTX-2.3 has no
+# audio-only mode — this is a normal LoRA whose loss also covers the audio tokens.
+#
+# Captioning note: describe the SCENE + how they speak (soft, slow, breathy,
+# whispering, close-mic, ASMR). Do NOT transcribe words — the model learns acoustic
+# character, not intelligible speech.
+#
+# Workflow:
+#   1. Slice long ASMR sources into 384x384, ~4s clips (audio retained):
+#      ltx-2-mlx slice ~/asmr_sources/*.mp4 --interval 4 --fps 24 --res 384x384 \
+#        --caption-template "a person whispering softly into a microphone, intimate ASMR, close-up" \
+#        -o ./whisper_clips
+#      (output goes into per-source subfolders; flatten/collect into one dir of clips
+#       + matching .txt before preprocessing, or point --videos at a single folder)
+#
+#   2. Preprocess (video + text + audio latents):
+#      ltx-2-mlx preprocess --videos ./whisper_clips --captions ./whisper_clips \
+#        --with-audio --height 384 --width 384 --max-frames 97 --frame-rate 24 \
+#        --model dgrauet/ltx-2.3-mlx-q8 -o ./whisper_data
+#
+#   3. Train:
+#      ltx-2-mlx train --config packages/ltx-trainer/configs/lora_av_whisper.yaml
+
+model:
+  # Local path to the model snapshot dir (run `huggingface-cli download dgrauet/ltx-2.3-mlx-q8`
+  # then point this at .../snapshots/<hash>). ~ is expanded.
+  model_path: ~/.cache/huggingface/hub/models--dgrauet--ltx-2.3-mlx-q8/snapshots/latest
+  # Train the LoRA on the non-distilled DEV base (correct target for a style LoRA
+  # used in the dev-based one-stage / two-stage inference pipelines).
+  transformer_file: transformer-dev.safetensors
+  text_encoder_path: mlx-community/gemma-3-12b-it-4bit
+  training_mode: lora
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.0
+  # Audio-only: target ONLY the attention modules that write to audio_hidden, so
+  # no trainable param touches the video output (video stays identical to base —
+  # no visual fighting). The video loss term is gradient-inert w.r.t. these params,
+  # making this effectively audio-only training without a custom strategy.
+  #   audio_attn1         - audio self-attention
+  #   audio_attn2         - audio <- text cross-attention
+  #   video_to_audio_attn - audio <- video (keeps lip/scene sync; reads video, writes audio)
+  # Deliberately EXCLUDES attn1/attn2 (video self/text) and audio_to_video_attn
+  # (the audio->video leak channel).
+  target_modules:
+    - audio_attn1
+    - audio_attn2
+    - video_to_audio_attn
+
+optimization:
+  learning_rate: 1.5e-4
+  steps: 2000
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  weight_decay: 0.0
+  # ON: checkpointing is mandatory to fit 64 GB (no-ckpt stores all 48 layers'
+  # activations -> 84 GB even at 192). At low res (192, ~432 video tokens) the
+  # per-block recompute is ~4x cheaper than at 384, so checkpointing here is both
+  # memory-safe (~15-20 GB) AND fast (~5-8 s/step expected vs 20 s at 384).
+  enable_gradient_checkpointing: true
+  scheduler_type: linear
+  scheduler_params:
+    start_factor: 1.0
+    end_factor: 0.1
+
+data:
+  # Path to directory created by `ltx-2-mlx preprocess --with-audio`
+  preprocessed_data_root: ./whisper_data
+
+training_strategy:
+  name: text_to_video
+  generate_audio: true # <-- trains the audio branch
+
+flow_matching:
+  timestep_sampling_mode: shifted_logit_normal
+
+validation:
+  prompts:
+    - 'a blonde woman sitting in a chair close to a microphone, (woman, whispering): "can you hear me? come a little closer, I have something to tell you", intimate ASMR'
+  video_dims: [192, 192, 97] # width, height, frames (~4s @ 24fps); low res = audio LoRA, video is just context
+  frame_rate: 24.0
+  inference_steps: 8
+  interval: 200 # validation render ~1 min each (the only real time cost beyond training); still an early sample ~step 200. Checkpoints stay every 100.
+  guidance_scale: 4.0
+  stg_scale: 0.0
+  seed: 42
+  generate_audio: true # render audio in validation mp4s
+  skip_initial_validation: true
+
+checkpoints:
+  interval: 100
+  keep_last_n: 20 # keep all 20 (you have the disk); pick the best afterward (~365 MB each ≈ 7 GB)
+
+seed: 42
+output_dir: ./outputs/lora_av_whisper

@@ -12,6 +12,67 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.12] - 2026-06-15
+
+Enables end-to-end joint audio-video LoRA training on Apple Silicon, closing
+the gap between what the trainer config accepted and what it could actually
+execute. Adds an audio preprocessing path, a video slicer for preparing
+training clips, and gradient checkpointing so the dev model can backprop on a
+64 GB machine. Also fixes four latent crashers in the existing trainer that
+would have broken any audio training run — three of them (`fps=` →
+`frame_rate=` at trainer call sites) are regressions from the v0.14.0
+iso-strict rename that missed the trainer package, the same class of miss as
+the v0.14.1 decode-wrapper fix. Validated with a real 2000-step audio-style
+LoRA run on an M5 Pro 64 GB (74 clips, 192×192, rank 32). Thanks to
+[@plz12345](https://github.com/plz12345) (#43).
+
+### Added
+
+- `ltx-2-mlx slice` command — cuts long source videos into normalized,
+  resolution-aligned training clips with audio retained: fixed-interval or
+  timecode-list slicing, aspect-safe crop/pad, `--max-clips` with even or
+  sequential sampling, and per-source output subfolders
+  (`ltx_trainer_mlx/slice_clips.py`).
+- `preprocess --with-audio` — encodes each clip's audio track through the
+  audio VAE encoder into `audio_latents/` alongside the video latents, sized
+  to `compute_audio_token_count()` so the two modalities are aligned by
+  construction. Adds `load_audio_vae_encoder` to the trainer model loader and
+  recursive clip discovery so per-source subfolders from `slice` work.
+- Gradient checkpointing on `LTXModel` (`gradient_checkpointing` flag, default
+  off, no inference effect), wired to the trainer via
+  `OptimizationConfig.enable_gradient_checkpointing` and the `train --low-ram`
+  CLI flag. Recomputes each transformer block in the backward pass to cap
+  activation memory at ~1 block (vs storing all 48), letting the dev model
+  backprop fit on 64 GB. LoRA params are passed as explicit `mx.checkpoint`
+  inputs so their gradients are tracked (a naive wrap would silently zero
+  them). Covered by a grad-equivalence test.
+- `transformer_file` config field to pin an explicit transformer safetensors
+  filename (e.g. `transformer-dev.safetensors`) instead of relying on
+  auto-detection.
+- Example training config `configs/lora_av_whisper.yaml` (whisper/ASMR
+  audio-style LoRA).
+
+### Changed
+
+- `preprocess` no longer downloads the full model snapshot when given a
+  HuggingFace repo ID. It now does a partial download of only the encoder
+  files preprocessing actually loads (connector + video/audio VAE), skipping
+  the ~20 GB transformer (~80 GB total saved). **Impact:** anyone who relied
+  on `preprocess` to populate the full HF cache must now run
+  `huggingface-cli download <repo>` separately or pass an already-cached local
+  path. `~` is now expanded in `model_path` config validation.
+
+### Fixed
+
+- Trainer audio training was broken by `fps=` keyword arguments at three call
+  sites (`trainer.py`, `training_strategies/base_strategy.py`,
+  `validation_sampler.py`) — the parameter was renamed to `frame_rate=` in
+  v0.14.0 but the trainer package was not covered by that audit.
+- Validation sampler called the video and audio decoders directly
+  (`decoder(latent)`) instead of `decoder.decode(latent)`.
+- `bfloat16` arrays were passed to numpy without a cast in `video_utils.py`
+  (numpy has no bfloat16 buffer dtype); now cast to `float32` in MLX first.
+
 ## [0.14.11] - 2026-06-08
 
 Fixes audio cross-modal gating (speech / lip-sync) by reading the

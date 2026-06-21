@@ -224,7 +224,16 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         aggressive_cleanup()
 
     def _load_upsampler(self) -> None:
-        """Load upsampler from config and weights."""
+        """Load the spatial upsampler from config and weights.
+
+        Raises:
+            FileNotFoundError: when no upsampler weights file is present in the
+                model dir. Stage 2 upscales the latent through this module
+                unconditionally; with a randomly-initialised ``LatentUpsampler``
+                the output decodes into a periodic pixel-shuffle grid ("mosaic")
+                with no other error. A missing file must therefore fail loud
+                rather than silently degrade.
+        """
         import json
 
         # Try new v1.1+ naming, then old naming
@@ -235,6 +244,18 @@ class TI2VidTwoStagesPipeline(BasePipeline):
                 weights_path = resolved
                 break
 
+        if not weights_path.exists():
+            raise FileNotFoundError(
+                f"Spatial upsampler weights not found in {self.model_dir} "
+                "(looked for spatial_upscaler_x2_v1_1.safetensors and "
+                "ltx-2.3-spatial-upscaler-x2*.safetensors). The two-stage and "
+                "distilled pipelines require it for stage-2 upscaling; without "
+                "it the latent is upscaled by an untrained module and the "
+                "output degrades into a periodic 'mosaic' grid. Download it, "
+                "e.g.: hf download dgrauet/ltx-2.3-mlx-q8 "
+                f"spatial_upscaler_x2_v1_1.safetensors --local-dir {self.model_dir}"
+            )
+
         config_path = self.model_dir / f"{weights_path.stem}_config.json"
         if config_path.exists():
             config = json.loads(config_path.read_text()).get("config", {})
@@ -242,13 +263,12 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         else:
             self.upsampler = LatentUpsampler()
 
-        if weights_path.exists():
-            raw = load_split_safetensors(weights_path)
-            # Old format keys are prefixed with the stem; new format uses bare keys.
-            stem_prefix = weights_path.stem + "."
-            if raw and all(k.startswith(stem_prefix) for k in raw):
-                raw = {k[len(stem_prefix) :]: v for k, v in raw.items()}
-            self.upsampler.load_weights(list(raw.items()))
+        raw = load_split_safetensors(weights_path)
+        # Old format keys are prefixed with the stem; new format uses bare keys.
+        stem_prefix = weights_path.stem + "."
+        if raw and all(k.startswith(stem_prefix) for k in raw):
+            raw = {k[len(stem_prefix) :]: v for k, v in raw.items()}
+        self.upsampler.load_weights(list(raw.items()))
         aggressive_cleanup()
 
     def load(self) -> None:

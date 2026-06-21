@@ -212,7 +212,7 @@ class TrainingStrategy(ABC):
             num_frames=num_frames,
             height=height,
             width=width,
-            fps=fps,
+            frame_rate=fps,
         )
 
     @staticmethod

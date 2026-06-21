@@ -147,11 +147,11 @@ class ValidationSampler:
         # Compute latent shapes
         F, H, W = compute_video_latent_shape(config.num_frames, config.height, config.width)
         video_shape = (1, F * H * W, 128)
-        audio_T = compute_audio_token_count(config.num_frames, fps=config.frame_rate)
+        audio_T = compute_audio_token_count(config.num_frames, frame_rate=config.frame_rate)
         audio_shape = (1, audio_T, 128)
 
         # Compute positions
-        video_positions = compute_video_positions(F, H, W, fps=config.frame_rate)
+        video_positions = compute_video_positions(F, H, W, frame_rate=config.frame_rate)
         audio_positions = compute_audio_positions(audio_T)
 
         # Build image conditioning if provided.
@@ -270,7 +270,7 @@ class ValidationSampler:
             Video tensor of shape ``(C, F, H, W)`` in ``[0, 1]``.
         """
         latent = latent.astype(mx.bfloat16)
-        decoded = self._vae_decoder(latent)
+        decoded = self._vae_decoder.decode(latent)
         _force_eval(decoded)
         # Normalise from [-1, 1] to [0, 1]
         decoded = mx.clip((decoded + 1.0) / 2.0, 0.0, 1.0)
@@ -289,7 +289,7 @@ class ValidationSampler:
         assert self._vocoder is not None
 
         latent = latent.astype(mx.bfloat16)
-        decoded_audio = self._audio_decoder(latent)
+        decoded_audio = self._audio_decoder.decode(latent)
         _force_eval(decoded_audio)
         aggressive_cleanup()
 

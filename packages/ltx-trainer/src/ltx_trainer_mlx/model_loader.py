@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
+from ltx_core_mlx.model.audio_vae.encoder import AudioVAEEncoder
 from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
 from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
@@ -172,6 +173,37 @@ def load_audio_vae_decoder(
     return model
 
 
+def load_audio_vae_encoder(
+    model_dir: str | Path,
+) -> AudioVAEEncoder:
+    """Load the audio VAE encoder.
+
+    Mirrors :func:`load_audio_vae_decoder`. Used by the preprocessor to turn
+    clip waveforms into audio latents for joint audio-video training.
+
+    Args:
+        model_dir: Directory containing ``audio_vae.safetensors``.
+
+    Returns:
+        Loaded ``AudioVAEEncoder``.
+    """
+    model_dir = Path(model_dir)
+    logger.debug("Loading audio VAE encoder from %s", model_dir)
+
+    model = AudioVAEEncoder()
+    audio_weights = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.encoder.")
+    # Also load per_channel_statistics (used to normalize the encoder output).
+    all_audio = load_split_safetensors(model_dir / "audio_vae.safetensors", prefix="audio_vae.")
+    for k, v in all_audio.items():
+        if k.startswith("per_channel_statistics."):
+            audio_weights[k] = v
+    audio_weights = remap_audio_vae_keys(audio_weights)
+    model.load_weights(list(audio_weights.items()))
+    aggressive_cleanup()
+
+    return model
+
+
 def load_vocoder(
     model_dir: str | Path,
 ) -> VocoderWithBWE:
@@ -252,6 +284,7 @@ def load_model(
     with_audio_vae_decoder: bool = True,
     with_vocoder: bool = True,
     with_text_encoder: bool = True,
+    transformer_file: str | None = None,
 ) -> LtxModelComponents:
     """Load LTX-2 model components from a model directory.
 
@@ -267,6 +300,8 @@ def load_model(
         with_audio_vae_decoder: Whether to load the audio VAE decoder.
         with_vocoder: Whether to load the vocoder.
         with_text_encoder: Whether to load the text encoder.
+        transformer_file: Explicit transformer safetensors filename. If None,
+            ``load_transformer`` auto-detects (distilled before dev).
 
     Returns:
         ``LtxModelComponents`` containing all loaded model components.
@@ -280,7 +315,7 @@ def load_model(
 
     # Load transformer
     logger.debug("Loading transformer...")
-    transformer = load_transformer(model_dir)
+    transformer = load_transformer(model_dir, transformer_file=transformer_file)
 
     # Load video VAE encoder
     video_vae_encoder = None

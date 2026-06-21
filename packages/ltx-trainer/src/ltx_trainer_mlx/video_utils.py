@@ -142,6 +142,9 @@ def save_video(
 
 def _prepare_video_array(video_array: mx.array) -> np.ndarray:
     """Convert video array to ``(F, H, W, C)`` uint8 numpy array."""
+    # Cast bf16 -> f32 in MLX first; numpy has no bfloat16 buffer dtype.
+    if isinstance(video_array, mx.array):
+        video_array = video_array.astype(mx.float32)
     arr = np.array(video_array, copy=False)
 
     # Handle [C, F, H, W] vs [F, C, H, W] format
@@ -170,7 +173,9 @@ def _save_video_with_audio(
 
     num_frames, height, width, _ = video_np.shape
 
-    # Prepare audio as WAV-compatible PCM data
+    # Prepare audio as WAV-compatible PCM data (bf16 -> f32 in MLX first)
+    if isinstance(audio, mx.array):
+        audio = audio.astype(mx.float32)
     audio_np = np.array(audio, copy=False).astype(np.float32)
 
     # Normalise to [samples, 2] stereo

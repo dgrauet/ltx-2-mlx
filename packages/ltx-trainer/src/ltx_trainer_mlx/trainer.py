@@ -244,8 +244,9 @@ class LtxvTrainer:
                         }
                     )
 
-                # Fallback logging
-                if disable_progress_bars and self._global_step % 20 == 0:
+                # Fallback logging (every 5 steps so nohup/redirected runs have a
+                # usable loss trace; loss.item() is already synced every step).
+                if disable_progress_bars and self._global_step % 5 == 0:
                     elapsed = time.time() - train_start_time
                     pct = self._global_step / cfg.optimization.steps
                     if pct > 0:
@@ -325,13 +326,13 @@ class LtxvTrainer:
             audio_features = conditions.get("audio_prompt_embeds", video_features)
             mask = conditions["prompt_attention_mask"]
 
-            # Apply feature extractor to get final embeddings
-            if feature_extractor is not None:
-                video_embeds, audio_embeds = feature_extractor(
-                    video_features,
-                    audio_features=audio_features,
-                    attention_mask=mask,
-                )
+            # Precomputed conditions already hold projected video/audio embeddings
+            # (the connector ran at preprocess time). Only apply the feature
+            # extractor to raw, unprojected Gemma hidden states. The extractor is
+            # loaded whenever validation is enabled, so gate on the data, not on
+            # whether the extractor exists.
+            if "video_prompt_embeds" not in conditions and feature_extractor is not None:
+                video_embeds, audio_embeds = feature_extractor(video_features, attention_mask=mask)
             else:
                 video_embeds = video_features
                 audio_embeds = audio_features
@@ -369,7 +370,7 @@ class LtxvTrainer:
                 num_lat_frames = int(latent_data["num_frames"][0].item())
                 pixel_frames = (num_lat_frames - 1) * 8 + 1
                 fps_val = float(latent_data.get("fps", mx.array([24.0]))[0].item())
-                audio_tokens = compute_audio_token_count(pixel_frames, fps=fps_val)
+                audio_tokens = compute_audio_token_count(pixel_frames, frame_rate=fps_val)
 
                 B = video_inputs.latent.shape[0]
                 call_kwargs["audio_latent"] = mx.zeros((B, audio_tokens, 128), dtype=mx.bfloat16)
@@ -461,9 +462,13 @@ class LtxvTrainer:
             with_audio_vae_decoder=load_audio and has_validation,
             with_vocoder=load_audio and has_validation,
             with_text_encoder=False,  # Handled separately above
+            transformer_file=self._config.model.transformer_file,
         )
 
         self._transformer = components.transformer
+        # Gradient checkpointing: recompute blocks in backward to cap activation
+        # memory (lets the dev model backprop fit on 64 GB).
+        self._transformer.gradient_checkpointing = self._config.optimization.enable_gradient_checkpointing
         self._vae_decoder = components.video_vae_decoder
         self._vae_encoder = components.video_vae_encoder
         self._audio_vae = components.audio_vae_decoder

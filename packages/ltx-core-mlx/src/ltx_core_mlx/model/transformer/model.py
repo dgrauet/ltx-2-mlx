@@ -219,6 +219,11 @@ class LTXModel(nn.Module):
             for _ in range(config.num_layers)
         ]
 
+        # Training-only: recompute each block in the backward pass instead of
+        # storing all 48 blocks' activations. Caps activation memory at ~1 block
+        # so backprop through the dev model fits on 64 GB. No effect on inference.
+        self.gradient_checkpointing = False
+
     def _embed_timestep_scalar(
         self,
         timestep: mx.array,
@@ -473,6 +478,46 @@ class LTXModel(nn.Module):
             num_layers = self.config.num_layers if block_provider is not None else len(self.transformer_blocks)
             for block_idx in range(num_layers):
                 block = block_provider(block_idx) if block_provider is not None else self.transformer_blocks[block_idx]
+
+                if self.gradient_checkpointing:
+                    # Recompute this block in the backward pass to cap activation
+                    # memory. The block's trainable params MUST be passed as an
+                    # explicit mx.checkpoint input (and rebound via update inside),
+                    # otherwise mx.checkpoint — which only tracks gradients w.r.t.
+                    # its inputs — gives the LoRA params zero gradient (they stay
+                    # at init and the adapter is a no-op). Pattern from mlx_lm's
+                    # tuner.trainer.grad_checkpoint. Conditioning is captured as
+                    # constants; mx.eval guards are skipped (illegal under autodiff).
+                    def _run_block(params, vh, ah, _block=block, _bidx=block_idx):
+                        _block.update(params)
+                        return _block(
+                            video_hidden=vh,
+                            audio_hidden=ah,
+                            video_adaln_params=video_adaln_emb,
+                            audio_adaln_params=audio_adaln_emb,
+                            video_prompt_adaln_params=video_prompt_emb,
+                            audio_prompt_adaln_params=audio_prompt_emb,
+                            av_ca_video_params=av_ca_video_emb,
+                            av_ca_audio_params=av_ca_audio_emb,
+                            av_ca_a2v_gate_params=av_ca_a2v_gate_emb,
+                            av_ca_v2a_gate_params=av_ca_v2a_gate_emb,
+                            video_text_embeds=video_text_embeds,
+                            audio_text_embeds=audio_text_embeds,
+                            video_rope_freqs=video_rope_freqs,
+                            audio_rope_freqs=audio_rope_freqs,
+                            video_cross_rope_freqs=video_cross_rope_freqs,
+                            audio_cross_rope_freqs=audio_cross_rope_freqs,
+                            video_attention_mask=video_attention_mask,
+                            audio_attention_mask=audio_attention_mask,
+                            perturbations=perturbations,
+                            block_idx=_bidx,
+                        )
+
+                    video_hidden, audio_hidden = mx.checkpoint(_run_block)(
+                        block.trainable_parameters(), video_hidden, audio_hidden
+                    )
+                    continue
+
                 video_hidden, audio_hidden = block(
                     video_hidden=video_hidden,
                     audio_hidden=audio_hidden,
