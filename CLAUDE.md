@@ -965,26 +965,45 @@ and applies to every consumer of the package.
 | Default value change (potentially breaking for callers relying on defaults) | `y` | `0.11.1 → 0.12.0` (TilingConfig / rope defaults) |
 | Removal / signature change | `y` | `0.9.x → 0.10.0` (ImageToVideoPipeline removal) |
 
-### Release artifacts
+### Release artifacts (automated via release-please)
 
-Every release on `main` produces, in this order:
+Releases are driven by **release-please** (`.github/workflows/release-please.yml`),
+mirroring the setup in mlx-forge and smeltr. You no longer hand-bump versions or
+hand-cut tags — you just merge conventional-commit feature PRs into `main`.
 
-1. **Merged squash commit** with conventional-commits subject + body.
-2. **Annotated git tag** `vX.Y.Z` on the merge commit (created locally
-   with `git tag -a vX.Y.Z -m '...'`, pushed via `git push origin vX.Y.Z`).
-3. **GitHub Release** auto-created by `.github/workflows/release.yml` (it
-   listens on `v*` tags). After creation, edit the release notes to use
-   the corresponding `CHANGELOG.md` section verbatim via
-   `gh release edit vX.Y.Z --notes-file …`.
-4. **CHANGELOG entry** at the top of the file under
-   `## [X.Y.Z] - YYYY-MM-DD` with `### Added` / `### Changed` /
-   `### Fixed` / `### Removed` sections as needed. Plain prose first
-   paragraph explaining the why; details below.
-5. **`pyproject.toml` version bump** in the workspace root **and** in
-   every sub-package (`packages/ltx-core-mlx/`, `packages/ltx-pipelines-mlx/`,
-   `packages/ltx-trainer/`) — all four must stay in sync.
-6. **`.release-please-manifest.json` bump** so release-please can drive
-   future automated releases from the correct base.
+The flow:
+
+1. **Merge feature PRs** into `main` with conventional-commit subjects
+   (`feat:` → `z` bump, `fix:` → `z` bump, `feat!:`/`fix!:` → `y` bump). The
+   bump rules in the table above still hold; release-please derives them from
+   the commit type. `commitlint` enforces the prefixes.
+2. **release-please opens / updates a `chore(main): release X.Y.Z` PR**
+   automatically on every push to `main`. It aggregates the unreleased commits
+   into the `CHANGELOG.md` entry and bumps the version in all four pyprojects:
+   the workspace root via the `python` release-type, and the three
+   sub-packages (`ltx-core-mlx`, `ltx-pipelines-mlx`, `ltx-trainer`) via the
+   `extra-files` TOML `$.project.version` entries in `release-please-config.json`.
+   All four stay in sync by construction.
+3. **`relock-on-release.yml` resyncs `uv.lock`** on that release PR
+   (gated to the Bot-authored `release-please--` branch), so the lockfile
+   always matches the released version — this is what the 0.14.12 release
+   missed by hand.
+4. **Merging the release PR** makes release-please push the annotated
+   `vX.Y.Z` tag on the merge commit **and** create the GitHub Release with the
+   CHANGELOG section as notes. No manual `git tag` / `gh release` step.
+
+The release PR is authored by the release GitHub App (`RELEASE_APP_ID` /
+`RELEASE_APP_PRIVATE_KEY` secrets), not the default `GITHUB_TOKEN`, so its PR
+triggers CI and the relock workflow (a default-token push cannot trigger other
+workflows). `.release-please-manifest.json` tracks the last released version;
+do not edit it by hand.
+
+**Manual fallback** (only if release-please is broken): bump the four pyprojects
++ `uv.lock` + manifest, add the CHANGELOG entry, open a `chore(release):` PR,
+then tag with `git tag -a vX.Y.Z` and `git push origin vX.Y.Z`
+(`.github/workflows/release.yml` no longer exists — the tag-listening release
+job was superseded by release-please). `scripts/validate_versions.py` checks
+four-pyproject coherence for this path.
 
 ### Pre-releases (release candidates)
 
