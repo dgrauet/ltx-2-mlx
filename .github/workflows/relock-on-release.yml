@@ -1,0 +1,61 @@
+name: relock-on-release-pr
+
+# release-please bumps the pyproject versions but not uv.lock; re-lock on its PR
+# so the committed lockfile matches the released version. This is the automated
+# equivalent of the manual uv.lock resync that the 0.14.12 release missed.
+on:
+  pull_request:
+    branches: [main]
+    paths: [pyproject.toml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: relock-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  relock:
+    # Gate on the release bot: only a Bot-authored `release-please--` PR (i.e. the
+    # release GitHub App) runs the relock. A human collaborator who forges a
+    # `release-please--` branch has user.type == 'User' and is excluded, so the
+    # token never runs against a crafted pyproject.toml during `uv lock`.
+    if: >-
+      github.event.pull_request.user.type == 'Bot' &&
+      startsWith(github.head_ref, 'release-please--')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          # Do NOT persist the token in .git/config. `uv lock` resolves and may build
+          # dependencies (arbitrary code via PEP 517 build backends); a persisted
+          # token would be readable by that code. The push step re-supplies it.
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - name: Install Python
+        run: uv python install 3.12
+      - name: Regenerate uv.lock
+        run: uv lock
+      - name: Commit and push if changed
+        env:
+          # Token is exposed only to this final step, which runs trusted git
+          # commands — not to the uv lock step that executes dependency code.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if ! git diff --quiet uv.lock; then
+            git config user.name "ltx-2-mlx-release"
+            git config user.email "release@users.noreply.github.com"
+            git add uv.lock
+            git commit -m "chore: sync uv.lock with release version"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
+          fi

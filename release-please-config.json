@@ -8,7 +8,24 @@
   "packages": {
     ".": {
       "package-name": "ltx-2-mlx",
-      "changelog-path": "CHANGELOG.md"
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "packages/ltx-core-mlx/pyproject.toml",
+          "jsonpath": "$.project.version"
+        },
+        {
+          "type": "toml",
+          "path": "packages/ltx-pipelines-mlx/pyproject.toml",
+          "jsonpath": "$.project.version"
+        },
+        {
+          "type": "toml",
+          "path": "packages/ltx-trainer/pyproject.toml",
+          "jsonpath": "$.project.version"
+        }
+      ]
     }
   }
 }
