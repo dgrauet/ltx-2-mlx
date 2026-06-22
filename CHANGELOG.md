@@ -12,6 +12,39 @@ stability guarantees.
 
 ## [Unreleased]
 
+## [0.14.13] - 2026-06-22
+
+Makes multi-anchor I2V reachable on the `--one-stage` and `--distilled`
+generate modes. Both pipelines already accepted the upstream-iso `images=`
+list and routed it through `combined_image_conditionings`; a leftover CLI
+guard (`_legacy_single_image`) was the only thing rejecting more than one
+`--image` anchor or a non-trivial `frame_idx`/`strength` on these modes,
+artificially restricting multi-anchor I2V to `--two-stage` / `--two-stages-hq`.
+Removing the guard brings the CLI in line with upstream, where `--image` is
+repeatable across all modes. Purely additive — only previously-erroring paths
+are affected; `--two-stage` / `--two-stages-hq` behavior is unchanged.
+Validated with start+end anchor smoke tests at 512×512×25 on both
+`--distilled` and `--one-stage`. Thanks to
+[@plz12345](https://github.com/plz12345) (#45).
+
+### Added
+
+- Multi-anchor I2V on `--one-stage` and `--distilled`: the repeatable
+  `--image PATH FRAME_IDX STRENGTH` form now works on every `generate` mode.
+  `frame_idx=0` hard-replaces the first latent frame
+  (`VideoConditionByLatentIndex`); `frame_idx>0` appends a soft keyframe anchor
+  (`VideoConditionByKeyframeIndex`). New "Multi-Anchor I2V" section in
+  `CLAUDE.md` documents the form and the `(num_frames - 1) % 8 == 0`
+  frame-count constraint.
+
+### Fixed
+
+- `VideoConditionByKeyframeIndex.frame_idx` docstring corrected from "latent
+  frame index" to "pixel frame index (0-based)", matching the math in
+  `_compute_keyframe_positions` and the `--image` help text.
+- `uv.lock` resynced to the released package versions (the 0.14.12 release
+  bumped the workspace `pyproject` files but left the lockfile at 0.14.11).
+
 ## [0.14.12] - 2026-06-15
 
 Enables end-to-end joint audio-video LoRA training on Apple Silicon, closing
