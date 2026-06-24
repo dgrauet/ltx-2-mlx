@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions current via reviewable PRs. Dependabot
+  # reads the `# vX.Y.Z` comment next to each pinned SHA and bumps both together.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # `ci:` prefix so the bot's commits pass commitlint (conventional commits).
+    commit-message:
+      prefix: "ci"
+    # One grouped PR per run instead of one PR per action.
+    groups:
+      github-actions:
+        patterns: ["*"]
