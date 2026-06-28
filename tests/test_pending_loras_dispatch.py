@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
+from ltx_core_mlx.loader.sd_ops import LTXV_LORA_BLOCK_PREFIX, LTXV_LORA_COMFY_RENAMING_MAP
 from ltx_pipelines_mlx._base import BasePipeline
 
 
@@ -109,7 +109,7 @@ def test_pending_loras_with_streaming_attaches_lora_sources(pipeline_stub):
     orch_load.assert_called_once_with(Path("/fake/transformer.safetensors"), low_ram_streaming=True)
     BlockLoraSource_cls.assert_called_once_with(
         "/fake/lora.safetensors",
-        block_prefix="transformer.transformer_blocks.",
+        block_prefix=LTXV_LORA_BLOCK_PREFIX,
         strength=1.0,
         sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
     )
@@ -154,7 +154,7 @@ def test_pending_loras_with_streaming_multi_lora(pipeline_stub, loras):
     for (path, strength), _mock_source in zip(loras, mock_sources):
         BlockLoraSource_cls.assert_any_call(
             path,
-            block_prefix="transformer.transformer_blocks.",
+            block_prefix=LTXV_LORA_BLOCK_PREFIX,
             strength=strength,
             sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
         )

@@ -20,6 +20,7 @@ import mlx.core as mx
 
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
 from ltx_core_mlx.loader import (
+    LTXV_LORA_BLOCK_PREFIX,
     LTXV_LORA_COMFY_RENAMING_MAP,
     LoraStateDictWithStrength,
     SafetensorsStateDictLoader,
@@ -156,7 +157,7 @@ class ICLoraPipeline(BasePipeline):
                 sources.append(
                     BlockLoraSource(
                         lora_path,
-                        block_prefix="transformer.transformer_blocks.",
+                        block_prefix=LTXV_LORA_BLOCK_PREFIX,
                         strength=strength,
                         sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
                     )

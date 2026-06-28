@@ -302,7 +302,10 @@ class BasePipeline:
 
             if self.low_ram_streaming:
                 from ltx_core_mlx.loader.block_streaming import BlockLoraSource
-                from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
+                from ltx_core_mlx.loader.sd_ops import (
+                    LTXV_LORA_BLOCK_PREFIX,
+                    LTXV_LORA_COMFY_RENAMING_MAP,
+                )
                 from ltx_pipelines_mlx.utils._orchestration import load_transformer as _load_impl
                 from ltx_pipelines_mlx.utils._orchestration import resolve_lora_path
 
@@ -313,7 +316,7 @@ class BasePipeline:
                     sources.append(
                         BlockLoraSource(
                             resolved,
-                            block_prefix="transformer.transformer_blocks.",
+                            block_prefix=LTXV_LORA_BLOCK_PREFIX,
                             strength=strength,
                             sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
                         )

@@ -51,10 +51,14 @@ class BlockLoraSource:
 
     Args:
         lora_path: Path to LoRA safetensors.
-        block_prefix: Same prefix as the streamer (e.g.
-            ``"transformer.transformer_blocks."``). LoRA keys after
-            optional ``sd_ops`` remapping must start with this prefix
-            and be of the form ``f"{block_prefix}{idx}.{param}.lora_A.weight"``.
+        block_prefix: Prefix the LoRA keys carry **after** optional
+            ``sd_ops`` remapping — keys must start with this and be of the
+            form ``f"{block_prefix}{idx}.{param}.lora_A.weight"``. NOTE this
+            is NOT necessarily the streamer's model-weight prefix:
+            ``LTXV_LORA_COMFY_RENAMING_MAP`` produces ``transformer_blocks.``
+            (no ``transformer.``), so callers using that map must pass
+            ``LTXV_LORA_BLOCK_PREFIX``, not the ``transformer.``-prefixed
+            ``BlockStreamer`` prefix. Mixing them silently drops every delta (#52).
         strength: LoRA fusion strength (default 1.0).
         sd_ops: Optional :class:`SDOps` to remap raw safetensors keys
             (e.g. ComfyUI/diffusers → MLX naming via

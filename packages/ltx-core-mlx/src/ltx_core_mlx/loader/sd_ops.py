@@ -146,6 +146,18 @@ LTXV_LORA_COMFY_RENAMING_MAP = (
     .with_replacement("audio_ff.net.2.", "audio_ff.proj_out.")
 )
 
+# Block-key prefix that ``LTXV_LORA_COMFY_RENAMING_MAP`` produces.
+#
+# The map strips ``diffusion_model.`` but never adds ``transformer.``, so a
+# renamed key is ``transformer_blocks.N.<param>.lora_{A,B}.weight``. The
+# streaming LoRA path (``BlockLoraSource``) keeps a delta only if its renamed
+# key starts with the ``block_prefix`` it is given — so every streaming call
+# site MUST pass this constant, not the ``transformer.``-prefixed model-weight
+# prefix used by ``BlockStreamer`` (whose keys come from ``transformer.safetensors``
+# and genuinely carry the ``transformer.`` prefix). Mixing the two silently
+# drops every delta, making the LoRA a no-op (#52).
+LTXV_LORA_BLOCK_PREFIX = "transformer_blocks."
+
 LTXV_LORA_COMFY_TARGET_MAP = (
     SDOps("LTXV_LORA_COMFY_TARGET_MAP")
     .with_matching()

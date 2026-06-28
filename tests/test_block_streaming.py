@@ -307,3 +307,48 @@ class TestBlockLoraSource:
             assert mx.array_equal(shared.attn1.to_q.weight, ref_q1).item()
             streamer.close()
             lora.close()
+
+    def test_comfy_renamed_lora_matches_pipeline_prefix(self):
+        """Regression for #52: a ComfyUI/diffusers-named LoRA remapped via
+        ``LTXV_LORA_COMFY_RENAMING_MAP`` must match blocks under the prefix
+        the pipelines hand to ``BlockLoraSource``.
+
+        The map strips ``diffusion_model.`` but never adds ``transformer.``,
+        so the streaming call sites must use ``LTXV_LORA_BLOCK_PREFIX``
+        (``"transformer_blocks."``). Passing ``"transformer.transformer_blocks."``
+        silently drops every delta — output is byte-identical to no-LoRA.
+        """
+        from ltx_core_mlx.loader.block_streaming import BlockLoraSource
+        from ltx_core_mlx.loader.sd_ops import (
+            LTXV_LORA_BLOCK_PREFIX,
+            LTXV_LORA_COMFY_RENAMING_MAP,
+        )
+
+        cfg = _tiny_config(num_layers=2)
+        ref_model = LTXModel(cfg)
+        mx.eval(ref_model.parameters())
+
+        with tempfile.TemporaryDirectory() as td:
+            lora_path = Path(td) / "comfy_lora.safetensors"
+            # ComfyUI/diffusers naming, as a trainer- or Lightricks-produced
+            # LoRA actually ships it on disk.
+            self._build_synthetic_lora(ref_model, lora_path, prefix="diffusion_model.transformer_blocks.")
+
+            # The map output namespace must equal the prefix constant the
+            # pipelines pass. This is the single source of truth the three
+            # call sites (_base, ic_lora, ti2vid_two_stages) reference.
+            renamed = LTXV_LORA_COMFY_RENAMING_MAP.apply_to_key(
+                "diffusion_model.transformer_blocks.0.attn1.to_q.lora_A.weight"
+            )
+            assert renamed.startswith(LTXV_LORA_BLOCK_PREFIX)
+
+            lora = BlockLoraSource(
+                lora_path,
+                block_prefix=LTXV_LORA_BLOCK_PREFIX,
+                strength=1.0,
+                sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+            )
+            assert lora.has_block(0), (
+                "ComfyUI-renamed LoRA produced zero matched deltas — the streaming LoRA path is silently a no-op (#52)."
+            )
+            lora.close()

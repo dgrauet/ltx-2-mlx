@@ -7,6 +7,7 @@ from ltx_core_mlx.loader.primitives import (
     StateDict,
 )
 from ltx_core_mlx.loader.sd_ops import (
+    LTXV_LORA_BLOCK_PREFIX,
     LTXV_LORA_COMFY_RENAMING_MAP,
     ContentMatching,
     ContentReplacement,
@@ -20,6 +21,7 @@ from ltx_core_mlx.loader.sft_loader import (
 )
 
 __all__ = [
+    "LTXV_LORA_BLOCK_PREFIX",
     "LTXV_LORA_COMFY_RENAMING_MAP",
     "ContentMatching",
     "ContentReplacement",

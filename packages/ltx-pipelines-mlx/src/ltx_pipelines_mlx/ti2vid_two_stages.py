@@ -186,7 +186,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
           Slower per bind but supports arbitrary LoRA strength.
         """
         from ltx_core_mlx.loader.block_streaming import BlockLoraSource, BlockStreamer
-        from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
+        from ltx_core_mlx.loader.sd_ops import (
+            LTXV_LORA_BLOCK_PREFIX,
+            LTXV_LORA_COMFY_RENAMING_MAP,
+        )
 
         if abs(self._distilled_lora_strength - 1.0) <= 1e-6:
             distilled_path = self._resolve_safetensors(self.model_dir, "transformer-distilled")
@@ -214,7 +217,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             )
         lora_source = BlockLoraSource(
             lora_path,
-            block_prefix="transformer.transformer_blocks.",
+            block_prefix=LTXV_LORA_BLOCK_PREFIX,
             strength=self._distilled_lora_strength,
             sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
         )
