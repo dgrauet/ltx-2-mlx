@@ -10,6 +10,13 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.14.14](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.13...v0.14.14) (2026-06-29)
+
+
+### Bug Fixes
+
+* apply streaming LoRA deltas under the correct block prefix ([#52](https://github.com/dgrauet/ltx-2-mlx/issues/52)) ([#53](https://github.com/dgrauet/ltx-2-mlx/issues/53)) ([b68459f](https://github.com/dgrauet/ltx-2-mlx/commit/b68459f8c284a87da18eedc518237ff16e73c47d))
+
 ## [Unreleased]
 
 ## [0.14.13] - 2026-06-22
