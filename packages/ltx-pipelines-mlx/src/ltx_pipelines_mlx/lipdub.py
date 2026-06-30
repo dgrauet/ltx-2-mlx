@@ -195,7 +195,7 @@ class LipDubPipeline(ICLoraPipeline):
                     enc_w=W_half * 32,
                     spatial_dims=(F, H_half, W_half),
                     video_encoder=self.vae_encoder,
-                    frame_rate=frame_rate
+                    frame_rate=frame_rate,
                 )
             )
         append_ic_lora_reference_video_conditionings(
@@ -279,7 +279,7 @@ class LipDubPipeline(ICLoraPipeline):
                     enc_w=enc_w_full,
                     spatial_dims=(F, H_full, W_full),
                     video_encoder=self.vae_encoder,
-                    frame_rate=frame_rate
+                    frame_rate=frame_rate,
                 )
             )
         append_ic_lora_reference_video_conditionings(
