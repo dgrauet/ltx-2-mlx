@@ -10,6 +10,13 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.14.15](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.14...v0.14.15) (2026-07-01)
+
+
+### Bug Fixes
+
+* do not truncate muxed video to shortest stream in VAE decode ([#58](https://github.com/dgrauet/ltx-2-mlx/issues/58)) ([d9f566a](https://github.com/dgrauet/ltx-2-mlx/commit/d9f566a641294a8562e9776ba343263771c26f70))
+
 ## [0.14.14](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.13...v0.14.14) (2026-06-29)
 
 
