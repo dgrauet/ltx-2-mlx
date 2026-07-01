@@ -478,7 +478,12 @@ class VideoDecoder(nn.Module):
             "-",
         ]
         if audio_path:
-            cmd.extend(["-i", audio_path, "-c:a", "aac", "-shortest"])
+            # Do not use -shortest: the reference muxes both streams in full
+            # (ltx_pipelines.utils.media_io writes all video chunks + the entire
+            # audio waveform, no truncation). Reconstructed audio can be slightly
+            # shorter than the video, and -shortest would truncate tail frames on
+            # extend/retake.
+            cmd.extend(["-i", audio_path, "-c:a", "aac"])
         cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", output_path])
 
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
