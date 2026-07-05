@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import mlx.core as mx
+import pytest
 
 from ltx_core_mlx.loader.fuse_loras import _fuse_delta_with_float, _prepare_deltas, apply_loras
 from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
@@ -218,6 +219,81 @@ class TestApplyLoras:
         # scales and biases should not appear as standalone entries
         # (they're handled with their weight key)
         assert "layer.weight" in result.sd
+
+
+class TestQuantizedLoraFusion:
+    """Fusing a LoRA delta into a *quantized* weight (dequant -> add -> requant).
+
+    Regression coverage for the group_size!=64 bug in
+    _fuse_delta_with_quantized: it assumed group_size=64, so fusing into an
+    int4/g32 weight dequantized to the wrong in_features and raised
+    "[broadcast_shapes] Shapes (O,2*I) and (O,I) cannot be broadcast".
+    """
+
+    def _quantized_model_sd(self, weight, bits, group_size):
+        q, scales, biases = mx.quantize(weight, bits=bits, group_size=group_size)
+        return StateDict(
+            sd={"layer.weight": q, "layer.scales": scales, "layer.biases": biases},
+            size=0,
+            dtype=set(),
+        )
+
+    def _lora(self, a, b):
+        return StateDict(
+            sd={"layer.lora_A.weight": a, "layer.lora_B.weight": b},
+            size=0,
+            dtype=set(),
+        )
+
+    @pytest.mark.parametrize(("bits", "group_size"), [(4, 32), (8, 64), (4, 64), (4, 128)])
+    def test_shapes_preserved(self, bits, group_size):
+        # in_features=128 (divisible by every group size under test), out=64, rank=4
+        mx.random.seed(0)
+        weight = mx.random.normal((64, 128))
+        model_sd = self._quantized_model_sd(weight, bits, group_size)
+        orig = dict(model_sd.sd)
+
+        a = mx.random.normal((4, 128)) * 0.01
+        b = mx.random.normal((64, 4)) * 0.01
+        result = apply_loras(model_sd, [LoraStateDictWithStrength(self._lora(a, b), 1.0)])
+
+        # The requantized outputs keep the original packed/scale shapes.
+        assert result.sd["layer.weight"].shape == orig["layer.weight"].shape
+        assert result.sd["layer.scales"].shape == orig["layer.scales"].shape
+        assert result.sd["layer.biases"].shape == orig["layer.biases"].shape
+
+    def test_reconstructs_delta_g32(self):
+        """Fusing into an int8/g32 weight recovers dequant(orig)+delta.
+
+        Uses int8 so the quantization grid is fine enough to assert the fusion
+        math (correct group_size/bits + add) rather than just shapes. With the
+        old g64 assumption this dequantized to the wrong in_features and raised.
+        """
+        mx.random.seed(1)
+        weight = mx.random.normal((64, 128))
+        model_sd = self._quantized_model_sd(weight, bits=8, group_size=32)
+        orig = mx.dequantize(
+            model_sd.sd["layer.weight"],
+            scales=model_sd.sd["layer.scales"],
+            biases=model_sd.sd["layer.biases"],
+            group_size=32,
+            bits=8,
+        )
+
+        a = mx.random.normal((4, 128)) * 0.05
+        b = mx.random.normal((64, 4)) * 0.05
+        delta = b @ a
+        result = apply_loras(model_sd, [LoraStateDictWithStrength(self._lora(a, b), 1.0)])
+
+        fused = mx.dequantize(
+            result.sd["layer.weight"],
+            scales=result.sd["layer.scales"],
+            biases=result.sd["layer.biases"],
+            group_size=32,
+            bits=8,
+        )
+        # int8 requant error is well within 0.05.
+        assert mx.allclose(fused, orig + delta, atol=0.05).item()
 
 
 # ---------------------------------------------------------------------------

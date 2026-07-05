@@ -67,6 +67,40 @@ def _detect_quantization_bits(
     return 8  # default fallback
 
 
+def _derive_quant_params(
+    model: nn.Module,
+    weights: dict[str, mx.array],
+    quantized_layers: set[str],
+) -> tuple[int, int] | None:
+    """Derive (bits, group_size) from a representative quantized layer.
+
+    Cross-references the saved packed weight + scales against the model's float
+    weight, whose last dim is the true ``in_features``. Given those three:
+
+        packed_cols = in_features * bits / 32   -> bits = 32 * packed_cols / in_features
+        scales_cols = in_features / group_size  -> group_size = in_features / scales_cols
+
+    Returns None if no quantized layer can be matched to a model weight (falls
+    back to shape-only detection).
+    """
+    from mlx.utils import tree_flatten
+
+    model_params = dict(tree_flatten(model.parameters()))
+    for layer in quantized_layers:
+        wkey = f"{layer}.weight"
+        skey = f"{layer}.scales"
+        if wkey in weights and skey in weights and wkey in model_params:
+            in_features = int(model_params[wkey].shape[-1])
+            packed_cols = int(weights[wkey].shape[-1])
+            scales_cols = int(weights[skey].shape[-1])
+            if in_features == 0 or scales_cols == 0:
+                continue
+            bits = max(2, min(8, round(32 * packed_cols / in_features)))
+            group_size = in_features // scales_cols
+            return bits, group_size
+    return None
+
+
 def apply_quantization(
     model: nn.Module,
     weights: dict[str, mx.array],
@@ -95,8 +129,17 @@ def apply_quantization(
     if not quantized_layers:
         return
 
+    # Derive bits AND group_size from the model's true in_features. The saved
+    # tensors alone are ambiguous — packed weight cols and scales cols only pin
+    # down (group_size * bits), not the split — so a g32/int4 model is
+    # indistinguishable from g64/int2 without external truth. The model's float
+    # weights still carry the real (out, in) shape, which disambiguates.
     if bits is None:
-        bits = _detect_quantization_bits(weights, group_size)
+        derived = _derive_quant_params(model, weights, quantized_layers)
+        if derived is not None:
+            bits, group_size = derived
+        else:
+            bits = _detect_quantization_bits(weights, group_size)
 
     # Build class predicate: only quantize layers that have scales in the weights
     def _should_quantize(path: str, _module: nn.Module) -> bool:

@@ -195,11 +195,14 @@ def _fuse_delta_with_quantized(
     in_features_packed = weight.shape[-1]
     if scales is not None and scales.ndim > 1:
         num_groups = scales.shape[1]
-        # Try group_size=64 (default), compute real features, check consistency
-        group_size = 64
-        in_features_real = num_groups * group_size
-        pack_factor = in_features_real / in_features_packed if in_features_packed > 0 else 4
-        bits = max(2, min(8, round(32 / pack_factor)))
+        # The LoRA delta carries the true (out, in) weight shape, so derive the
+        # real in_features from it rather than assuming a group size. This keeps
+        # fusion correct for any group_size (32/64/128) and bit width (4/8).
+        in_features_real = deltas.shape[-1]
+        # packed cols hold in_features_real * bits / 32 values → solve for bits.
+        bits = max(2, min(8, round(32 * in_features_packed / in_features_real)))
+        # in_features_real is spread evenly across num_groups groups.
+        group_size = in_features_real // num_groups
     else:
         group_size = 64
         bits = 8
