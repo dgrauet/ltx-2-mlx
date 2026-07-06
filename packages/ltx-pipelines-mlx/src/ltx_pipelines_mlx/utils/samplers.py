@@ -82,6 +82,7 @@ def denoise_loop(
     audio_positions: mx.array | None = None,
     video_attention_mask: mx.array | None = None,
     audio_attention_mask: mx.array | None = None,
+    video_cross_attention_mask: mx.array | None = None,
     show_progress: bool = True,
 ) -> DenoiseOutput:
     """Run the Euler denoising loop for joint audio+video.
@@ -147,6 +148,8 @@ def denoise_loop(
             video_attention_mask=video_attention_mask,
             audio_attention_mask=audio_attention_mask,
         )
+        if video_cross_attention_mask is not None:
+            call_kwargs["video_cross_attention_mask"] = video_cross_attention_mask
 
         # Pass per-token timesteps when mask is not uniform
         if not video_uniform:
@@ -250,6 +253,7 @@ def res2s_denoise_loop(
     audio_positions: mx.array | None = None,
     video_attention_mask: mx.array | None = None,
     audio_attention_mask: mx.array | None = None,
+    video_cross_attention_mask: mx.array | None = None,
     show_progress: bool = True,
     bongmath: bool = True,
     bongmath_max_iter: int = 100,
@@ -366,6 +370,9 @@ def res2s_denoise_loop(
             video_attention_mask=video_attention_mask,
             audio_attention_mask=audio_attention_mask,
         )
+        # Prompt Relay: positive-context passes only; overridden to None on uncond.
+        if video_cross_attention_mask is not None:
+            base_kwargs["video_cross_attention_mask"] = video_cross_attention_mask
         if not video_uniform:
             base_kwargs["video_timesteps"] = _compute_per_token_timesteps(sig, video_state.denoise_mask)
         if not audio_uniform:
@@ -394,7 +401,12 @@ def res2s_denoise_loop(
                 neg_a_embeds = (
                     audio_guider.negative_context if audio_guider.negative_context is not None else audio_text_embeds
                 )
-                neg_kw = {**base_kwargs, "video_text_embeds": neg_v_embeds, "audio_text_embeds": neg_a_embeds}
+                neg_kw = {
+                    **base_kwargs,
+                    "video_text_embeds": neg_v_embeds,
+                    "audio_text_embeds": neg_a_embeds,
+                    "video_cross_attention_mask": None,  # never mask the negative prompt
+                }
                 neg_v, neg_a = run_pass("uncond", neg_kw)
 
             # 3. Perturbed prediction for STG
@@ -594,6 +606,7 @@ def guided_denoise_loop(
     audio_positions: mx.array | None = None,
     video_attention_mask: mx.array | None = None,
     audio_attention_mask: mx.array | None = None,
+    video_cross_attention_mask: mx.array | None = None,
     show_progress: bool = True,
     tap: callable | None = None,
     teacache=None,  # mlx_arsenal.diffusion.TeaCacheController-compatible
@@ -712,6 +725,12 @@ def guided_denoise_loop(
             video_attention_mask=video_attention_mask,
             audio_attention_mask=audio_attention_mask,
         )
+        # Prompt Relay gates the video->text cross-attention. Applied to every
+        # positive-context pass (cond/ptb/mod) via base_kwargs, but overridden to
+        # None on the unconditional (negative) pass below — matching the reference,
+        # which never masks the negative prompt.
+        if video_cross_attention_mask is not None:
+            base_kwargs["video_cross_attention_mask"] = video_cross_attention_mask
 
         # Per-token timesteps for conditioning
         if not video_uniform:
@@ -795,6 +814,7 @@ def guided_denoise_loop(
                 **base_kwargs,
                 "video_text_embeds": neg_video_embeds,
                 "audio_text_embeds": neg_audio_embeds,
+                "video_cross_attention_mask": None,  # never mask the negative prompt
             }
             neg_video_x0, neg_audio_x0 = _run_pass("uncond", neg_kwargs)
 

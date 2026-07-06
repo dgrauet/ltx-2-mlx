@@ -324,6 +324,7 @@ class LTXModel(nn.Module):
         audio_positions: mx.array | None = None,
         video_attention_mask: mx.array | None = None,
         audio_attention_mask: mx.array | None = None,
+        video_cross_attention_mask: mx.array | None = None,
         video_timesteps: mx.array | None = None,
         audio_timesteps: mx.array | None = None,
         perturbations: BatchedPerturbationConfig | None = None,
@@ -343,6 +344,9 @@ class LTXModel(nn.Module):
             audio_positions: (B, Na, num_axes) -- positions for RoPE.
             video_attention_mask: Optional mask for video attention.
             audio_attention_mask: Optional mask for audio attention.
+            video_cross_attention_mask: Optional additive bias for the video→text
+                cross-attention (Prompt Relay temporal prompt gating). Same array
+                is broadcast to every block.
             video_timesteps: Optional (B, Nv) per-token timesteps for video.
                 When provided, AdaLN parameters are computed per-token instead
                 of per-batch, enabling preserved tokens (mask=0) to receive
@@ -509,6 +513,7 @@ class LTXModel(nn.Module):
                             audio_cross_rope_freqs=audio_cross_rope_freqs,
                             video_attention_mask=video_attention_mask,
                             audio_attention_mask=audio_attention_mask,
+                            video_cross_attention_mask=video_cross_attention_mask,
                             perturbations=perturbations,
                             block_idx=_bidx,
                         )
@@ -537,6 +542,7 @@ class LTXModel(nn.Module):
                     audio_cross_rope_freqs=audio_cross_rope_freqs,
                     video_attention_mask=video_attention_mask,
                     audio_attention_mask=audio_attention_mask,
+                    video_cross_attention_mask=video_cross_attention_mask,
                     perturbations=perturbations,
                     block_idx=block_idx,
                 )

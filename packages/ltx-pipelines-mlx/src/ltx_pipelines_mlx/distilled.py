@@ -117,6 +117,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         stage2_steps: int | None = None,
         image: str | None = None,
         images=None,
+        prompt_relay=None,
         **_unused_kwargs,
     ) -> tuple[mx.array, mx.array]:
         """Generate video using the distilled two-stage pipeline.
@@ -137,14 +138,32 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
         """
+        # --- Prompt Relay setup (temporal prompt gating on video cross-attn) ---
+        encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
+
         # --- Text encoding (positive only — no CFG) ---
         self._load_text_encoder()
         with phase("Encoding prompt", verbose=self.verbose):
-            video_embeds, audio_embeds = self._encode_text(prompt)
+            video_embeds, audio_embeds = self._encode_text(encode_prompt)
             _materialize(video_embeds, audio_embeds)
         if self.low_memory:
             self.prompt_encoder.free()
             aggressive_cleanup()
+
+        # Per-stage Prompt Relay mask builder. Ranges were computed pre-encode;
+        # the mask is rebuilt each stage because tokens-per-frame (H*W) differs.
+        num_text_tokens = video_embeds.shape[1]
+
+        def _relay_mask(latent_f: int, latent_h: int, latent_w: int, num_video_tokens: int):
+            return self._prompt_relay_mask(
+                prompt_relay,
+                relay_token_ranges,
+                latent_f,
+                latent_h,
+                latent_w,
+                num_video_tokens,
+                num_text_tokens,
+            )
 
         # --- Load distilled DiT + VAE encoder + upsampler ---
         self.load()
@@ -223,6 +242,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_1,
+            video_cross_attention_mask=_relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -306,6 +326,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_2,
+            video_cross_attention_mask=_relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
         )
         if self.low_memory:
             aggressive_cleanup()

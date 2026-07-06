@@ -425,6 +425,68 @@ class BasePipeline:
         """
         return self.prompt_encoder.encode(prompt)
 
+    # ------------------------------------------------------------------
+    # Prompt Relay (temporal cross-attention prompt gating)
+    # ------------------------------------------------------------------
+
+    def _prompt_relay_setup(self, prompt: str, prompt_relay):
+        """Resolve the prompt actually encoded + per-segment token ranges.
+
+        With Prompt Relay active, the encoded (positive) prompt is the global
+        prompt followed by the space-joined local prompts; the returned token
+        ranges index those locals for :meth:`_prompt_relay_mask`. Returns
+        ``(prompt, None)`` when Prompt Relay is off.
+        """
+        if prompt_relay is None:
+            return prompt, None
+        if getattr(self, "_tile_count", None) is not None:
+            raise ValueError(
+                "Prompt Relay is not compatible with modality tiling "
+                "(--tile-frames / --tile-spatial). Run without tiling."
+            )
+        from ltx_core_mlx.conditioning.prompt_relay import map_token_ranges
+
+        self._load_text_encoder()
+        tokenizer = self.text_encoder._tokenizer
+        return map_token_ranges(tokenizer, prompt, prompt_relay.local_prompts)
+
+    @staticmethod
+    def _prompt_relay_mask(
+        prompt_relay,
+        token_ranges,
+        latent_f: int,
+        latent_h: int,
+        latent_w: int,
+        num_video_tokens: int,
+        num_text_tokens: int,
+    ):
+        """Build the additive video->text cross-attention bias for one stage.
+
+        Rebuilt per stage because tokens-per-frame (``latent_h * latent_w``)
+        differs between half- and full-resolution stages. Returns ``None`` when
+        Prompt Relay is off (``token_ranges is None``).
+        """
+        if token_ranges is None:
+            return None
+        from ltx_core_mlx.conditioning.prompt_relay import (
+            build_relay_mask,
+            distribute_segment_lengths,
+        )
+
+        seg_lengths = distribute_segment_lengths(
+            len(prompt_relay.local_prompts), latent_f, prompt_relay.segment_lengths
+        )
+        return build_relay_mask(
+            token_ranges=token_ranges,
+            segment_lengths=seg_lengths,
+            num_video_tokens=num_video_tokens,
+            tokens_per_frame=latent_h * latent_w,
+            latent_frames=latent_f,
+            num_text_tokens=num_text_tokens,
+            epsilon=prompt_relay.epsilon,
+            strength=prompt_relay.strength,
+        )
+
     @staticmethod
     def _pre_denoise_flush(video_state: LatentState, audio_state: LatentState) -> None:
         """Force-materialise noised states before starting the denoise loop.
