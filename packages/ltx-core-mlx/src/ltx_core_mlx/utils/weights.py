@@ -67,6 +67,85 @@ def _detect_quantization_bits(
     return 8  # default fallback
 
 
+def derive_quant_params(
+    in_features: int,
+    packed_cols: int,
+    scales_cols: int,
+) -> tuple[int, int]:
+    """Derive ``(bits, group_size)`` from a quantized layer's true in_features.
+
+    Given the layer's real ``in_features`` (from the float weight or the LoRA
+    delta, both of which carry the unpacked shape) and the saved packed weight /
+    scales column counts:
+
+        packed_cols = in_features * bits / 32   -> bits = 32 * packed_cols / in_features
+        scales_cols = in_features / group_size  -> group_size = in_features / scales_cols
+
+    The result is validated for *exact* consistency: a stale or mis-shaped tensor
+    whose ratio merely rounds to a plausible ``bits`` is rejected here instead of
+    silently misinterpreting the weights downstream. Single home for the
+    derivation shared by load-time quantization and LoRA fusion.
+
+    Raises:
+        ValueError: if the three counts are not exactly consistent with a valid
+            MLX (bits, group_size) split.
+    """
+    if in_features <= 0 or packed_cols <= 0 or scales_cols <= 0:
+        raise ValueError(
+            "quant param derivation needs positive shapes, got "
+            f"in_features={in_features}, packed_cols={packed_cols}, scales_cols={scales_cols}"
+        )
+    bits = round(32 * packed_cols / in_features)
+    if not 2 <= bits <= 8 or packed_cols * 32 != in_features * bits:
+        raise ValueError(
+            f"packed weight cols ({packed_cols}) are not an exact bit-packing of "
+            f"in_features={in_features}: 32*{packed_cols} != {in_features}*bits for any "
+            f"bits in [2, 8] (nearest bits={bits})"
+        )
+    if in_features % scales_cols != 0:
+        raise ValueError(
+            f"in_features={in_features} is not divisible by scales cols ({scales_cols}); "
+            "cannot derive a uniform group_size"
+        )
+    group_size = in_features // scales_cols
+    return bits, group_size
+
+
+def _derive_quant_params(
+    model: nn.Module,
+    weights: dict[str, mx.array],
+    quantized_layers: set[str],
+) -> tuple[int, int] | None:
+    """Derive (bits, group_size) from a representative quantized layer.
+
+    Cross-references the saved packed weight + scales against the model's float
+    weight, whose last dim is the true ``in_features``, via
+    :func:`derive_quant_params`.
+
+    Returns None if no quantized layer can be matched to a *float* model weight
+    (falls back to shape-only detection).
+    """
+    from mlx.utils import tree_flatten
+
+    model_params = dict(tree_flatten(model.parameters()))
+    for layer in quantized_layers:
+        wkey = f"{layer}.weight"
+        skey = f"{layer}.scales"
+        if wkey not in weights or skey not in weights or wkey not in model_params:
+            continue
+        # Skip layers the model already stores quantized: then ``.weight``'s last
+        # dim is the packed column count, not the true in_features, and the
+        # derivation would produce garbage. (e.g. the ic_lora re-quantization
+        # path, where the dit is quantized before fusion runs.)
+        if skey in model_params:
+            continue
+        in_features = int(model_params[wkey].shape[-1])
+        packed_cols = int(weights[wkey].shape[-1])
+        scales_cols = int(weights[skey].shape[-1])
+        return derive_quant_params(in_features, packed_cols, scales_cols)
+    return None
+
+
 def apply_quantization(
     model: nn.Module,
     weights: dict[str, mx.array],
@@ -95,7 +174,21 @@ def apply_quantization(
     if not quantized_layers:
         return
 
-    if bits is None:
+    # Derive bits AND group_size from the model's true in_features. The saved
+    # tensors alone are ambiguous — packed weight cols and scales cols only pin
+    # down (group_size * bits), not the split — so a g32/int4 model is
+    # indistinguishable from g64/int2 without external truth. The model's float
+    # weights still carry the real (out, in) shape, which disambiguates.
+    #
+    # group_size is derived independently of whether an explicit ``bits`` was
+    # passed: otherwise ``bits=4`` on a g32 checkpoint would leave the default
+    # group_size=64 and fail load_weights with a shape mismatch.
+    derived = _derive_quant_params(model, weights, quantized_layers)
+    if derived is not None:
+        derived_bits, group_size = derived
+        if bits is None:
+            bits = derived_bits
+    elif bits is None:
         bits = _detect_quantization_bits(weights, group_size)
 
     # Build class predicate: only quantize layers that have scales in the weights
