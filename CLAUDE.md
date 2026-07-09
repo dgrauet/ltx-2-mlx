@@ -204,6 +204,7 @@ Weights are pre-converted by [mlx-forge](https://github.com/dgrauet/mlx-forge) a
 - Only `nn.Linear` inside `transformer_blocks` → int8 (group_size=64)
 - Non-quantizable (must stay bf16): `adaln_single`, `proj_out`, `patchify_proj`, connectors, VAE, vocoder
 - MLX can only quantize Linear and Embedding — never Conv layers
+- Loaders derive `(bits, group_size)` from tensor shapes → any group_size (32/64/128) + bit width (int4/int8) loads & fuses. Single home: `utils/weights.py::derive_quant_params` (exact-consistency validated); shared by load-time quant + LoRA fusion.
 
 ### Split Safetensors
 
@@ -350,7 +351,7 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 
 | Command | Pipeline | Tier | Description |
 |---------|----------|------|-------------|
-| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. |
+| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. |
 | `keyframe` | Keyframe interpolation | Stable | Two-stage interpolation between start/end frames |
 | `ic-lora` | IC-LoRA | Stable | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
 | `hdr-ic-lora` | HDR IC-LoRA | Stable | Two-stage HDR generation via IC-LoRA + LogC3 inverse (saves SDR mp4 + linear-HDR `.npz`) |
@@ -403,6 +404,8 @@ ltx-2-mlx ic-lora \
 ```
 
 Flags: `--lora PATH STRENGTH` (repeatable, supports HF repo IDs), `--video-conditioning PATH STRENGTH` (repeatable), `--conditioning-strength`, `--skip-stage-2`, `--image`.
+
+**Dev mode** (`--dev-transformer FILE`, opt-in — default stays distilled): fuses the distilled LoRA (`--distilled-lora`, `--distilled-lora-strength` default 0.5) **alongside** the task IC-LoRA in the same pass and keeps both across stages (Comfy Union-Control recipe). Missing `--dev-transformer` hard-fails (no silent distilled fallback). `--single-stage`: full-res one-pass (no upsampler / Stage 2), takes precedence over `--skip-stage-2`.
 
 #### Static-scene I2V recipe (preserve identity)
 
@@ -470,6 +473,18 @@ ltx-2-mlx generate \
 ```
 
 Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3), `--image`.
+
+### Prompt Relay (`--segment`)
+
+Community port (WhatDreamsCost/Kijai) — sequence local prompts over time within one generation. A training-free additive Gaussian penalty on the video→text cross-attention (`attn2`) gates each local prompt's token range to a slice of the timeline; the global `--prompt` still applies to every frame.
+
+```bash
+ltx-2-mlx generate --distilled --prompt "cinematic, a woman in a bedroom" \
+  --segment "sitting on the bed" \
+  --segment "standing and turning to the window" -o out.mp4
+```
+
+Flags: `--segment "TEXT" [LEN_FRAMES]` (repeatable, timeline order; omit LEN to auto-distribute), `--relay-epsilon` (default 1e-3, smaller = sharper), `--relay-strength` (default 1.0). Works on all `generate` modes; on CFG modes the mask applies to the **conditional pass only** (never the negative). **Not compatible with modality tiling** (raises). Correctness hinges on the Gemma connector front-packing valid tokens to column *i* (`_replace_padding_with_registers`) — token *i* in encode order → column *i* in the `Nk` axis. Inert on the default path (no `--segment` → `video_cross_attention_mask=None`, byte-identical output). Key files: `conditioning/prompt_relay.py`; `video_cross_attention_mask` kwarg threaded `LTXModel → BasicAVTransformerBlock → attn2`.
 
 ### Multi-Anchor I2V (`--image` repeatable)
 
