@@ -364,6 +364,7 @@ class ICLoraPipeline(BasePipeline):
         conditioning_attention_mask: mx.array | None = None,
         skip_stage_2: bool = False,
         single_stage: bool = False,
+        upsample_only: bool = False,
     ) -> tuple[mx.array, mx.array]:
         """Generate video with IC-LoRA reference conditioning.
 
@@ -387,6 +388,14 @@ class ICLoraPipeline(BasePipeline):
                 pose/reference conditioning applied throughout (matches the Comfy
                 single-stage IC-LoRA workflows, e.g. Union Control). No upsampler,
                 no Stage 2 refine. Takes precedence over ``skip_stage_2``.
+            upsample_only: Run the half-res generative stage (conditioning applied
+                throughout, same as Stage 1), upscale the latent 2x with the
+                LatentUpsampler, and decode directly — skipping the Stage 2 refine
+                that drops control adherence. Output is at full target resolution.
+                Cheaper than ``single_stage`` (gen runs at half res) but the control
+                is encoded at half res, so fine-detail adherence sits between
+                two-stage and native single-stage. Ignored if ``single_stage`` or
+                ``skip_stage_2`` is set.
 
         Returns:
             Tuple of (video_latent, audio_latent).
@@ -419,7 +428,18 @@ class ICLoraPipeline(BasePipeline):
         # --- Stage 1: generation with IC-LoRA ---
         # Two-stage generates at half res (Stage 2 upscales 2x). Single-stage
         # generates directly at full target res (Comfy Union Control topology).
-        gen_h, gen_w = (height, width) if single_stage else (height // 2, width // 2)
+        if single_stage:
+            gen_h, gen_w = height, width
+        else:
+            # Half-res stages must land on a VAE-compatible grid: image
+            # conditioning encodes at these exact pixel dims, and the VAE's
+            # space_to_depth requires multiples of 32 (raw height//2 can leave a
+            # remainder, e.g. 928//2=464). Floor to a multiple of 32. This is
+            # latent-neutral — compute_video_latent_shape already floors //32, so
+            # the latent grid (and the ref-video resolution, which snaps the same
+            # way) is unchanged versus the raw half dims.
+            gen_h = (height // 2 // 32) * 32
+            gen_w = (width // 2 // 32) * 32
         F, H_half, W_half = compute_video_latent_shape(num_frames, gen_h, gen_w)
         video_shape = (1, F * H_half * W_half, 128)
         audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
@@ -507,6 +527,18 @@ class ICLoraPipeline(BasePipeline):
         video_up_mlx = self.vae_encoder.normalize_latent(video_up_mlx)
         video_upscaled = video_up_mlx.transpose(0, 4, 1, 2, 3)  # back to (B,C,F,H,W)
         mx.eval(video_upscaled)
+
+        # upsample_only: decode the upscaled latent directly, skipping the Stage 2
+        # refine (which re-noises and denoises without re-applying the control
+        # reference, drifting off the conditioning). The upsampler output is
+        # already a normalized model-space latent, so it decodes like any other.
+        if upsample_only:
+            audio_latent = self.audio_patchifier.unpatchify(output_1.audio_latent)
+            if self.low_memory:
+                self.image_conditioner.free()
+                self.upsampler = None
+                aggressive_cleanup()
+            return video_upscaled, audio_latent
 
         # Derive full-resolution latent dims from the ACTUAL upscaled shape,
         # not the target height/width (which may round differently).
@@ -617,6 +649,7 @@ class ICLoraPipeline(BasePipeline):
         conditioning_attention_strength: float = 1.0,
         skip_stage_2: bool = False,
         single_stage: bool = False,
+        upsample_only: bool = False,
     ) -> str:
         """Generate IC-LoRA conditioned video+audio and save to file.
 
@@ -634,6 +667,7 @@ class ICLoraPipeline(BasePipeline):
             conditioning_attention_strength: Attention strength for conditioning.
             skip_stage_2: Skip upscale + refine.
             single_stage: Full-res one-pass generation (Union Control topology).
+            upsample_only: Half-res gen + latent upsample, no refine (full-res output).
 
         Returns:
             Path to the output video file.
@@ -652,6 +686,7 @@ class ICLoraPipeline(BasePipeline):
             conditioning_attention_strength=conditioning_attention_strength,
             skip_stage_2=skip_stage_2,
             single_stage=single_stage,
+            upsample_only=upsample_only,
         )
 
         # Free generation components to make room for decoders
