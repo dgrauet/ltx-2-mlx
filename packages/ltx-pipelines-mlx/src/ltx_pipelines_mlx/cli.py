@@ -167,6 +167,36 @@ examples:
             "Mirrors upstream LTX_2_3 --image."
         ),
     )
+    from ltx_pipelines_mlx.utils.args import SegmentAction as _SegmentAction
+
+    gen.add_argument(
+        "--segment",
+        action=_SegmentAction,
+        nargs="+",
+        dest="segments",
+        default=None,
+        metavar="ARG",
+        help=(
+            "Prompt Relay segment: a local prompt gated to a slice of the timeline. "
+            "Form: TEXT [LEN_FRAMES] (LEN_FRAMES in latent frames; omit to auto-distribute "
+            "evenly). Repeatable, in timeline order — e.g. --segment 'a red car' "
+            "--segment 'a blue sky'. The global --prompt applies to all frames. "
+            "Works on all generate modes (video cross-attention); on CFG modes the mask "
+            "applies to the conditional pass only. Not compatible with modality tiling."
+        ),
+    )
+    gen.add_argument(
+        "--relay-epsilon",
+        type=float,
+        default=1e-3,
+        help="Prompt Relay falloff (smaller = sharper temporal gating). Default: 1e-3.",
+    )
+    gen.add_argument(
+        "--relay-strength",
+        type=float,
+        default=1.0,
+        help="Prompt Relay penalty multiplier (higher = stricter segment isolation). Default: 1.0.",
+    )
     gen.add_argument("--steps", type=int, default=None, help="Denoising steps for one-stage (default: 8)")
     gen.add_argument(
         "--two-stage",
@@ -605,6 +635,20 @@ def _cmd_generate(args: argparse.Namespace) -> None:
 
     lora_paths = [(path, float(strength)) for path, strength in args.lora] if args.lora else []
 
+    # Prompt Relay (temporal prompt gating) — applies to every generate mode. Pass the
+    # (possibly mixed) list when any beat is pinned; None entries auto-fill downstream.
+    relay = None
+    if getattr(args, "segments", None):
+        from ltx_core_mlx.conditioning.prompt_relay import PromptRelayInput
+
+        specified = [s.length for s in args.segments]
+        relay = PromptRelayInput(
+            local_prompts=[s.text for s in args.segments],
+            segment_lengths=specified if any(length is not None for length in specified) else None,
+            epsilon=args.relay_epsilon,
+            strength=args.relay_strength,
+        )
+
     if args.enable_teacache and not (args.two_stages_hq or args.two_stage):
         raise SystemExit(
             "--enable-teacache requires --two-stage (or --two-stages-hq, but HQ is not yet "
@@ -652,6 +696,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["cfg_scale"] = args.cfg_scale
         if args.stg_scale is not None:
             kwargs["stg_scale"] = args.stg_scale
+        if relay is not None:
+            kwargs["prompt_relay"] = relay
         pipe.generate_and_save(**kwargs)
 
     elif args.distilled:
@@ -685,6 +731,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["stage1_steps"] = args.stage1_steps
         if args.stage2_steps is not None:
             kwargs["stage2_steps"] = args.stage2_steps
+        if relay is not None:
+            kwargs["prompt_relay"] = relay
         pipe.generate_and_save(**kwargs)
 
     elif args.two_stages_hq or args.two_stage:
@@ -739,6 +787,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["enable_teacache"] = True
             if args.teacache_thresh is not None:
                 kwargs["teacache_thresh"] = args.teacache_thresh
+        if relay is not None:
+            kwargs["prompt_relay"] = relay
         pipe.generate_and_save(**kwargs)
 
     else:

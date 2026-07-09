@@ -15,6 +15,17 @@ from typing import NamedTuple
 from ltx_pipelines_mlx.utils.media_io import DEFAULT_IMAGE_CRF
 
 
+def _append_to_dest(namespace: argparse.Namespace, dest: str, item: object) -> None:
+    """Append ``item`` to the namespace list at ``dest`` (creating it if absent).
+
+    Shared by the repeatable list actions (:class:`ImageAction`,
+    :class:`SegmentAction`) so their append-to-dest handling can't drift.
+    """
+    existing = getattr(namespace, dest, None) or []
+    existing.append(item)
+    setattr(namespace, dest, existing)
+
+
 class ImageConditioningInput(NamedTuple):
     """One image conditioning entry for multi-anchor I2V.
 
@@ -85,9 +96,59 @@ class ImageAction(argparse.Action):
             crf=crf,
         )
 
-        existing = getattr(namespace, self.dest, None) or []
-        existing.append(item)
-        setattr(namespace, self.dest, existing)
+        _append_to_dest(namespace, self.dest, item)
 
 
-__all__ = ["DEFAULT_IMAGE_CRF", "ImageAction", "ImageConditioningInput"]
+class SegmentInput(NamedTuple):
+    """One Prompt Relay segment: a local prompt + optional latent-frame length.
+
+    Args:
+        text: Local prompt gated to this segment's time window.
+        length: Segment length in *latent* frames, or ``None`` to auto-distribute
+            evenly across the timeline.
+    """
+
+    text: str
+    length: int | None = None
+
+
+class SegmentAction(argparse.Action):
+    """Variadic argparse action accepting ``TEXT [LEN_FRAMES]``. Repeatable.
+
+    Each invocation appends one :class:`SegmentInput` (in timeline order) to the
+    namespace list. ``--segment "a red car"`` auto-distributes; ``--segment "a red
+    car" 4`` pins that segment to 4 latent frames.
+    """
+
+    def __call__(  # type: ignore[override]
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values,
+        option_string: str | None = None,
+    ) -> None:
+        if not isinstance(values, list):
+            values = [values]
+        if len(values) not in (1, 2):
+            parser.error(f"{option_string}: expected TEXT [LEN_FRAMES], got {len(values)}: {values}")
+
+        text = values[0]
+        length: int | None = None
+        if len(values) == 2:
+            try:
+                length = int(values[1])
+            except (ValueError, TypeError) as e:
+                parser.error(f"{option_string}: could not parse LEN_FRAMES from {values[1]!r}: {e}")
+            if length <= 0:
+                parser.error(f"{option_string}: LEN_FRAMES must be positive, got {length}")
+
+        _append_to_dest(namespace, self.dest, SegmentInput(text=text, length=length))
+
+
+__all__ = [
+    "DEFAULT_IMAGE_CRF",
+    "ImageAction",
+    "ImageConditioningInput",
+    "SegmentAction",
+    "SegmentInput",
+]
