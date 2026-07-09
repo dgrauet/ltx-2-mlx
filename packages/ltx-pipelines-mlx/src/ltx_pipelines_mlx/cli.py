@@ -167,6 +167,36 @@ examples:
             "Mirrors upstream LTX_2_3 --image."
         ),
     )
+    from ltx_pipelines_mlx.utils.args import SegmentAction as _SegmentAction
+
+    gen.add_argument(
+        "--segment",
+        action=_SegmentAction,
+        nargs="+",
+        dest="segments",
+        default=None,
+        metavar="ARG",
+        help=(
+            "Prompt Relay segment: a local prompt gated to a slice of the timeline. "
+            "Form: TEXT [LEN_FRAMES] (LEN_FRAMES in latent frames; omit to auto-distribute "
+            "evenly). Repeatable, in timeline order — e.g. --segment 'a red car' "
+            "--segment 'a blue sky'. The global --prompt applies to all frames. "
+            "Works on all generate modes (video cross-attention); on CFG modes the mask "
+            "applies to the conditional pass only. Not compatible with modality tiling."
+        ),
+    )
+    gen.add_argument(
+        "--relay-epsilon",
+        type=float,
+        default=1e-3,
+        help="Prompt Relay falloff (smaller = sharper temporal gating). Default: 1e-3.",
+    )
+    gen.add_argument(
+        "--relay-strength",
+        type=float,
+        default=1.0,
+        help="Prompt Relay penalty multiplier (higher = stricter segment isolation). Default: 1.0.",
+    )
     gen.add_argument("--steps", type=int, default=None, help="Denoising steps for one-stage (default: 8)")
     gen.add_argument(
         "--two-stage",
@@ -368,6 +398,40 @@ examples:
         help="IC-LoRA conditioning attention strength 0.0-1.0 (default: 1.0)",
     )
     ic.add_argument("--skip-stage-2", action="store_true", help="Skip stage 2 upsampling (half resolution output)")
+    ic.add_argument(
+        "--single-stage",
+        action="store_true",
+        help=(
+            "Single-stage full-resolution generation with the reference conditioning "
+            "applied throughout (Comfy Union Control topology). No upsampler / Stage 2. "
+            "Tracks the control signal more tightly than two-stage; slower at large res."
+        ),
+    )
+
+    ic.add_argument(
+        "--dev-transformer",
+        default=None,
+        help=(
+            "Dev (non-distilled) transformer filename. Enables dev mode: the "
+            "distilled LoRA is fused alongside the IC-LoRA (Comfy IC-LoRA recipe). "
+            "e.g. transformer.safetensors in a dev model dir"
+        ),
+    )
+
+    ic.add_argument(
+        "--distilled-lora",
+        default="ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+        help=(
+            "Distilled LoRA fused alongside the IC-LoRA in dev mode "
+            "(default: ltx-2.3-22b-distilled-lora-384-1.1.safetensors)"
+        ),
+    )
+    ic.add_argument(
+        "--distilled-lora-strength",
+        type=float,
+        default=0.5,
+        help="Distilled LoRA strength in dev mode (default: 0.5)",
+    )
 
     # --- lipdub ---
     ld = sub.add_parser(
@@ -571,6 +635,20 @@ def _cmd_generate(args: argparse.Namespace) -> None:
 
     lora_paths = [(path, float(strength)) for path, strength in args.lora] if args.lora else []
 
+    # Prompt Relay (temporal prompt gating) — applies to every generate mode. Pass the
+    # (possibly mixed) list when any beat is pinned; None entries auto-fill downstream.
+    relay = None
+    if getattr(args, "segments", None):
+        from ltx_core_mlx.conditioning.prompt_relay import PromptRelayInput
+
+        specified = [s.length for s in args.segments]
+        relay = PromptRelayInput(
+            local_prompts=[s.text for s in args.segments],
+            segment_lengths=specified if any(length is not None for length in specified) else None,
+            epsilon=args.relay_epsilon,
+            strength=args.relay_strength,
+        )
+
     if args.enable_teacache and not (args.two_stages_hq or args.two_stage):
         raise SystemExit(
             "--enable-teacache requires --two-stage (or --two-stages-hq, but HQ is not yet "
@@ -618,6 +696,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["cfg_scale"] = args.cfg_scale
         if args.stg_scale is not None:
             kwargs["stg_scale"] = args.stg_scale
+        if relay is not None:
+            kwargs["prompt_relay"] = relay
         pipe.generate_and_save(**kwargs)
 
     elif args.distilled:
@@ -651,6 +731,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["stage1_steps"] = args.stage1_steps
         if args.stage2_steps is not None:
             kwargs["stage2_steps"] = args.stage2_steps
+        if relay is not None:
+            kwargs["prompt_relay"] = relay
         pipe.generate_and_save(**kwargs)
 
     elif args.two_stages_hq or args.two_stage:
@@ -705,6 +787,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["enable_teacache"] = True
             if args.teacache_thresh is not None:
                 kwargs["teacache_thresh"] = args.teacache_thresh
+        if relay is not None:
+            kwargs["prompt_relay"] = relay
         pipe.generate_and_save(**kwargs)
 
     else:
@@ -924,7 +1008,8 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
     video_conditioning = [(path, float(strength)) for path, strength in args.video_conditioning]
 
     if not args.quiet:
-        print("Mode: IC-LoRA (two-stage)")
+        topology = "single-stage full-res" if args.single_stage else "two-stage"
+        print(f"Mode: IC-LoRA ({topology})")
         for path, strength in lora_paths:
             print(f"  LoRA: {path} (strength={strength})")
         for path, strength in video_conditioning:
@@ -936,8 +1021,18 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         gemma_model_id=args.gemma,
         low_memory=True,
         low_ram_streaming=getattr(args, "low_ram", False),
+        dev_transformer=getattr(args, "dev_transformer", None),
+        distilled_lora=getattr(args, "distilled_lora", None),
+        distilled_lora_strength=getattr(args, "distilled_lora_strength", 0.5),
     )
     pipe.verbose = not args.quiet
+
+    if not args.quiet and pipe.dev_mode:
+        # _effective_lora_paths resolves + validates the distilled LoRA (raises
+        # early if missing) and returns it appended after the task IC-LoRA(s).
+        # A missing --dev-transformer already hard-fails in the constructor.
+        for path, strength in pipe._effective_lora_paths()[len(lora_paths) :]:
+            print(f"  Distilled LoRA (dev mode): {path} (strength={strength})")
 
     pipe.generate_and_save(
         prompt=args.prompt,
@@ -953,6 +1048,7 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         images=args.images,
         conditioning_attention_strength=args.conditioning_strength,
         skip_stage_2=args.skip_stage_2,
+        single_stage=args.single_stage,
     )
     _print_result(args.output, t0, args.quiet)
 

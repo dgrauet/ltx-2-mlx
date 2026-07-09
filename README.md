@@ -14,6 +14,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **LipDub** *(experimental)* — lip-dub a reference video by re-syncing visuals to the source audio
 - **Two-stage generation** — half-res → neural upscale → refine
 - **HQ generation** — res_2s second-order sampler + CFG/STG guidance
+- **Prompt Relay** — sequence local prompts over time within one generation (`--segment "text" [LEN]`); a training-free Gaussian penalty gates each prompt's tokens to a slice of the timeline via the video→text cross-attention. Works across all generate modes; on CFG modes the mask applies to the conditional pass only.
 - **Prompt enhancement** — Gemma 3 12B rewrites short prompts into detailed descriptions
 - **Training** — LoRA fine-tuning with flow matching (T2V and V2V strategies)
 - **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers generate / `--two-stage` / `--two-stages-hq` / a2v / keyframe / ic-lora; bind-time LoRA fusion supports custom distilled-lora-strength)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import mlx.core as mx
 
 from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
+from ltx_core_mlx.utils.weights import derive_quant_params
 
 
 def apply_loras(
@@ -185,21 +186,15 @@ def _fuse_delta_with_quantized(
     scales = model_sd.sd[scales_key] if scales_key else None
     biases = model_sd.sd.get(biases_key) if biases_key else None
 
-    # Infer quantization parameters BEFORE dequantizing.
-    # MLX packs N-bit values into 32-bit ints: pack_factor = 32 / bits.
-    # For a weight (O, packed) and scales (O, num_groups):
-    #   real_features = num_groups * group_size
-    #   packed_features = real_features / pack_factor
-    # So: pack_factor = real_features / packed_features
-    #     bits = 32 / pack_factor
+    # Infer quantization parameters BEFORE dequantizing. The LoRA delta carries
+    # the true (out, in) weight shape, so the real in_features disambiguates
+    # (bits, group_size) for any group size (32/64/128) and bit width (4/8) —
+    # see derive_quant_params, the single home shared with load-time quantization.
     in_features_packed = weight.shape[-1]
     if scales is not None and scales.ndim > 1:
         num_groups = scales.shape[1]
-        # Try group_size=64 (default), compute real features, check consistency
-        group_size = 64
-        in_features_real = num_groups * group_size
-        pack_factor = in_features_real / in_features_packed if in_features_packed > 0 else 4
-        bits = max(2, min(8, round(32 / pack_factor)))
+        in_features_real = deltas.shape[-1]
+        bits, group_size = derive_quant_params(in_features_real, in_features_packed, num_groups)
     else:
         group_size = 64
         bits = 8

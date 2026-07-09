@@ -316,6 +316,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         stg_scale: float = 1.0,
         image: str | None = None,
         images=None,
+        prompt_relay=None,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
         enable_teacache: bool = False,
@@ -350,8 +351,12 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
         """
-        # --- Text encoding ---
-        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
+        # --- Text encoding (Prompt Relay: encode the combined prompt; the negative
+        # prompt is a fixed default, so it is unaffected by the local prompts) ---
+        encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(encode_prompt)
+        num_text_tokens = video_embeds.shape[1]
+        relay_mask = self._prompt_relay_mask_builder(prompt_relay, relay_token_ranges, num_text_tokens)
 
         # --- Load DiT + VAE encoder + upsampler ---
         if self.dit is None:
@@ -475,6 +480,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             video_guider_factory=video_factory,
             audio_guider_factory=audio_factory,
             sigmas=sigmas_1,
+            video_cross_attention_mask=relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
             teacache=teacache_controller,
             tap=tap,
         )
@@ -576,6 +582,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_2,
+            video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -606,12 +613,16 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         audio_guider_params: MultiModalGuiderParams | None = None,
         enable_teacache: bool = False,
         teacache_thresh: float | None = None,
+        prompt_relay=None,
     ) -> str:
         """Generate two-stage video+audio and save to file.
 
         ``stage1_steps`` defaults to ``None`` so subclasses can apply
         their own default (Euler: 30, HQ res_2s: 15) without being
         overridden by this parent method's signature.
+
+        ``prompt_relay`` (a ``PromptRelayInput``) is forwarded only when set;
+        ``generate_two_stage`` wires the mask into both of its denoise loops.
         """
         gen_kwargs: dict = dict(
             prompt=prompt,
@@ -632,6 +643,8 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         )
         if stage1_steps is not None:
             gen_kwargs["stage1_steps"] = stage1_steps
+        if prompt_relay is not None:
+            gen_kwargs["prompt_relay"] = prompt_relay
         video_latent, audio_latent = self.generate_two_stage(**gen_kwargs)
 
         # Free transformer + encoder to make room for decoders

@@ -224,6 +224,7 @@ class BasicAVTransformerBlock(nn.Module):
         audio_cross_rope_freqs: mx.array | None = None,
         video_attention_mask: mx.array | None = None,
         audio_attention_mask: mx.array | None = None,
+        video_cross_attention_mask: mx.array | None = None,
         perturbations: BatchedPerturbationConfig | None = None,
         block_idx: int = 0,
     ) -> tuple[mx.array, mx.array]:
@@ -246,6 +247,8 @@ class BasicAVTransformerBlock(nn.Module):
             audio_rope_freqs: RoPE frequencies for audio.
             video_attention_mask: Attention mask for video self-attention.
             audio_attention_mask: Attention mask for audio self-attention.
+            video_cross_attention_mask: Optional additive bias (broadcastable to
+                (B, 1, Nv, Nt)) for the video→text cross-attention (Prompt Relay).
             perturbations: Optional perturbation config for STG guidance.
                 When provided, generates masks that zero out attention outputs
                 for perturbed samples in the batch.
@@ -323,7 +326,15 @@ class BasicAVTransformerBlock(nn.Module):
             video_normed = self._rms_norm(video_hidden) * (1.0 + v_scale_ca) + v_shift_ca
             vp_shift, vp_scale = self._unpack_adaln(video_prompt_adaln_params, self.prompt_scale_shift_table, 2, vdim)
             text_scaled = video_text_embeds * (1.0 + vp_scale) + vp_shift
-            video_hidden = video_hidden + self.attn2(video_normed, encoder_hidden_states=text_scaled) * v_gate_ca
+            video_hidden = (
+                video_hidden
+                + self.attn2(
+                    video_normed,
+                    encoder_hidden_states=text_scaled,
+                    attention_mask=video_cross_attention_mask,
+                )
+                * v_gate_ca
+            )
 
         # --- 4. Audio text cross-attention ---
         if audio_text_embeds is not None:

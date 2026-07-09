@@ -96,6 +96,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         stg_scale: float = 0.0,
         image: str | None = None,
         images=None,
+        prompt_relay=None,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
         enable_teacache: bool = False,
@@ -109,8 +110,11 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         / ``tap`` are forwarded to ``res2s_denoise_loop`` exactly as in the
         Euler path.
         """
-        # --- Text encoding ---
-        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
+        # --- Text encoding (Prompt Relay: encode the combined prompt) ---
+        encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(encode_prompt)
+        num_text_tokens = video_embeds.shape[1]
+        relay_mask = self._prompt_relay_mask_builder(prompt_relay, relay_token_ranges, num_text_tokens)
 
         # --- Load DiT + VAE encoder + upsampler ---
         if self.dit is None:
@@ -220,6 +224,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
             sigmas=sigmas_1,
             video_guider_factory=video_factory,
             audio_guider_factory=audio_factory,
+            video_cross_attention_mask=relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
             teacache=teacache_controller,
             tap=tap,
         )
@@ -310,6 +315,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_2,
+            video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
         )
         if self.low_memory:
             aggressive_cleanup()

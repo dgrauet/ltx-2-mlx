@@ -10,6 +10,19 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.14.16](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.15...v0.14.16) (2026-07-09)
+
+
+### Features
+
+* Prompt Relay temporal prompt gating ([#61](https://github.com/dgrauet/ltx-2-mlx/issues/61)) ([b9aa475](https://github.com/dgrauet/ltx-2-mlx/commit/b9aa475ac90ebc2bbfe1dffd97ee6bdee5a823f5))
+
+
+### Bug Fixes
+
+* ic-lora dev-mode fuses distilled lora in the main pass; add --single-stage ([#63](https://github.com/dgrauet/ltx-2-mlx/issues/63)) ([dcaf982](https://github.com/dgrauet/ltx-2-mlx/commit/dcaf982be68dd2e893eca4d5851a4ab31f71ca55))
+* support quantized transformers at any group_size (not just 64) ([#60](https://github.com/dgrauet/ltx-2-mlx/issues/60)) ([9af01c8](https://github.com/dgrauet/ltx-2-mlx/commit/9af01c8fe318089abf042d33443fb815877e56d7))
+
 ## [0.14.15](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.14...v0.14.15) (2026-07-01)
 
 
