@@ -458,9 +458,7 @@ class BasePipeline:
         self._load_text_encoder()
         tokenizer = self.text_encoder._tokenizer
         max_length = int(os.environ.get("LTX2_GEMMA_MAX_LENGTH", "1024"))
-        return map_token_ranges(
-            tokenizer, prompt, prompt_relay.local_prompts, max_length=max_length
-        )
+        return map_token_ranges(tokenizer, prompt, prompt_relay.local_prompts, max_length=max_length)
 
     @staticmethod
     def _prompt_relay_mask_builder(
@@ -484,9 +482,7 @@ class BasePipeline:
             distribute_segment_lengths,
         )
 
-        def _build(
-            latent_f: int, latent_h: int, latent_w: int, num_video_tokens: int
-        ) -> mx.array:
+        def _build(latent_f: int, latent_h: int, latent_w: int, num_video_tokens: int) -> mx.array:
             seg_lengths = distribute_segment_lengths(
                 len(prompt_relay.local_prompts), latent_f, prompt_relay.segment_lengths
             )

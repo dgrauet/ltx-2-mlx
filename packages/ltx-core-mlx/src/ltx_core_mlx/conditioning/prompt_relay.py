@@ -239,8 +239,7 @@ def build_relay_mask(
     # without warning. Reject ranges past the text axis.
     if any(end > num_text_tokens for _, end in token_ranges):
         raise ValueError(
-            f"Prompt Relay token ranges {token_ranges} exceed the text axis "
-            f"(num_text_tokens={num_text_tokens})"
+            f"Prompt Relay token ranges {token_ranges} exceed the text axis (num_text_tokens={num_text_tokens})"
         )
     segments = _build_segments(token_ranges, segment_lengths, strength)
     cost = np.zeros((num_video_tokens, num_text_tokens), dtype=np.float32)
