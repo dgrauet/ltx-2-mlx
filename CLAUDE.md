@@ -407,6 +407,8 @@ Flags: `--lora PATH STRENGTH` (repeatable, supports HF repo IDs), `--video-condi
 
 **Dev mode** (`--dev-transformer FILE`, opt-in — default stays distilled): fuses the distilled LoRA (`--distilled-lora`, `--distilled-lora-strength` default 0.5) **alongside** the task IC-LoRA in the same pass and keeps both across stages (Comfy Union-Control recipe). Missing `--dev-transformer` hard-fails (no silent distilled fallback). `--single-stage`: full-res one-pass (no upsampler / Stage 2), takes precedence over `--skip-stage-2`.
 
+**Cheap topologies** (0.14.17, community PR #68): `--upsample-only` = half-res gen (control applied throughout) → 2× latent upsample → decode directly, no refine — fast rough draft (~3× faster than `--single-stage`). Add `--refine-steps N` for a **control-aware refine** after the upsample: the control is re-encoded at full res and re-appended with the IC-LoRA **kept fused** (no clean-model reload), unlike the legacy Stage 2 which is control-blind. `N` maps onto the distilled sigma tail (`N=3` == `STAGE_2_SIGMAS` depth; capped at 8); each refine step is ~8× a Stage 1 step (full-res gen + appended control tokens, O(n²) attention). `--refine-steps` without `--upsample-only` is silently ignored. Both flags ignored under `--single-stage`/`--skip-stage-2`.
+
 #### Static-scene I2V recipe (preserve identity)
 
 The `generate` modes (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distilled`) don't preserve the input image's identity over 4 sec with descriptive prompts — even with multi-anchor I2V (`--image PATH 0 1.0 --image PATH 96 1.0`) or STG=1.0. The model uses the anchor as initialization but generates freely afterwards, drifting toward the prompt's distribution. Same behavior upstream.
@@ -739,6 +741,7 @@ Uses the distilled model (no CFG) with LoRA fused for Stage 1 only.
 - **Stage 2 clean transformer**: After Stage 1, the LoRA-fused transformer is deleted and a fresh distilled transformer is loaded. Matches reference's separate `ModelLedger`s.
 - **Upsampler denorm/renorm**: The neural upsampler must receive denormalized latents (`vae_encoder.denormalize_latent()` before, `normalize_latent()` after). Without this, Stage 2 produces garbage.
 - **Reference resolution**: Must be 32-aligned for VAE encoder. Computed via `compute_video_latent_shape(num_frames, h // scale, w // scale)` then `* 32`.
+- **Half-res dims floored to mult-32** (0.14.17): `gen_h = (height//2//32)*32` — raw `height//2` crashed the VAE encoder's `space_to_depth` for non-mult-64 targets with `--image` (incl. default 480). Latent-neutral; output snaps down at non-mult-64 dims (requested 480 high → 448 out).
 - **Stage 2 positions**: Derived from actual upscaled dims (`H_half * 2`, `W_half * 2`), not target `height/width` (which may round differently).
 - **Motion Track BGR**: Control videos use BGR channel order (matches IC-LoRA training format).
 - **LoRA key remapping**: Uses `LTXV_LORA_COMFY_RENAMING_MAP` (ComfyUI/diffusers → MLX keys). All 480 LoRA targets match model keys.
