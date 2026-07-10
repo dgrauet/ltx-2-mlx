@@ -399,6 +399,28 @@ examples:
     )
     ic.add_argument("--skip-stage-2", action="store_true", help="Skip stage 2 upsampling (half resolution output)")
     ic.add_argument(
+        "--upsample-only",
+        action="store_true",
+        help=(
+            "Half-res generative pass (control applied throughout) + 2x latent "
+            "upsample, then decode directly at full resolution — skips the Stage 2 "
+            "refine that drops control adherence. ~3x faster than --single-stage; "
+            "control fidelity sits between two-stage and native single-stage."
+        ),
+    )
+    ic.add_argument(
+        "--refine-steps",
+        type=int,
+        default=None,
+        help=(
+            "With --upsample-only, run an N-step control-aware refine after the "
+            "upsample: re-encodes the control at full resolution and re-applies it "
+            "with the IC-LoRA fused, cleaning upsampler artifacts without the "
+            "adherence drift of two-stage. 3 ~ matches the standard Stage 2 depth; "
+            "higher = more cleanup + more drift from the draft (capped at 8)."
+        ),
+    )
+    ic.add_argument(
         "--single-stage",
         action="store_true",
         help=(
@@ -1008,7 +1030,14 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
     video_conditioning = [(path, float(strength)) for path, strength in args.video_conditioning]
 
     if not args.quiet:
-        topology = "single-stage full-res" if args.single_stage else "two-stage"
+        if args.single_stage:
+            topology = "single-stage full-res"
+        elif args.upsample_only and args.refine_steps:
+            topology = f"upsample + {args.refine_steps}-step control-aware refine (half-res gen + 2x upsample)"
+        elif args.upsample_only:
+            topology = "upsample-only (half-res gen + 2x upsample, no refine)"
+        else:
+            topology = "two-stage"
         print(f"Mode: IC-LoRA ({topology})")
         for path, strength in lora_paths:
             print(f"  LoRA: {path} (strength={strength})")
@@ -1049,6 +1078,8 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         conditioning_attention_strength=args.conditioning_strength,
         skip_stage_2=args.skip_stage_2,
         single_stage=args.single_stage,
+        upsample_only=args.upsample_only,
+        refine_steps=args.refine_steps,
     )
     _print_result(args.output, t0, args.quiet)
 
