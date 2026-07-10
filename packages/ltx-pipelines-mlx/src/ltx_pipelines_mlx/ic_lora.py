@@ -365,6 +365,7 @@ class ICLoraPipeline(BasePipeline):
         skip_stage_2: bool = False,
         single_stage: bool = False,
         upsample_only: bool = False,
+        refine_steps: int | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Generate video with IC-LoRA reference conditioning.
 
@@ -396,6 +397,16 @@ class ICLoraPipeline(BasePipeline):
                 is encoded at half res, so fine-detail adherence sits between
                 two-stage and native single-stage. Ignored if ``single_stage`` or
                 ``skip_stage_2`` is set.
+            refine_steps: Only meaningful with ``upsample_only``. When > 0, run a
+                *control-aware* refine after the upsample instead of decoding raw:
+                the control reference is re-encoded at full resolution and re-appended
+                with the IC-LoRA kept fused, then a short denoise cleans the upsampler
+                artifacts while the (now full-res) control sharpens adherence. Unlike
+                the legacy two-stage Stage 2, this does NOT reload a clean model and
+                does NOT drop the control. Steps map onto the distilled sigma tail:
+                more steps start from a higher sigma (more cleanup, more drift from the
+                draft). Capped at ``len(DISTILLED_SIGMAS) - 1``. ``refine_steps=3``
+                matches the STAGE_2_SIGMAS schedule.
 
         Returns:
             Tuple of (video_latent, audio_latent).
@@ -528,11 +539,15 @@ class ICLoraPipeline(BasePipeline):
         video_upscaled = video_up_mlx.transpose(0, 4, 1, 2, 3)  # back to (B,C,F,H,W)
         mx.eval(video_upscaled)
 
-        # upsample_only: decode the upscaled latent directly, skipping the Stage 2
-        # refine (which re-noises and denoises without re-applying the control
-        # reference, drifting off the conditioning). The upsampler output is
-        # already a normalized model-space latent, so it decodes like any other.
-        if upsample_only:
+        # upsample_only without refine: decode the upscaled latent directly,
+        # skipping any Stage 2 denoise. The upsampler output is already a
+        # normalized model-space latent, so it decodes like any other.
+        # With refine_steps > 0 we instead fall through to a control-aware refine
+        # (below) that keeps the IC-LoRA fused and re-applies the control at full
+        # res — cleaning upsampler artifacts without the adherence drift of the
+        # legacy two-stage Stage 2.
+        control_aware_refine = upsample_only and bool(refine_steps)
+        if upsample_only and not control_aware_refine:
             audio_latent = self.audio_patchifier.unpatchify(output_1.audio_latent)
             if self.low_memory:
                 self.image_conditioner.free()
@@ -571,27 +586,57 @@ class ICLoraPipeline(BasePipeline):
                 )
             )
 
+        # Control-aware refine: re-encode the control reference at full resolution
+        # and append it (with the IC-LoRA still fused, below) so the refine tracks
+        # the control — the whole point of this path. Stage 1 only saw the control
+        # at half res; here it gets the full-res signal to recover fine detail
+        # (e.g. fast-moving limbs). Legacy two-stage skips this, which is why its
+        # Stage 2 drifts off the conditioning.
+        if control_aware_refine:
+            append_ic_lora_reference_video_conditionings(
+                conditionings_2,
+                video_conditioning,
+                height=enc_h_full,
+                width=enc_w_full,
+                num_frames=num_frames,
+                video_encoder=self.vae_encoder,
+                reference_downscale_factor=self.reference_downscale_factor,
+                conditioning_attention_strength=conditioning_attention_strength,
+                conditioning_attention_mask=conditioning_attention_mask,
+            )
+
         # Free VAE encoder + upsampler before Stage 2.
         if self.low_memory:
             self.image_conditioner.free()
             self.upsampler = None
         # Dev mode keeps both LoRAs fused across stages (matches Comfy two-stage
         # IC-LoRA workflows, which never reload a clean model). Legacy distilled
-        # mode reloads the clean transformer (separate model ledgers).
-        if not self.dev_mode:
+        # mode reloads the clean transformer (separate model ledgers). The
+        # control-aware refine also keeps the fused model — the IC-LoRA must stay
+        # present to consume the re-appended reference tokens.
+        if not self.dev_mode and not control_aware_refine:
             self._reload_clean_transformer()
 
         video_tokens_up, _ = self.video_patchifier.patchify(video_upscaled)
 
-        sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
+        if control_aware_refine:
+            # Refine depth maps onto the distilled sigma tail: N steps ending at
+            # 0.0, starting from a higher sigma for larger N (more cleanup, more
+            # drift from the upscaled draft). refine_steps=3 == STAGE_2_SIGMAS.
+            n = max(1, min(int(refine_steps), len(DISTILLED_SIGMAS) - 1))
+            sigmas_2 = DISTILLED_SIGMAS[len(DISTILLED_SIGMAS) - 1 - n :]
+        else:
+            sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
         start_sigma = sigmas_2[0]
 
         video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
 
         # Stage 2 video: scalar-blend bit-matches legacy inline arithmetic.
-        # IC-LoRA Stage 1 already accepts a small RNG-shift drift due to the
-        # reference-token shape change; Stage 2 stays bit-exact since cond_2
-        # is at most a LatentIndex replace (no shape change).
+        # In legacy two-stage, cond_2 is at most a LatentIndex replace (no shape
+        # change) so Stage 2 stays bit-exact. The control-aware refine additionally
+        # appends the reference tokens here (same shape-change / RNG-shift pattern
+        # as Stage 1's reference append), so it is intentionally not bit-exact with
+        # the legacy path.
         video_state_2 = create_noised_state(
             base_shape=video_tokens_up.shape,
             conditionings=conditionings_2,
@@ -627,7 +672,13 @@ class ICLoraPipeline(BasePipeline):
         if self.low_memory:
             aggressive_cleanup()
 
-        video_latent = self.video_patchifier.unpatchify(output_2.video_latent, (F, H_full, W_full))
+        # Control-aware refine appended reference tokens — strip them before
+        # unpatchify (mirrors the Stage 1 gen-token extraction). Legacy two-stage
+        # has no appended tokens, so its full latent unpatchifies as-is.
+        video_out = output_2.video_latent
+        if control_aware_refine:
+            video_out = video_out[:, : F * H_full * W_full, :]
+        video_latent = self.video_patchifier.unpatchify(video_out, (F, H_full, W_full))
         audio_latent = self.audio_patchifier.unpatchify(output_2.audio_latent)
 
         return video_latent, audio_latent
@@ -650,6 +701,7 @@ class ICLoraPipeline(BasePipeline):
         skip_stage_2: bool = False,
         single_stage: bool = False,
         upsample_only: bool = False,
+        refine_steps: int | None = None,
     ) -> str:
         """Generate IC-LoRA conditioned video+audio and save to file.
 
@@ -668,6 +720,8 @@ class ICLoraPipeline(BasePipeline):
             skip_stage_2: Skip upscale + refine.
             single_stage: Full-res one-pass generation (Union Control topology).
             upsample_only: Half-res gen + latent upsample, no refine (full-res output).
+            refine_steps: With upsample_only, run an N-step control-aware refine
+                after the upsample (full-res control re-applied, IC-LoRA fused).
 
         Returns:
             Path to the output video file.
@@ -687,6 +741,7 @@ class ICLoraPipeline(BasePipeline):
             skip_stage_2=skip_stage_2,
             single_stage=single_stage,
             upsample_only=upsample_only,
+            refine_steps=refine_steps,
         )
 
         # Free generation components to make room for decoders

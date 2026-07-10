@@ -409,6 +409,18 @@ examples:
         ),
     )
     ic.add_argument(
+        "--refine-steps",
+        type=int,
+        default=None,
+        help=(
+            "With --upsample-only, run an N-step control-aware refine after the "
+            "upsample: re-encodes the control at full resolution and re-applies it "
+            "with the IC-LoRA fused, cleaning upsampler artifacts without the "
+            "adherence drift of two-stage. 3 ~ matches the standard Stage 2 depth; "
+            "higher = more cleanup + more drift from the draft (capped at 8)."
+        ),
+    )
+    ic.add_argument(
         "--single-stage",
         action="store_true",
         help=(
@@ -1020,6 +1032,8 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
     if not args.quiet:
         if args.single_stage:
             topology = "single-stage full-res"
+        elif args.upsample_only and args.refine_steps:
+            topology = f"upsample + {args.refine_steps}-step control-aware refine (half-res gen + 2x upsample)"
         elif args.upsample_only:
             topology = "upsample-only (half-res gen + 2x upsample, no refine)"
         else:
@@ -1065,6 +1079,7 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         skip_stage_2=args.skip_stage_2,
         single_stage=args.single_stage,
         upsample_only=args.upsample_only,
+        refine_steps=args.refine_steps,
     )
     _print_result(args.output, t0, args.quiet)
 
