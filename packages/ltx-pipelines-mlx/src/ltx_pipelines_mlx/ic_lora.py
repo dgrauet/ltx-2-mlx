@@ -18,7 +18,10 @@ from pathlib import Path
 
 import mlx.core as mx
 
-from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
+from ltx_core_mlx.components.patchifiers import (
+    compute_video_latent_shape,
+    snap_output_dimensions,
+)
 from ltx_core_mlx.loader import (
     LTXV_LORA_BLOCK_PREFIX,
     LTXV_LORA_COMFY_RENAMING_MAP,
@@ -437,20 +440,18 @@ class ICLoraPipeline(BasePipeline):
         self._fuse_loras()
 
         # --- Stage 1: generation with IC-LoRA ---
-        # Two-stage generates at half res (Stage 2 upscales 2x). Single-stage
-        # generates directly at full target res (Comfy Union Control topology).
+        # Two-stage generates at half res (Stage 2 upscales 2x, so full dims must
+        # be multiples of 64); single-stage generates directly at full target res
+        # (Comfy Union Control topology, multiples of 32). Snap up front and report
+        # if the requested dims changed; downstream derivations stay consistent.
+        height, width = snap_output_dimensions(height, width, two_stage=not single_stage)
         if single_stage:
             gen_h, gen_w = height, width
         else:
-            # Half-res stages must land on a VAE-compatible grid: image
-            # conditioning encodes at these exact pixel dims, and the VAE's
-            # space_to_depth requires multiples of 32 (raw height//2 can leave a
-            # remainder, e.g. 928//2=464). Floor to a multiple of 32. This is
-            # latent-neutral — compute_video_latent_shape already floors //32, so
-            # the latent grid (and the ref-video resolution, which snaps the same
-            # way) is unchanged versus the raw half dims.
-            gen_h = (height // 2 // 32) * 32
-            gen_w = (width // 2 // 32) * 32
+            # Stage 1 encodes image conditioning at these exact half-res pixel dims;
+            # the snap above guarantees height/width are multiples of 64, so half is
+            # already a multiple of 32 (the VAE space_to_depth grid).
+            gen_h, gen_w = height // 2, width // 2
         F, H_half, W_half = compute_video_latent_shape(num_frames, gen_h, gen_w)
         video_shape = (1, F * H_half * W_half, 128)
         audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)

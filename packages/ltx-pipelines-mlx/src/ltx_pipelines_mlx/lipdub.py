@@ -16,7 +16,10 @@ import logging
 
 import mlx.core as mx
 
-from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
+from ltx_core_mlx.components.patchifiers import (
+    compute_video_latent_shape,
+    snap_output_dimensions,
+)
 from ltx_core_mlx.conditioning.types.reference_audio_cond import AudioConditionByReferenceLatent
 from ltx_core_mlx.model.audio_vae import encode_audio
 from ltx_core_mlx.model.transformer.model import X0Model
@@ -171,6 +174,8 @@ class LipDubPipeline(ICLoraPipeline):
         self._fuse_loras()
 
         # ===== Stage 1 (half-res) =====
+        # Snap to the two-stage grid (multiples of 64) and report if it changed.
+        height, width = snap_output_dimensions(height, width, two_stage=True)
         half_h, half_w = height // 2, width // 2
         F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
         video_shape = (1, F * H_half * W_half, 128)

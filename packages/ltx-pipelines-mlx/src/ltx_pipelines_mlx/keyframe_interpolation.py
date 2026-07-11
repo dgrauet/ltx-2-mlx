@@ -19,7 +19,10 @@ from ltx_core_mlx.components.guiders import (
     MultiModalGuiderParams,
     create_multimodal_guider_factory,
 )
-from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
+from ltx_core_mlx.components.patchifiers import (
+    compute_video_latent_shape,
+    snap_output_dimensions,
+)
 from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder
@@ -150,6 +153,8 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
 
         # Compute half-res latent dimensions (matching reference: height//2, width//2
         # with integer division by spatial compression factor 32).
+        # Snap to the two-stage grid (multiples of 64) and report if it changed.
+        height, width = snap_output_dimensions(height, width, two_stage=True)
         half_h, half_w = height // 2, width // 2
         F_half, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
 

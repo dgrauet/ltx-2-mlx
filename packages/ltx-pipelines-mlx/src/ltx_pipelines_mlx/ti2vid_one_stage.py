@@ -32,7 +32,10 @@ from ltx_core_mlx.components.guiders import (
     MultiModalGuiderParams,
     create_multimodal_guider_factory,
 )
-from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
+from ltx_core_mlx.components.patchifiers import (
+    compute_video_latent_shape,
+    snap_output_dimensions,
+)
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import (
@@ -153,6 +156,8 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         assert self.vae_encoder is not None
 
         # --- Single stage at full target resolution ---
+        # Snap to the single-stage grid (multiples of 32) and report if it changed.
+        height, width = snap_output_dimensions(height, width, two_stage=False)
         F, H, W = compute_video_latent_shape(num_frames, height, width)
         video_shape = (1, F * H * W, 128)
         audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)

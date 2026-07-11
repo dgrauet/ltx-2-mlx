@@ -114,7 +114,7 @@ def append_ic_lora_reference_video_conditionings(
     scale = reference_downscale_factor
     if scale != 1 and (height % scale != 0 or width % scale != 0):
         raise ValueError(
-            f"Output dimensions ({height}x{width}) must be divisible by reference_downscale_factor ({scale})"
+            f"Output dimensions ({width}x{height}) must be divisible by reference_downscale_factor ({scale})"
         )
 
     _, ref_H_lat, ref_W_lat = compute_video_latent_shape(num_frames, height // scale, width // scale)
