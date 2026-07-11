@@ -84,8 +84,8 @@ class TestWarning:
         msg = caplog.records[0].getMessage()
         assert "two-stage" in msg
         assert "multiples of 64" in msg
-        assert "448x704" in msg  # snapped output
-        assert "requested 480x704" in msg
+        assert "704x448" in msg  # snapped output (WxH)
+        assert "requested 704x480" in msg
         assert "--single-stage" in msg  # actionable hint
 
     def test_single_stage_message_has_no_single_stage_hint(self, caplog):

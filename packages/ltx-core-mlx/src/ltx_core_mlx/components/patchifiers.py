@@ -171,10 +171,10 @@ def snap_output_dimensions(
             "%s snaps dims to multiples of %d; output will be %dx%d (requested %dx%d).%s",
             stage,
             modulus,
-            snapped_height,
             snapped_width,
-            height,
+            snapped_height,
             width,
+            height,
             hint,
         )
 
