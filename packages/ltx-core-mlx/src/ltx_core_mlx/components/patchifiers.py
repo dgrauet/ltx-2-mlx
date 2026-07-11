@@ -5,7 +5,14 @@ Ported from ltx-core/src/ltx_core/components/patchifiers.py
 
 from __future__ import annotations
 
+import logging
+
 import mlx.core as mx
+
+logger = logging.getLogger(__name__)
+
+# VAE spatial compression: pixel dims must be multiples of this to encode cleanly.
+SPATIAL_COMPRESSION = 32
 
 
 class VideoLatentPatchifier:
@@ -115,3 +122,60 @@ def compute_video_latent_shape(
     H = height // spatial_compression
     W = width // spatial_compression
     return F, H, W
+
+
+def snap_output_dimensions(
+    height: int,
+    width: int,
+    *,
+    two_stage: bool,
+    warn: bool = True,
+) -> tuple[int, int]:
+    """Snap output dimensions down to the grid the VAE + pipeline topology require.
+
+    The video VAE encodes in blocks of ``SPATIAL_COMPRESSION`` (32) px, so every
+    pipeline already floors its latent grid ``//32`` (see
+    :func:`compute_video_latent_shape`). Two-stage pipelines additionally generate
+    Stage 1 at half resolution (``height // 2``) and upscale ``2x``, so the *full*
+    dimension must be a multiple of ``64`` for the half-res grid to itself be a
+    multiple of 32. Single-stage pipelines only need multiples of ``32``.
+
+    This snap is not a new behavior — non-conforming dims are already floored
+    silently downstream (and the CLI default ``--height 480`` is not a multiple of
+    64, so a bare two-stage run already snaps 480 -> 448). This helper centralizes
+    the arithmetic so every pipeline reports the same output size the same way,
+    rather than each silently rounding. It is a pure floor: it never raises and
+    never rounds up (staying within the requested/memory budget), and it is
+    idempotent, so it composes safely through nested/chained flows.
+
+    Args:
+        height: Requested output height in pixels.
+        width: Requested output width in pixels.
+        two_stage: True for half-res Stage-1 pipelines (modulus 64); False for
+            single-stage / one-stage pipelines (modulus 32).
+        warn: When True, log an informational warning (once) if either dim was
+            snapped, naming the resulting output size.
+
+    Returns:
+        ``(snapped_height, snapped_width)`` — each floored to the required
+        multiple and clamped to at least one tile.
+    """
+    modulus = 2 * SPATIAL_COMPRESSION if two_stage else SPATIAL_COMPRESSION
+    snapped_height = max(modulus, (height // modulus) * modulus)
+    snapped_width = max(modulus, (width // modulus) * modulus)
+
+    if warn and (snapped_height != height or snapped_width != width):
+        stage = "two-stage half-res" if two_stage else "single-stage"
+        hint = " Use --single-stage for exact dims." if two_stage else ""
+        logger.warning(
+            "%s snaps dims to multiples of %d; output will be %dx%d (requested %dx%d).%s",
+            stage,
+            modulus,
+            snapped_height,
+            snapped_width,
+            height,
+            width,
+            hint,
+        )
+
+    return snapped_height, snapped_width
