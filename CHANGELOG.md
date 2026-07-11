@@ -10,6 +10,18 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.14.18](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.17...v0.14.18) (2026-07-11)
+
+
+### Features
+
+* warn on output dimension snapping via shared helper ([#72](https://github.com/dgrauet/ltx-2-mlx/issues/72)) ([42ea2bb](https://github.com/dgrauet/ltx-2-mlx/commit/42ea2bb6dc29e9ff974def828d95de192ef11393))
+
+
+### Documentation
+
+* document ic-lora --upsample-only / --refine-steps in CLAUDE.md ([#70](https://github.com/dgrauet/ltx-2-mlx/issues/70)) ([8e1526d](https://github.com/dgrauet/ltx-2-mlx/commit/8e1526d3147086d8981b30f1e03496012c059125))
+
 ## [0.14.17](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.16...v0.14.17) (2026-07-10)
 
 
