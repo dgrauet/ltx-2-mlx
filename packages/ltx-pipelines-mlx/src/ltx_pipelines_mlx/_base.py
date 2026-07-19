@@ -355,6 +355,16 @@ class BasePipeline:
         """Inheritance wrapper around :func:`utils._orchestration.decode_and_save_video`."""
         from ltx_pipelines_mlx.utils._orchestration import decode_and_save_video as _impl
 
+        if self.low_memory and self.dit is not None:
+            # The latents are materialized: the DiT is no longer needed. In the
+            # two-stage strength-1.0 swap path it is a fully-loaded (non-streamed)
+            # ~8 GB q8 transformer; keeping it across the ~13 GB-peak VAE decode
+            # pushes a 32 GB Mac past the jetsam limit (observed: SIGKILL with
+            # active=7.8 GB at decode entry). load() reloads it on demand.
+            self.dit = None
+            self._loaded = False
+            aggressive_cleanup()
+
         with phase("Decoding video + audio + muxing", verbose=self.verbose):
             return _impl(
                 self.video_decoder_block,
