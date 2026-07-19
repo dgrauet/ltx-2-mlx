@@ -10,6 +10,15 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.14.19](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.18...v0.14.19) (2026-07-19)
+
+
+### Bug Fixes
+
+* explain macOS GPU-watchdog kills instead of dying cryptically ([#75](https://github.com/dgrauet/ltx-2-mlx/issues/75)) ([#78](https://github.com/dgrauet/ltx-2-mlx/issues/78)) ([8f43c23](https://github.com/dgrauet/ltx-2-mlx/commit/8f43c23e1cba9ad586afeccde07d9e851903c0cf))
+* free the DiT before VAE decode in low-memory mode ([#74](https://github.com/dgrauet/ltx-2-mlx/issues/74)) ([#76](https://github.com/dgrauet/ltx-2-mlx/issues/76)) ([89d5400](https://github.com/dgrauet/ltx-2-mlx/commit/89d54005a06c7d35d8557b46fd30c354252c8d7a))
+* stop the Gemma encoder from widening a stricter cache limit ([#79](https://github.com/dgrauet/ltx-2-mlx/issues/79)) ([#80](https://github.com/dgrauet/ltx-2-mlx/issues/80)) ([aed35d6](https://github.com/dgrauet/ltx-2-mlx/commit/aed35d63714e71a6b8ed56b54aba3b9aac207648))
+
 ## [0.14.18](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.17...v0.14.18) (2026-07-11)
 
 
