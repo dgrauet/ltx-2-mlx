@@ -77,10 +77,21 @@ class GemmaLanguageModel(nn.Module):
 
     @staticmethod
     def _ensure_metal_headroom() -> None:
-        """Set Metal cache limit to leave headroom for the GPU watchdog."""
+        """Cap the Metal cache limit to leave headroom (min semantics).
+
+        This is a CAP below the default, never a raise: a stricter limit
+        already configured (e.g. ``mx.set_cache_limit(0)`` by low-ram
+        streaming) is a deliberate setting and must survive prompt encoding
+        (#79 — the unconditional set used to clobber low-ram's 0 for the
+        whole rest of the run, retaining 8-21 GB of cache through decode).
+        ``mx.set_cache_limit`` returns the previous value, which is the only
+        way to read the current limit.
+        """
         try:
-            mem_limit = mx.device_info()["memory_size"]
-            mx.set_cache_limit(int(mem_limit * 0.9))
+            cap = int(mx.device_info()["memory_size"] * 0.9)
+            previous = mx.set_cache_limit(cap)
+            if previous < cap:
+                mx.set_cache_limit(previous)
         except Exception:
             pass
 
