@@ -641,7 +641,19 @@ examples:
         "preprocess": _cmd_preprocess,
         "slice": _cmd_slice,
     }
-    commands[args.command](args)
+    try:
+        commands[args.command](args)
+    except RuntimeError as e:
+        # #75: the macOS GPU watchdog kills sustained GPU work with a cryptic
+        # Metal error; explain it and point at the mitigations. Never set the
+        # driver env var on the user's behalf — the trade-off is theirs.
+        from ltx_pipelines_mlx.utils.watchdog import watchdog_hint
+
+        hint = watchdog_hint(e)
+        if hint is None:
+            raise
+        print(f"\nerror: {e}\n\n{hint}", file=sys.stderr)
+        sys.exit(1)
 
 
 # =============================================================================
