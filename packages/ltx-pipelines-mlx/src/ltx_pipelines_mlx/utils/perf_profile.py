@@ -4,17 +4,96 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import resource
+import subprocess
 import sys
 import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, TextIO
 
 from ltx_pipelines_mlx.utils.progress import _set_phase_capture, _set_profile_sink
 
 _GB = 1024**3
+
+
+def _process_memory_snapshot() -> dict[str, float | None]:
+    """Read current RSS and the Darwin physical-footprint high-water mark."""
+    rss_gb: float | None = None
+    footprint_gb: float | None = None
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        rss_bytes = usage.ru_maxrss if platform.system() == "Darwin" else usage.ru_maxrss * 1024
+        rss_gb = rss_bytes / _GB
+    except Exception:  # pragma: no cover - platform defensive path
+        pass
+
+    if platform.system() == "Darwin":
+        try:
+            import ctypes
+
+            class RUsageInfoV4(ctypes.Structure):
+                _fields_ = [
+                    ("ri_uuid", ctypes.c_uint8 * 16),
+                    ("ri_user_time", ctypes.c_uint64),
+                    ("ri_system_time", ctypes.c_uint64),
+                    ("ri_pkg_idle_wkups", ctypes.c_uint64),
+                    ("ri_interrupt_wkups", ctypes.c_uint64),
+                    ("ri_pageins", ctypes.c_uint64),
+                    ("ri_wired_size", ctypes.c_uint64),
+                    ("ri_resident_size", ctypes.c_uint64),
+                    ("ri_phys_footprint", ctypes.c_uint64),
+                    ("ri_proc_start_abstime", ctypes.c_uint64),
+                    ("ri_proc_exit_abstime", ctypes.c_uint64),
+                    ("ri_child_user_time", ctypes.c_uint64),
+                    ("ri_child_system_time", ctypes.c_uint64),
+                    ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+                    ("ri_child_interrupt_wkups", ctypes.c_uint64),
+                    ("ri_child_pageins", ctypes.c_uint64),
+                    ("ri_child_elapsed_abstime", ctypes.c_uint64),
+                    ("ri_diskio_bytesread", ctypes.c_uint64),
+                    ("ri_diskio_byteswritten", ctypes.c_uint64),
+                    ("ri_cpu_time_qos_default", ctypes.c_uint64),
+                    ("ri_cpu_time_qos_maintenance", ctypes.c_uint64),
+                    ("ri_cpu_time_qos_background", ctypes.c_uint64),
+                    ("ri_cpu_time_qos_utility", ctypes.c_uint64),
+                    ("ri_cpu_time_qos_legacy", ctypes.c_uint64),
+                    ("ri_cpu_time_qos_user_initiated", ctypes.c_uint64),
+                    ("ri_cpu_time_qos_user_interactive", ctypes.c_uint64),
+                    ("ri_billed_system_time", ctypes.c_uint64),
+                    ("ri_serviced_system_time", ctypes.c_uint64),
+                    ("ri_logical_writes", ctypes.c_uint64),
+                    ("ri_lifetime_max_phys_footprint", ctypes.c_uint64),
+                    ("ri_instructions", ctypes.c_uint64),
+                    ("ri_cycles", ctypes.c_uint64),
+                    ("ri_billed_energy", ctypes.c_uint64),
+                    ("ri_serviced_energy", ctypes.c_uint64),
+                    ("ri_interval_max_phys_footprint", ctypes.c_uint64),
+                    ("ri_runnable_time", ctypes.c_uint64),
+                ]
+
+            library = ctypes.CDLL("/usr/lib/libproc.dylib")
+            proc_pid_rusage = library.proc_pid_rusage
+            proc_pid_rusage.argtypes = [
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.POINTER(RUsageInfoV4),
+            ]
+            proc_pid_rusage.restype = ctypes.c_int
+            info = RUsageInfoV4()
+            if proc_pid_rusage(os.getpid(), 4, ctypes.byref(info)) == 0:
+                footprint_gb = info.ri_lifetime_max_phys_footprint / _GB
+                rss_gb = info.ri_resident_size / _GB
+        except Exception:  # pragma: no cover - platform defensive path
+            pass
+    return {
+        "process_rss_gb": rss_gb,
+        "process_lifetime_max_phys_footprint_gb": footprint_gb,
+    }
 
 
 def _mlx_memory_snapshot() -> dict[str, float | str | None]:
@@ -36,12 +115,79 @@ def _mlx_memory_snapshot() -> dict[str, float | str | None]:
         }
 
 
+@lru_cache(maxsize=1)
+def runtime_identity() -> dict[str, object]:
+    """Return package, MLX, device, and source revision identity."""
+    import importlib.metadata
+
+    versions: dict[str, str | None] = {}
+    for distribution in ("ltx-pipelines-mlx", "ltx-core-mlx", "mlx", "mlx-metal"):
+        try:
+            versions[distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            versions[distribution] = None
+
+    commit = os.environ.get("LTX2_RUNTIME_COMMIT")
+    dirty: bool | None = None
+    source_root: Path | None = None
+    for parent in Path(__file__).resolve().parents:
+        if (parent / ".git").exists():
+            source_root = parent
+            break
+    if source_root is not None and commit is None:
+        try:
+            resolved = subprocess.run(
+                ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=True,
+            )
+            commit = resolved.stdout.strip()
+            status = subprocess.run(
+                ["git", "-C", str(source_root), "status", "--porcelain", "--untracked-files=no"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=True,
+            )
+            dirty = bool(status.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if commit is None:
+        commit = f"package:{versions['ltx-pipelines-mlx'] or 'unknown'}"
+
+    device: dict[str, object] = {}
+    try:
+        import mlx.core as mx
+
+        device = dict(mx.device_info())
+    except Exception:  # pragma: no cover - unsupported MLX runtime
+        pass
+    return {
+        "runtime_commit": commit,
+        "runtime_dirty": dirty,
+        "runtime_version": versions["ltx-pipelines-mlx"],
+        "core_version": versions["ltx-core-mlx"],
+        "mlx_version": versions["mlx"],
+        "mlx_metal_version": versions["mlx-metal"],
+        "device_name": device.get("device_name"),
+        "device_architecture": device.get("architecture"),
+        "device_memory_bytes": device.get("memory_size"),
+        "device_recommended_working_set_bytes": device.get(
+            "max_recommended_working_set_size"
+        ),
+    }
+
+
 class _JsonlProfiler:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser()
         self.run_id = str(uuid.uuid4())
         self.started = time.perf_counter()
         self._stream: TextIO | None = None
+        self._observed_peak_mlx_gb = 0.0
+        self._observed_peak_phys_footprint_gb = 0.0
 
     def open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,13 +201,40 @@ class _JsonlProfiler:
     def emit(self, event: str, **fields: Any) -> None:
         if self._stream is None:
             raise RuntimeError("Profiler stream is not open")
+        memory = {
+            **_mlx_memory_snapshot(),
+            **_process_memory_snapshot(),
+        }
+        mlx_peak = memory.get("mlx_peak_gb")
+        if isinstance(mlx_peak, (float, int)):
+            self._observed_peak_mlx_gb = max(
+                self._observed_peak_mlx_gb,
+                float(mlx_peak),
+            )
+        footprint_peak = memory.get(
+            "process_lifetime_max_phys_footprint_gb"
+        )
+        if isinstance(footprint_peak, (float, int)):
+            self._observed_peak_phys_footprint_gb = max(
+                self._observed_peak_phys_footprint_gb,
+                float(footprint_peak),
+            )
+        if event in {"run_end", "run_error"}:
+            fields.setdefault(
+                "observed_peak_mlx_gb",
+                self._observed_peak_mlx_gb,
+            )
+            fields.setdefault(
+                "observed_peak_phys_footprint_gb",
+                self._observed_peak_phys_footprint_gb or None,
+            )
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "event": event,
             "run_id": self.run_id,
             "timestamp_unix_seconds": time.time(),
             "elapsed_seconds": time.perf_counter() - self.started,
-            **_mlx_memory_snapshot(),
+            **memory,
             **fields,
         }
         self._stream.write(json.dumps(record, separators=(",", ":"), default=str) + "\n")

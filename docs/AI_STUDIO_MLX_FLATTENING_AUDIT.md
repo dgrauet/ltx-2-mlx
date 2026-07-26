@@ -25,6 +25,17 @@ The shortest evidence-backed path to the requested “two layers” is:
 1. AI Studio as the control plane.
 2. One persistent MLX engine process as the inference data plane.
 
+### Live wrapper-attribution check
+
+Three later live `/api/ltx/performance` observations measured un-attributed
+wrapper time of `0.874 / 182.058`, `0.635 / 186.138`, and
+`0.864 / 228.055` seconds: only **0.34–0.48%** of end-to-end wall time.
+That evidence rejects Python compilation or a Python-language rewrite as a
+current optimization target. Python remains orchestration overhead worth
+simplifying for lifecycle and observability, but the performance track stays on
+the measured MLX/Metal phases unless finer profiling materially contradicts
+these ratios.
+
 Metal and the media encoder remain system runtimes rather than application
 orchestration layers. A later Swift/C++ host can replace the persistent Python
 worker, but it should have to beat that baseline before the much larger port is

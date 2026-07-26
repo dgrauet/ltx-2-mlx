@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 
@@ -130,6 +131,8 @@ def _add_generation_args(parser: argparse.ArgumentParser) -> None:
 
 def _generate_profile_metadata(args: argparse.Namespace) -> dict[str, object]:
     """Return performance-relevant, prompt-safe metadata for ``generate``."""
+    from ltx_pipelines_mlx.utils.perf_profile import runtime_identity
+
     if args.one_stage:
         mode = "one_stage"
     elif args.distilled:
@@ -141,6 +144,7 @@ def _generate_profile_metadata(args: argparse.Namespace) -> dict[str, object]:
     else:
         mode = "unspecified"
     return {
+        **runtime_identity(),
         "command": "generate",
         "mode": mode,
         "model": args.model,
@@ -161,6 +165,9 @@ def _generate_profile_metadata(args: argparse.Namespace) -> dict[str, object]:
         "tile_frames": args.tile_frames,
         "tile_spatial": args.tile_spatial,
         "tile_overlap": args.tile_overlap,
+        "vae_decode_budget_gb": float(
+            os.environ.get("LTX2_VAE_DECODE_BUDGET_GB", "8.0")
+        ),
         "image_conditioning_count": len(args.images or []),
         "lora_count": len(args.lora or []),
         "prompt_characters": len(args.prompt),

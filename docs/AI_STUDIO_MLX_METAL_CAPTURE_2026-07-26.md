@@ -85,3 +85,21 @@ without a measured dispatch-level reason.
 
 Related static analysis:
 [AI Studio MLX operator audit](AI_STUDIO_MLX_OPERATOR_AUDIT.md).
+
+For QA runs that need system-level scheduling and per-dispatch evidence in
+addition to the library-scoped `.gputrace`, use the opt-in launcher:
+
+```bash
+uv run python scripts/capture_metal_system_trace.py \
+  --output /path/to/trial.trace \
+  --time-limit 5m \
+  -- ltx-2-mlx generate ...
+```
+
+It invokes the installed `Metal System Trace` xctrace template with
+`--no-prompt`, exports the trace table of contents, and writes a JSON manifest
+containing the target argv, runtime commit/version/device identity, return
+codes, and artifact hashes. It is never enabled during normal generation.
+MLX itself exposes capture start/stop and allocator counters but no
+programmatic per-dispatch duration API; dispatch timing must therefore be read
+from the `.gputrace`/`.trace` in Xcode Instruments or an exported xctrace table.
