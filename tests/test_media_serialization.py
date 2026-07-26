@@ -6,8 +6,9 @@ import struct
 import wave
 
 import mlx.core as mx
+import pytest
 
-from ltx_core_mlx.model.video_vae.video_vae import _write_all
+from ltx_core_mlx.model.video_vae.video_vae import _OrderedFrameWriter, _write_all
 from ltx_pipelines_mlx.utils._orchestration import save_waveform
 
 
@@ -30,6 +31,33 @@ def test_write_all_handles_partial_writes_without_copying() -> None:
     _write_all(source, writer)
     assert writer.data == bytearray(range(17))
     assert writer.calls > 1
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_ordered_frame_writer_preserves_exact_bytes(overlap: bool) -> None:
+    sink = _ShortWriter(limit=2)
+    writer = _OrderedFrameWriter(sink, overlap=overlap)
+    try:
+        writer.submit(bytearray([1, 2, 3]))
+        writer.submit(bytearray([4, 5]))
+        writer.submit(bytearray([6, 7, 8, 9]))
+        writer.finish()
+    finally:
+        writer.shutdown()
+
+    assert sink.data == bytearray(range(1, 10))
+    assert writer.completed == 3
+
+
+def test_ordered_frame_writer_propagates_pipe_failure() -> None:
+    sink = _ShortWriter(limit=0)
+    writer = _OrderedFrameWriter(sink, overlap=True)
+    try:
+        writer.submit(bytearray([1, 2, 3]))
+        with pytest.raises(BrokenPipeError):
+            writer.finish()
+    finally:
+        writer.shutdown()
 
 
 def test_save_waveform_writes_reference_pcm_bytes(tmp_path) -> None:

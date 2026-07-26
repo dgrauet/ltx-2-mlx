@@ -28,6 +28,7 @@ import logging
 import os
 import subprocess
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import mlx.core as mx
@@ -73,6 +74,50 @@ def _write_all(buffer: memoryview, stream: Any) -> None:
             view = view[written:]
     finally:
         view.release()
+
+
+class _OrderedFrameWriter:
+    """Serialize evaluated frames with at most one asynchronous write in flight.
+
+    Waiting for the previous write before submitting the next keeps memory bounded
+    and preserves byte order. The worker only sees buffers after ``mx.eval`` has
+    completed, so it never races Metal evaluation.
+    """
+
+    def __init__(self, stream: Any, *, overlap: bool) -> None:
+        self._stream = stream
+        self._executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="ltx-media-writer") if overlap else None
+        )
+        self._pending: Future[None] | None = None
+        self.completed = 0
+
+    def _complete_pending(self) -> None:
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            pending.result()
+            self.completed += 1
+
+    def submit(self, buffer: Any) -> None:
+        if self._executor is None:
+            _write_all(memoryview(buffer), self._stream)
+            self.completed += 1
+            return
+
+        self._complete_pending()
+        self._pending = self._executor.submit(_write_all, memoryview(buffer), self._stream)
+
+    def finish(self) -> None:
+        self._complete_pending()
+
+    def shutdown(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+
+
+def _media_write_overlap_enabled() -> bool:
+    value = os.environ.get("LTX2_MEDIA_WRITE_OVERLAP", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 
 def _compute_decode_tiling(
@@ -506,34 +551,31 @@ class VideoDecoder(nn.Module):
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         assert proc.stdin is not None
 
-        frames_written = 0
-        pipe_broken = False
-        for chunk in self.tiled_decode(latent, tiling):  # (B, 3, T, H, W)
-            if pipe_broken:
-                break
-            num_frames = chunk.shape[2]
-            for i in range(num_frames):
-                frame = chunk[:, :, i, :, :]
-                frame = mx.clip(frame, -1.0, 1.0)
-                frame = ((frame + 1.0) * 127.5).astype(mx.uint8)
-                frame_hwc = mx.contiguous(frame[0].transpose(1, 2, 0))  # (H, W, 3)
-                mx.eval(frame_hwc)  # required: memoryview races GPU writes without this sync
-                try:
-                    _write_all(memoryview(frame_hwc), proc.stdin)
-                except BrokenPipeError:
-                    logger.warning(
-                        "ffmpeg pipe closed after %d frames (expected %d); output may be truncated",
-                        frames_written,
-                        latent.shape[2] * 8 - 7,
-                    )
-                    pipe_broken = True
-                    break
-                frames_written += 1
-                del frame, frame_hwc
-                if i % 8 == 0:
-                    aggressive_cleanup()
-            del chunk
-            aggressive_cleanup()
+        frame_writer = _OrderedFrameWriter(proc.stdin, overlap=_media_write_overlap_enabled())
+        try:
+            for chunk in self.tiled_decode(latent, tiling):  # (B, 3, T, H, W)
+                num_frames = chunk.shape[2]
+                for i in range(num_frames):
+                    frame = chunk[:, :, i, :, :]
+                    frame = mx.clip(frame, -1.0, 1.0)
+                    frame = ((frame + 1.0) * 127.5).astype(mx.uint8)
+                    frame_hwc = mx.contiguous(frame[0].transpose(1, 2, 0))  # (H, W, 3)
+                    mx.eval(frame_hwc)  # required before a worker exports the unified-memory buffer
+                    frame_writer.submit(frame_hwc)
+                    del frame, frame_hwc
+                    if i % 8 == 0:
+                        aggressive_cleanup()
+                del chunk
+                aggressive_cleanup()
+            frame_writer.finish()
+        except BrokenPipeError:
+            logger.warning(
+                "ffmpeg pipe closed after %d frames (expected %d); output may be truncated",
+                frame_writer.completed,
+                latent.shape[2] * 8 - 7,
+            )
+        finally:
+            frame_writer.shutdown()
         if proc.stdin and not proc.stdin.closed:
             proc.stdin.close()
         proc.wait()
