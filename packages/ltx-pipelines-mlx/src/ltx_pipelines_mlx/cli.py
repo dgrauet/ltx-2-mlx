@@ -24,6 +24,12 @@ import time
 
 DEFAULT_MODEL = "dgrauet/ltx-2.3-mlx-q8"
 DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
+_METAL_CAPTURE_PHASE_LABELS = {
+    "stage1": "Stage 1 half-resolution denoise",
+    "stage2": "Stage 2 full-resolution denoise",
+    "decode": "Decoding video + audio + muxing",
+}
+_METAL_CAPTURE_DOC_URL = "https://developer.apple.com/documentation/xcode/capturing-a-metal-workload-programmatically"
 
 
 def _add_base_args(parser: argparse.ArgumentParser) -> None:
@@ -120,6 +126,68 @@ def _add_generation_args(parser: argparse.ArgumentParser) -> None:
             "supports any strength)."
         ),
     )
+
+
+def _generate_profile_metadata(args: argparse.Namespace) -> dict[str, object]:
+    """Return performance-relevant, prompt-safe metadata for ``generate``."""
+    if args.one_stage:
+        mode = "one_stage"
+    elif args.distilled:
+        mode = "distilled"
+    elif args.two_stages_hq:
+        mode = "two_stages_hq"
+    elif args.two_stage:
+        mode = "two_stage"
+    else:
+        mode = "unspecified"
+    return {
+        "command": "generate",
+        "mode": mode,
+        "model": args.model,
+        "gemma": args.gemma,
+        "output": args.output,
+        "height": args.height,
+        "width": args.width,
+        "frames": args.frames,
+        "frame_rate": args.frame_rate,
+        "seed": args.seed,
+        "steps": args.steps,
+        "stage1_steps": args.stage1_steps,
+        "stage2_steps": args.stage2_steps,
+        "cfg_scale": args.cfg_scale,
+        "stg_scale": args.stg_scale,
+        "low_ram": args.low_ram,
+        "quiet": args.quiet,
+        "tile_frames": args.tile_frames,
+        "tile_spatial": args.tile_spatial,
+        "tile_overlap": args.tile_overlap,
+        "image_conditioning_count": len(args.images or []),
+        "lora_count": len(args.lora or []),
+        "prompt_characters": len(args.prompt),
+        "teacache_enabled": args.enable_teacache,
+        "metal_capture_path": args.metal_capture,
+        "metal_capture_phase": args.metal_capture_phase,
+    }
+
+
+def _validate_generate_capture_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject incomplete or unsupported Metal-capture configurations."""
+    has_path = args.metal_capture is not None
+    has_phase = args.metal_capture_phase is not None
+    if has_path != has_phase:
+        parser.error("--metal-capture PATH and --metal-capture-phase SELECTOR must be provided together")
+    if args.metal_capture_phase in {"stage1", "stage2"} and not args.distilled:
+        parser.error("--metal-capture-phase stage1/stage2 currently requires --distilled; use decode for other modes")
+    if has_path:
+        import os
+
+        if os.environ.get("MTL_CAPTURE_ENABLED") != "1":
+            parser.error(
+                "Metal capture requires MTL_CAPTURE_ENABLED=1 at process launch on macOS 14+. "
+                "Re-run as: MTL_CAPTURE_ENABLED=1 ltx-2-mlx generate ... "
+                "--metal-capture trace.gputrace --metal-capture-phase stage2. "
+                f"See {_METAL_CAPTURE_DOC_URL}"
+            )
 
 
 def main() -> None:
@@ -270,6 +338,29 @@ examples:
             "LoRA weights and strength (repeatable). PATH can be a local .safetensors file "
             "or a HuggingFace repo ID. Example: --lora my_lora.safetensors 1.0"
         ),
+    )
+    gen.add_argument(
+        "--profile-json",
+        metavar="PATH",
+        default=None,
+        help="Append crash-resilient JSONL timing and MLX memory events for this generate run",
+    )
+    gen.add_argument(
+        "--metal-capture",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write an opt-in MLX Metal capture for one selected phase. macOS 14+ requires "
+            "launching as: MTL_CAPTURE_ENABLED=1 ltx-2-mlx generate ... "
+            "--metal-capture trace.gputrace --metal-capture-phase stage2. "
+            f"See {_METAL_CAPTURE_DOC_URL}"
+        ),
+    )
+    gen.add_argument(
+        "--metal-capture-phase",
+        choices=tuple(_METAL_CAPTURE_PHASE_LABELS),
+        default=None,
+        help="Phase to capture: stage1/stage2 require --distilled; decode works with every generate mode",
     )
 
     # --- a2v (Audio-to-Video) ---
@@ -620,6 +711,9 @@ examples:
         parser.print_help()
         sys.exit(1)
 
+    if args.command == "generate":
+        _validate_generate_capture_args(parser, args)
+
     # Resolve seed=-1 to a random value
     if hasattr(args, "seed") and args.seed < 0:
         import random
@@ -641,8 +735,26 @@ examples:
         "preprocess": _cmd_preprocess,
         "slice": _cmd_slice,
     }
+    command = commands[args.command]
     try:
-        commands[args.command](args)
+        if args.command == "generate" and (args.profile_json is not None or args.metal_capture is not None):
+            from contextlib import ExitStack
+
+            from ltx_pipelines_mlx.utils.perf_profile import capture_phase, profile_run
+
+            with ExitStack() as telemetry:
+                if args.profile_json is not None:
+                    telemetry.enter_context(profile_run(args.profile_json, metadata=_generate_profile_metadata(args)))
+                if args.metal_capture is not None:
+                    telemetry.enter_context(
+                        capture_phase(
+                            args.metal_capture,
+                            phase_label=_METAL_CAPTURE_PHASE_LABELS[args.metal_capture_phase],
+                        )
+                    )
+                command(args)
+        else:
+            command(args)
     except RuntimeError as e:
         # #75: the macOS GPU watchdog kills sustained GPU work with a cryptic
         # Metal error; explain it and point at the mitigations. Never set the

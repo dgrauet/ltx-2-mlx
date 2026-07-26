@@ -100,10 +100,12 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
                 transformer_path = self._resolve_safetensors(self.model_dir, "transformer-distilled")
             self.dit = self._load_transformer_with_optional_streaming(transformer_path)
 
-        self._load_vae_encoder()
+        with phase("Loading VAE encoder", verbose=False):
+            self._load_vae_encoder()
 
         if self.upsampler is None:
-            self._load_upsampler()
+            with phase("Loading latent upsampler", verbose=False):
+                self._load_upsampler()
 
         self._loaded = True
 
@@ -165,166 +167,171 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         assert self.upsampler is not None
 
         # --- Stage 1: half resolution ---
-        # Snap to the two-stage grid (multiples of 64) and report if it changed.
-        height, width = snap_output_dimensions(height, width, two_stage=True)
-        half_h, half_w = height // 2, width // 2
-        F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
-        video_shape = (1, F * H_half * W_half, 128)
-        audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
-        audio_shape = (1, audio_T, 128)
+        with phase("Preparing Stage 1 conditioning/state", verbose=False):
+            # Snap to the two-stage grid (multiples of 64) and report if it changed.
+            height, width = snap_output_dimensions(height, width, two_stage=True)
+            half_h, half_w = height // 2, width // 2
+            F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
+            video_shape = (1, F * H_half * W_half, 128)
+            audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
+            audio_shape = (1, audio_T, 128)
 
-        video_positions_1 = compute_video_positions(F, H_half, W_half, frame_rate=frame_rate)
-        audio_positions = compute_audio_positions(audio_T)
+            video_positions_1 = compute_video_positions(F, H_half, W_half, frame_rate=frame_rate)
+            audio_positions = compute_audio_positions(audio_T)
 
-        # I2V conditioning at half resolution. ``images`` is the upstream-iso
-        # multi-anchor list; ``image`` is the legacy single-image shorthand.
-        from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
-        from ltx_pipelines_mlx.utils.args import ImageConditioningInput
+            # I2V conditioning at half resolution. ``images`` is the upstream-iso
+            # multi-anchor list; ``image`` is the legacy single-image shorthand.
+            from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
+            from ltx_pipelines_mlx.utils.args import ImageConditioningInput
 
-        enc_h_half = H_half * 32
-        enc_w_half = W_half * 32
-        resolved_images = list(images) if images else []
-        if image is not None and not resolved_images:
-            resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
-        conditionings_1: list = []
-        if resolved_images:
-            conditionings_1 = combined_image_conditionings(
-                resolved_images,
-                enc_h=enc_h_half,
-                enc_w=enc_w_half,
+            enc_h_half = H_half * 32
+            enc_w_half = W_half * 32
+            resolved_images = list(images) if images else []
+            if image is not None and not resolved_images:
+                resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
+            conditionings_1: list = []
+            if resolved_images:
+                conditionings_1 = combined_image_conditionings(
+                    resolved_images,
+                    enc_h=enc_h_half,
+                    enc_w=enc_w_half,
+                    spatial_dims=(F, H_half, W_half),
+                    video_encoder=self.vae_encoder,
+                    frame_rate=frame_rate,
+                )
+
+            video_state = create_noised_state(
+                base_shape=video_shape,
+                conditionings=conditionings_1,
                 spatial_dims=(F, H_half, W_half),
-                video_encoder=self.vae_encoder,
-                frame_rate=frame_rate,
+                positions=video_positions_1,
+                seed=seed,
+                sigma=1.0,
+                initial_latent=None,
+                legacy_scalar_blend=True,
+            )
+            audio_state = create_noised_state(
+                base_shape=audio_shape,
+                conditionings=[],
+                spatial_dims=(F, H_half, W_half),  # unused
+                positions=audio_positions,
+                seed=seed + 1,
+                sigma=1.0,
+                initial_latent=None,
+                legacy_scalar_blend=True,
             )
 
-        video_state = create_noised_state(
-            base_shape=video_shape,
-            conditionings=conditionings_1,
-            spatial_dims=(F, H_half, W_half),
-            positions=video_positions_1,
-            seed=seed,
-            sigma=1.0,
-            initial_latent=None,
-            legacy_scalar_blend=True,
-        )
-        audio_state = create_noised_state(
-            base_shape=audio_shape,
-            conditionings=[],
-            spatial_dims=(F, H_half, W_half),  # unused
-            positions=audio_positions,
-            seed=seed + 1,
-            sigma=1.0,
-            initial_latent=None,
-            legacy_scalar_blend=True,
-        )
+        with phase("Stage 1 half-resolution denoise", verbose=False):
+            sigmas_1 = DISTILLED_SIGMAS[: stage1_steps + 1] if stage1_steps else DISTILLED_SIGMAS
 
-        sigmas_1 = DISTILLED_SIGMAS[: stage1_steps + 1] if stage1_steps else DISTILLED_SIGMAS
+            stage1_dit = self.dit
+            if self._tile_count is not None:
+                from ltx_core_mlx.components.modality_tiling import TiledLTXModel, VideoModalityTiler
 
-        stage1_dit = self.dit
-        if self._tile_count is not None:
-            from ltx_core_mlx.components.modality_tiling import TiledLTXModel, VideoModalityTiler
+                tiler_1 = VideoModalityTiler(self._tile_count, latent_shape=(F, H_half, W_half))
+                stage1_dit = TiledLTXModel(self.dit, tiler_1)
 
-            tiler_1 = VideoModalityTiler(self._tile_count, latent_shape=(F, H_half, W_half))
-            stage1_dit = TiledLTXModel(self.dit, tiler_1)
+            x0_model = X0Model(stage1_dit)
 
-        x0_model = X0Model(stage1_dit)
-
-        self._pre_denoise_flush(video_state, audio_state)
-        output_1 = denoise_loop(
-            model=x0_model,
-            video_state=video_state,
-            audio_state=audio_state,
-            video_text_embeds=video_embeds,
-            audio_text_embeds=audio_embeds,
-            sigmas=sigmas_1,
-            video_cross_attention_mask=relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
-        )
-        if self.low_memory:
-            aggressive_cleanup()
+            self._pre_denoise_flush(video_state, audio_state)
+            output_1 = denoise_loop(
+                model=x0_model,
+                video_state=video_state,
+                audio_state=audio_state,
+                video_text_embeds=video_embeds,
+                audio_text_embeds=audio_embeds,
+                sigmas=sigmas_1,
+                video_cross_attention_mask=relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
+            )
+            if self.low_memory:
+                aggressive_cleanup()
 
         # --- Upscale (same denorm/upsample/renorm as TI2VidTwoStagesPipeline) ---
-        # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
-        gen_tokens_1 = output_1.video_latent[:, : F * H_half * W_half, :]
-        video_half = self.video_patchifier.unpatchify(gen_tokens_1, (F, H_half, W_half))
-        video_mlx = video_half.transpose(0, 2, 3, 4, 1)
-        video_denorm = self.vae_encoder.denormalize_latent(video_mlx)
-        video_denorm = video_denorm.transpose(0, 4, 1, 2, 3)
-        video_upscaled = self.upsampler(video_denorm)
-        video_up_mlx = video_upscaled.transpose(0, 2, 3, 4, 1)
-        video_upscaled = self.vae_encoder.normalize_latent(video_up_mlx)
-        video_upscaled = video_upscaled.transpose(0, 4, 1, 2, 3)
-        _materialize(video_upscaled)
+        with phase("Latent upscale", verbose=False):
+            # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
+            gen_tokens_1 = output_1.video_latent[:, : F * H_half * W_half, :]
+            video_half = self.video_patchifier.unpatchify(gen_tokens_1, (F, H_half, W_half))
+            video_mlx = video_half.transpose(0, 2, 3, 4, 1)
+            video_denorm = self.vae_encoder.denormalize_latent(video_mlx)
+            video_denorm = video_denorm.transpose(0, 4, 1, 2, 3)
+            video_upscaled = self.upsampler(video_denorm)
+            video_up_mlx = video_upscaled.transpose(0, 2, 3, 4, 1)
+            video_upscaled = self.vae_encoder.normalize_latent(video_up_mlx)
+            video_upscaled = video_upscaled.transpose(0, 4, 1, 2, 3)
+            _materialize(video_upscaled)
 
-        H_full = H_half * 2
-        W_full = W_half * 2
+        with phase("Preparing Stage 2 conditioning/state", verbose=False):
+            H_full = H_half * 2
+            W_full = W_half * 2
 
-        # I2V conditioning at full resolution (re-encode at upscaled dims)
-        conditionings_2: list = []
-        if resolved_images:
-            enc_h_full = H_full * 32
-            enc_w_full = W_full * 32
-            conditionings_2 = combined_image_conditionings(
-                resolved_images,
-                enc_h=enc_h_full,
-                enc_w=enc_w_full,
+            # I2V conditioning at full resolution (re-encode at upscaled dims)
+            conditionings_2: list = []
+            if resolved_images:
+                enc_h_full = H_full * 32
+                enc_w_full = W_full * 32
+                conditionings_2 = combined_image_conditionings(
+                    resolved_images,
+                    enc_h=enc_h_full,
+                    enc_w=enc_w_full,
+                    spatial_dims=(F, H_full, W_full),
+                    video_encoder=self.vae_encoder,
+                    frame_rate=frame_rate,
+                )
+
+            if self.low_memory:
+                self.image_conditioner.free()
+                self.upsampler = None
+                aggressive_cleanup()
+
+            # --- Stage 2: full resolution refine (no LoRA swap — already distilled) ---
+            video_tokens, _ = self.video_patchifier.patchify(video_upscaled)
+            sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
+            start_sigma = sigmas_2[0]
+
+            video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
+
+            video_state_2 = create_noised_state(
+                base_shape=video_tokens.shape,
+                conditionings=conditionings_2,
                 spatial_dims=(F, H_full, W_full),
-                video_encoder=self.vae_encoder,
-                frame_rate=frame_rate,
+                positions=video_positions_2,
+                seed=seed + 2,
+                sigma=start_sigma,
+                initial_latent=video_tokens,
+                legacy_scalar_blend=True,
             )
 
-        if self.low_memory:
-            self.image_conditioner.free()
-            self.upsampler = None
-            aggressive_cleanup()
+            audio_tokens_1 = output_1.audio_latent
+            audio_state_2 = create_noised_state(
+                base_shape=audio_tokens_1.shape,
+                conditionings=[],
+                spatial_dims=(F, H_full, W_full),  # unused
+                positions=audio_positions,
+                seed=seed + 2,
+                sigma=start_sigma,
+                initial_latent=audio_tokens_1,
+            )
 
-        # --- Stage 2: full resolution refine (no LoRA swap — already distilled) ---
-        video_tokens, _ = self.video_patchifier.patchify(video_upscaled)
-        sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
-        start_sigma = sigmas_2[0]
+        with phase("Stage 2 full-resolution denoise", verbose=False):
+            stage2_x0_model = x0_model
+            if self._tile_count is not None:
+                from ltx_core_mlx.components.modality_tiling import TiledLTXModel, VideoModalityTiler
 
-        video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
+                tiler_2 = VideoModalityTiler(self._tile_count, latent_shape=(F, H_full, W_full))
+                stage2_x0_model = X0Model(TiledLTXModel(self.dit, tiler_2))
 
-        video_state_2 = create_noised_state(
-            base_shape=video_tokens.shape,
-            conditionings=conditionings_2,
-            spatial_dims=(F, H_full, W_full),
-            positions=video_positions_2,
-            seed=seed + 2,
-            sigma=start_sigma,
-            initial_latent=video_tokens,
-            legacy_scalar_blend=True,
-        )
-
-        audio_tokens_1 = output_1.audio_latent
-        audio_state_2 = create_noised_state(
-            base_shape=audio_tokens_1.shape,
-            conditionings=[],
-            spatial_dims=(F, H_full, W_full),  # unused
-            positions=audio_positions,
-            seed=seed + 2,
-            sigma=start_sigma,
-            initial_latent=audio_tokens_1,
-        )
-
-        stage2_x0_model = x0_model
-        if self._tile_count is not None:
-            from ltx_core_mlx.components.modality_tiling import TiledLTXModel, VideoModalityTiler
-
-            tiler_2 = VideoModalityTiler(self._tile_count, latent_shape=(F, H_full, W_full))
-            stage2_x0_model = X0Model(TiledLTXModel(self.dit, tiler_2))
-
-        self._pre_denoise_flush(video_state_2, audio_state_2)
-        output_2 = denoise_loop(
-            model=stage2_x0_model,
-            video_state=video_state_2,
-            audio_state=audio_state_2,
-            video_text_embeds=video_embeds,
-            audio_text_embeds=audio_embeds,
-            sigmas=sigmas_2,
-            video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
-        )
-        if self.low_memory:
-            aggressive_cleanup()
+            self._pre_denoise_flush(video_state_2, audio_state_2)
+            output_2 = denoise_loop(
+                model=stage2_x0_model,
+                video_state=video_state_2,
+                audio_state=audio_state_2,
+                video_text_embeds=video_embeds,
+                audio_text_embeds=audio_embeds,
+                sigmas=sigmas_2,
+                video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
+            )
+            if self.low_memory:
+                aggressive_cleanup()
 
         gen_tokens_2 = output_2.video_latent[:, : F * H_full * W_full, :]
         video_latent = self.video_patchifier.unpatchify(gen_tokens_2, (F, H_full, W_full))
