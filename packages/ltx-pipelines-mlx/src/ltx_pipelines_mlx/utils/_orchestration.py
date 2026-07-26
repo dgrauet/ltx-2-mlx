@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
-import numpy as np
 from huggingface_hub import snapshot_download
 
 from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
@@ -150,15 +149,14 @@ def save_waveform(waveform: mx.array, path: str, sample_rate: int = 48000) -> No
         num_channels = 1
         wav = wav[:, None]
 
-    wav_np = np.array(wav.astype(mx.float32), dtype=np.float32)
-    wav_np = np.clip(wav_np, -1.0, 1.0)
-    wav_int16 = (wav_np * 32767).astype(np.int16)
+    wav_int16 = mx.contiguous((mx.clip(wav.astype(mx.float32), -1.0, 1.0) * 32767).astype(mx.int16))
+    mx.eval(wav_int16)
 
     with wave.open(path, "w") as wf:
         wf.setnchannels(num_channels)
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
-        wf.writeframes(wav_int16.tobytes())
+        wf.writeframes(memoryview(wav_int16))
 
 
 def decode_and_save_video(

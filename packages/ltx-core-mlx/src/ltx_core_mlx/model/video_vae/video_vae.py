@@ -58,6 +58,23 @@ from ltx_core_mlx.utils.memory import aggressive_cleanup
 logger: logging.Logger = logging.getLogger(__name__)
 
 
+def _write_all(buffer: memoryview, stream: Any) -> None:
+    """Write a contiguous buffer completely without materializing ``bytes``.
+
+    ``BufferedWriter.write`` normally accepts the exported MLX buffer directly,
+    but the explicit loop also handles short writes without a fallback copy.
+    """
+    view = memoryview(buffer).cast("B")
+    try:
+        while view:
+            written = stream.write(view)
+            if written is None or written <= 0:
+                raise BrokenPipeError("stream accepted no data")
+            view = view[written:]
+    finally:
+        view.release()
+
+
 def _compute_decode_tiling(
     latent_shape: tuple[int, ...],
     frame_rate: float = 24.0,
@@ -499,10 +516,10 @@ class VideoDecoder(nn.Module):
                 frame = chunk[:, :, i, :, :]
                 frame = mx.clip(frame, -1.0, 1.0)
                 frame = ((frame + 1.0) * 127.5).astype(mx.uint8)
-                frame_hwc = frame[0].transpose(1, 2, 0)  # (H, W, 3)
+                frame_hwc = mx.contiguous(frame[0].transpose(1, 2, 0))  # (H, W, 3)
                 mx.eval(frame_hwc)  # required: memoryview races GPU writes without this sync
                 try:
-                    proc.stdin.write(bytes(memoryview(frame_hwc)))
+                    _write_all(memoryview(frame_hwc), proc.stdin)
                 except BrokenPipeError:
                     logger.warning(
                         "ffmpeg pipe closed after %d frames (expected %d); output may be truncated",
