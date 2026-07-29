@@ -267,50 +267,67 @@ ltx-2-mlx info       Model info and memory estimate
 ### Stepwise previews
 
 A generation is opaque until the final VAE decode, which for a long clip can be many
-minutes away. These flags decode one latent frame of the in-progress x0 prediction every
-N denoising steps, so you can see the frame resolving and kill a bad run early. They are
-available on every generating subcommand (`generate`, `a2v`, `retake`, `extend`,
-`keyframe`, `ic-lora`, `hdr-ic-lora`, `lipdub`).
+minutes away. These flags decode a short window of latent frames from the in-progress
+prediction every N steps and write it as a self-contained animated WebP — a couple of
+seconds of real motion at the current denoise quality, so temporal problems show up at
+step 4 instead of minute 15. Available on every generating subcommand (`generate`, `a2v`,
+`retake`, `extend`, `keyframe`, `ic-lora`, `hdr-ic-lora`, `lipdub`).
 
 ```
---stepwise-image-output-dir DIR   Write preview PNGs + progress animation here
+--stepwise-image-output-dir DIR   Write per-step preview clips here
 --stepwise-interval N             Preview every N steps (default: 1; last step always previewed)
---stepwise-frame I                Latent frame to preview (default: middle; -1 = last)
+--stepwise-frames N               Latent frames per preview (default: 8 -> 57 frames, ~2.3s)
+--stepwise-frame I                Latent frame the window is centred on (default: middle)
 ```
 
 ```bash
 ltx-2-mlx generate -p "a cat walking" -o out.mp4 --frame-rate 24 \
-  --stepwise-image-output-dir ./previews --stepwise-interval 2
+  --stepwise-image-output-dir ./previews
 ```
 
 Produces, for seed 42 on a two-stage run:
 
 ```
 previews/
-  seed_42_s1_step001of030.png   # lossless per-step frames
-  seed_42_s1_step003of030.png
+  seed_42_s1_step001of030.webp   # 57 frames of motion, this step
+  seed_42_s1_step002of030.webp
   ...
-  seed_42_s1_progress.webp      # animated, rewritten after every preview
-  seed_42_s2_progress.webp      # stage 2 runs at a different resolution
+  seed_42_s2_step003of003.webp
 ```
 
-`*_progress.webp` accumulates one animation frame per preview and is rewritten
-atomically, so you can open it *while the run is going* and reload to see new steps.
-Stage 1 and stage 2 get separate files.
+Each file is written **once and never rewritten**, so write cost stays linear in the step
+count. Play them back to back for the full progression: the same motion span replayed at
+each step, sharpening as the denoise converges.
+
+#### Why a window rather than a single frame
+
+The VAE upsamples time 8x, so `N` latent frames decode to `8N-7` pixel frames. A single
+latent frame yields one picture while paying for the whole up-block stack — the worst
+point on the cost curve. Measured on a 704x448 clip:
+
+| latent frames | pixel frames | motion @25fps | stage 1 | stage 2 |
+|---|---|---|---|---|
+| 1 | 1 | — | 0.06s | 0.21s |
+| 3 | 17 | 0.68s | 0.49s | 1.90s |
+| **8** (default) | **57** | **2.3s** | 1.55s | 6.13s |
+| 16 | 121 | 4.8s | 3.23s | 13.0s |
+
+**Cost is independent of clip length** — decoding 8 of 60 latent frames costs the same as
+8 of 16 — so previews get proportionally cheaper the longer the clip. On a 15-minute
+two-stage run the default adds roughly 7%, and most of that is stage 1, which decodes at
+half resolution.
 
 Notes:
 
-- **Cost** is roughly one full decode divided by the latent frame count, per preview —
-  the decoder is shape-generic on the temporal axis, so a one-frame slice runs the
-  up-block stack over `1/F_lat` of the volume. Raise `--stepwise-interval` if it shows up
-  in your step time.
 - **Memory**: previews keep the VAE decoder resident through denoising, which the
   pipelines otherwise deliberately avoid. Combining this with `--low-ram` works but is
   self-defeating, and prints a warning.
-- The default frame is the middle one, because frame 0 is the clean conditioning image on
-  image-conditioned runs and never changes.
-- Judge colour and fine detail from the PNGs, which are lossless. The animation is WebP at
-  quality 90 — full 24-bit colour, but re-encoded on every rewrite.
+- The window is centred on the middle of the clip by default, because frame 0 is the clean
+  conditioning image on image-conditioned runs and never changes.
+- Multi-stage pipelines tag files `_s1` / `_s2`; the stages run at different resolutions.
+- Decoding a window in isolation uses different boundary padding than the full-volume
+  decode, so the outermost frames are approximate. Fine for judging motion, not for
+  judging final quality.
 - A preview failure never aborts a generation: the first one logs a warning and disables
   previews for the rest of the run.
 

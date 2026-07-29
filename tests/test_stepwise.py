@@ -1,8 +1,11 @@
 """Tests for stepwise previews (utils/stepwise.py + the sampler on_step hook).
 
 None of these need real weights: the sampler tests drive the loops with a stub
-X0Model, and the preview tests drive StepwisePreview with a stub decoder.
+X0Model, and the preview tests drive StepwisePreview with a stub decoder that
+reproduces the VAE's 8x temporal upsampling (N latent frames -> 8N-7 pixels).
 """
+
+from pathlib import Path
 
 import mlx.core as mx
 import pytest
@@ -12,16 +15,20 @@ from ltx_core_mlx.components.patchifiers import VideoLatentPatchifier
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
 from ltx_pipelines_mlx.utils.stepwise import (
-    MAX_ANIMATION_FRAMES,
+    DEFAULT_PREVIEW_FRAMES,
     StepwiseConfig,
     StepwisePreview,
-    resolve_frame_index,
-    to_pil_image,
+    resolve_window,
+    to_pil_images,
 )
 
 F, H, W = 4, 2, 3
 CHANNELS = 128
 NUM_TOKENS = F * H * W
+
+# Two latent frames -> 9 pixel frames: enough to prove the window without slow tests.
+WINDOW = 2
+WINDOW_PIXEL_FRAMES = 8 * WINDOW - 7
 
 
 # ---------------------------------------------------------------------------
@@ -35,23 +42,22 @@ class StubX0Model:
 
 
 class StubDecoder:
-    """Stands in for the VAE decoder: (B,C,1,h,w) -> (B,3,1,h*32,w*32).
+    """Stands in for the VAE decoder, including its 8x temporal upsampling.
 
-    Each call returns a different fill value. libwebp collapses identical
-    consecutive frames into one, so a constant stub would make every animation
-    look like a single frame.
+    Frames within a chunk get distinct values: libwebp collapses identical
+    consecutive frames into one, so a constant stub would make every chunk look
+    like a single frame.
     """
 
-    def __init__(self, fill: float = -1.0):
-        self.fill = fill
+    def __init__(self):
         self.calls: list[tuple[int, ...]] = []
 
     def decode(self, latent):
         self.calls.append(latent.shape)
         b, _c, f, h, w = latent.shape
-        # Cycle through distinct values so consecutive frames never match.
-        value = self.fill + 1.8 * (len(self.calls) % 16) / 16
-        return mx.full((b, 3, f, h * 32, w * 32), value)
+        out_frames = max(1, 8 * f - 7)
+        frames = [mx.full((b, 3, 1, h * 32, w * 32), -1.0 + 1.8 * i / max(1, out_frames)) for i in range(out_frames)]
+        return mx.concatenate(frames, axis=2)
 
 
 class StubDecoderBlock:
@@ -78,8 +84,23 @@ def make_state(num_tokens=NUM_TOKENS, channels=CHANNELS):
 
 
 def make_preview(tmp_path, **overrides):
-    config = StepwiseConfig(output_dir=tmp_path, seed=42, **overrides)
-    return StepwisePreview(config, verbose=False)
+    overrides.setdefault("frames", WINDOW)
+    return StepwisePreview(StepwiseConfig(output_dir=tmp_path, seed=42, **overrides), verbose=False)
+
+
+def bind(preview, decoder_block, *, stage=None):
+    return preview.bind(
+        latent_frames=F,
+        latent_height=H,
+        latent_width=W,
+        decoder_block=decoder_block,
+        patchifier=VideoLatentPatchifier(),
+        stage=stage,
+    )
+
+
+def x0(extra_tokens: int = 0):
+    return mx.zeros((1, NUM_TOKENS + extra_tokens, CHANNELS))
 
 
 def run_denoise_loop(on_step, num_steps=4):
@@ -97,49 +118,59 @@ def run_denoise_loop(on_step, num_steps=4):
 
 
 # ---------------------------------------------------------------------------
-# frame index resolution
+# window resolution
 # ---------------------------------------------------------------------------
-class TestResolveFrameIndex:
-    def test_defaults_to_middle(self):
-        assert resolve_frame_index(13, None) == 6
-        assert resolve_frame_index(4, None) == 2
+class TestResolveWindow:
+    def test_centres_on_the_middle_by_default(self):
+        # 16 latent frames, 8 wide -> starts at 4, spanning the middle.
+        assert resolve_window(16, None, 8) == (4, 8)
 
-    def test_negative_counts_from_end(self):
-        assert resolve_frame_index(13, -1) == 12
-        assert resolve_frame_index(13, -3) == 10
+    def test_explicit_centre(self):
+        assert resolve_window(16, 10, 4) == (8, 4)
 
-    def test_explicit_index_passes_through(self):
-        assert resolve_frame_index(13, 0) == 0
-        assert resolve_frame_index(13, 7) == 7
+    def test_negative_centre_counts_from_the_end(self):
+        # Centred on the last frame, then clamped to keep the window inside the clip.
+        assert resolve_window(16, -1, 4) == (12, 4)
 
-    def test_clamps_out_of_range(self):
-        assert resolve_frame_index(13, 99) == 12
-        assert resolve_frame_index(13, -99) == 0
+    def test_clamps_to_the_start(self):
+        assert resolve_window(16, 0, 6) == (0, 6)
 
-    def test_single_frame(self):
-        assert resolve_frame_index(1, None) == 0
-        assert resolve_frame_index(1, -1) == 0
+    def test_clamps_to_the_end(self):
+        assert resolve_window(16, 99, 6) == (10, 6)
+
+    def test_window_wider_than_clip_is_truncated(self):
+        assert resolve_window(4, None, 8) == (0, 4)
+
+    def test_single_frame_clip(self):
+        assert resolve_window(1, None, 8) == (0, 1)
+
+    def test_count_is_at_least_one(self):
+        assert resolve_window(16, None, 0) == (8, 1)
+
+    def test_default_window_is_eight_latent_frames(self):
+        assert DEFAULT_PREVIEW_FRAMES == 8
+        assert StepwiseConfig(output_dir=Path(".")).frames == 8
 
 
 # ---------------------------------------------------------------------------
 # pixel conversion
 # ---------------------------------------------------------------------------
-class TestToPilImage:
-    def test_shape_and_mode(self):
-        pixels = mx.zeros((1, 3, 1, 8, 5))
-        image = to_pil_image(pixels)
-        assert image.mode == "RGB"
-        assert image.size == (5, 8)  # PIL is (width, height)
+class TestToPilImages:
+    def test_one_image_per_temporal_index(self):
+        images = to_pil_images(mx.zeros((1, 3, 5, 8, 5)))
+        assert len(images) == 5
+        assert images[0].mode == "RGB"
+        assert images[0].size == (5, 8)  # PIL is (width, height)
 
     def test_value_mapping(self):
         # -1 -> 0, 0 -> 127, +1 -> 255
-        assert to_pil_image(mx.full((1, 3, 1, 2, 2), -1.0)).getpixel((0, 0)) == (0, 0, 0)
-        assert to_pil_image(mx.full((1, 3, 1, 2, 2), 1.0)).getpixel((0, 0)) == (255, 255, 255)
-        assert to_pil_image(mx.zeros((1, 3, 1, 2, 2))).getpixel((0, 0)) == (127, 127, 127)
+        assert to_pil_images(mx.full((1, 3, 1, 2, 2), -1.0))[0].getpixel((0, 0)) == (0, 0, 0)
+        assert to_pil_images(mx.full((1, 3, 1, 2, 2), 1.0))[0].getpixel((0, 0)) == (255, 255, 255)
+        assert to_pil_images(mx.zeros((1, 3, 1, 2, 2)))[0].getpixel((0, 0)) == (127, 127, 127)
 
     def test_clips_out_of_range(self):
-        assert to_pil_image(mx.full((1, 3, 1, 2, 2), 5.0)).getpixel((0, 0)) == (255, 255, 255)
-        assert to_pil_image(mx.full((1, 3, 1, 2, 2), -5.0)).getpixel((0, 0)) == (0, 0, 0)
+        assert to_pil_images(mx.full((1, 3, 1, 2, 2), 5.0))[0].getpixel((0, 0)) == (255, 255, 255)
+        assert to_pil_images(mx.full((1, 3, 1, 2, 2), -5.0))[0].getpixel((0, 0)) == (0, 0, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -147,153 +178,129 @@ class TestToPilImage:
 # ---------------------------------------------------------------------------
 class TestBind:
     def test_returns_callable(self, tmp_path):
-        hook = make_preview(tmp_path).bind(
-            latent_frames=F,
-            latent_height=H,
-            latent_width=W,
-            decoder_block=StubDecoderBlock(),
-            patchifier=VideoLatentPatchifier(),
-        )
-        assert callable(hook)
+        assert callable(bind(make_preview(tmp_path), StubDecoderBlock()))
 
     def test_returns_none_once_disabled(self, tmp_path):
         preview = make_preview(tmp_path)
         preview._disable(RuntimeError("boom"))
-        hook = preview.bind(
-            latent_frames=F,
-            latent_height=H,
-            latent_width=W,
-            decoder_block=StubDecoderBlock(),
-            patchifier=VideoLatentPatchifier(),
-        )
-        assert hook is None
+        assert bind(preview, StubDecoderBlock()) is None
 
 
 # ---------------------------------------------------------------------------
-# writing previews
+# writing chunks
 # ---------------------------------------------------------------------------
-class TestPreviewOutput:
-    def _hook(self, tmp_path, decoder_block, *, stage=None, **overrides):
-        preview = make_preview(tmp_path, **overrides)
-        return preview, preview.bind(
-            latent_frames=F,
-            latent_height=H,
-            latent_width=W,
-            decoder_block=decoder_block,
-            patchifier=VideoLatentPatchifier(),
-            stage=stage,
-        )
+class TestChunkOutput:
+    def test_writes_one_animated_chunk_per_step(self, tmp_path):
+        hook = bind(make_preview(tmp_path), StubDecoderBlock())
+        hook(0, 4, x0(), 1.0)
 
-    def test_writes_png_and_animation(self, tmp_path):
-        block = StubDecoderBlock()
-        _, hook = self._hook(tmp_path, block)
-        hook(0, 4, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
-
-        png = tmp_path / "seed_42_step001of004.png"
-        assert png.exists()
-        with Image.open(png) as image:
+        chunk = tmp_path / "seed_42_step001of004.webp"
+        assert chunk.exists()
+        with Image.open(chunk) as image:
+            assert image.n_frames == WINDOW_PIXEL_FRAMES
             assert image.size == (W * 32, H * 32)
-        assert (tmp_path / "seed_42_progress.webp").exists()
 
-    def test_decodes_exactly_one_latent_frame(self, tmp_path):
+    def test_decodes_the_whole_window_in_one_call(self, tmp_path):
         decoder = StubDecoder()
-        _, hook = self._hook(tmp_path, StubDecoderBlock(decoder))
-        hook(0, 4, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
-        # (B, C, F=1, H, W) -- the whole point is not decoding all F frames.
-        assert decoder.calls == [(1, CHANNELS, 1, H, W)]
+        hook = bind(make_preview(tmp_path), StubDecoderBlock(decoder))
+        hook(0, 4, x0(), 1.0)
+        # One decode of (B, C, WINDOW, H, W) — not WINDOW separate decodes.
+        assert decoder.calls == [(1, CHANNELS, WINDOW, H, W)]
+
+    def test_window_is_truncated_to_the_clip(self, tmp_path):
+        decoder = StubDecoder()
+        hook = bind(make_preview(tmp_path, frames=64), StubDecoderBlock(decoder))
+        assert decoder.calls == []
+        hook(0, 4, x0(), 1.0)
+        assert decoder.calls == [(1, CHANNELS, F, H, W)]
 
     def test_strips_appended_keyframe_tokens(self, tmp_path):
         decoder = StubDecoder()
-        _, hook = self._hook(tmp_path, StubDecoderBlock(decoder))
+        hook = bind(make_preview(tmp_path), StubDecoderBlock(decoder))
         # Multi-anchor conditioning appends tokens past the F*H*W grid.
-        hook(0, 4, mx.zeros((1, NUM_TOKENS + 7, CHANNELS)), 1.0)
-        assert decoder.calls == [(1, CHANNELS, 1, H, W)]
+        hook(0, 4, x0(extra_tokens=7), 1.0)
+        assert decoder.calls == [(1, CHANNELS, WINDOW, H, W)]
+
+    def test_chunks_are_never_rewritten(self, tmp_path):
+        """The point of per-step chunks: write cost stays linear in the step count."""
+        hook = bind(make_preview(tmp_path), StubDecoderBlock())
+        hook(0, 3, x0(), 1.0)
+        first = tmp_path / "seed_42_step001of003.webp"
+        stamp = first.stat().st_mtime_ns
+
+        hook(1, 3, x0(), 0.5)
+        hook(2, 3, x0(), 0.0)
+
+        assert first.stat().st_mtime_ns == stamp
+        assert sorted(p.name for p in tmp_path.glob("*.webp")) == [
+            "seed_42_step001of003.webp",
+            "seed_42_step002of003.webp",
+            "seed_42_step003of003.webp",
+        ]
+
+    def test_chunks_sort_into_playback_order(self, tmp_path):
+        """Stage 1 before stage 2, and step 10 after step 9 — under a plain name sort."""
+        hook1 = bind(make_preview(tmp_path), StubDecoderBlock(), stage=1)
+        hook2 = bind(make_preview(tmp_path), StubDecoderBlock(), stage=2)
+        for step in range(11):
+            hook1(step, 11, x0(), 1.0)
+        hook2(0, 2, x0(), 1.0)
+
+        names = sorted(p.name for p in tmp_path.glob("*.webp"))
+        assert names[0] == "seed_42_s1_step001of011.webp"
+        assert names[9] == "seed_42_s1_step010of011.webp"
+        assert names[-1] == "seed_42_s2_step001of002.webp"
 
     def test_stage_tag_separates_files(self, tmp_path):
-        _, hook1 = self._hook(tmp_path, StubDecoderBlock(), stage=1)
-        _, hook2 = self._hook(tmp_path, StubDecoderBlock(), stage=2)
-        hook1(0, 4, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
-        hook2(0, 4, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
-
-        assert (tmp_path / "seed_42_s1_step001of004.png").exists()
-        assert (tmp_path / "seed_42_s2_step001of004.png").exists()
-        assert (tmp_path / "seed_42_s1_progress.webp").exists()
-        assert (tmp_path / "seed_42_s2_progress.webp").exists()
-
-    def test_animation_gains_a_frame_per_preview(self, tmp_path):
-        _, hook = self._hook(tmp_path, StubDecoderBlock())
-        animation = tmp_path / "seed_42_progress.webp"
-
-        for step in range(3):
-            hook(step, 3, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
-            with Image.open(animation) as image:
-                assert image.n_frames == step + 1
+        bind(make_preview(tmp_path), StubDecoderBlock(), stage=1)(0, 4, x0(), 1.0)
+        bind(make_preview(tmp_path), StubDecoderBlock(), stage=2)(0, 4, x0(), 1.0)
+        assert (tmp_path / "seed_42_s1_step001of004.webp").exists()
+        assert (tmp_path / "seed_42_s2_step001of004.webp").exists()
 
     def test_no_temp_files_left_behind(self, tmp_path):
-        _, hook = self._hook(tmp_path, StubDecoderBlock())
+        hook = bind(make_preview(tmp_path), StubDecoderBlock())
         for step in range(3):
-            hook(step, 3, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
+            hook(step, 3, x0(), 1.0)
         assert list(tmp_path.glob("*.tmp")) == []
 
-    def test_decoder_loaded_once_across_previews(self, tmp_path):
+    def test_decoder_comes_from_the_block_cache_each_time(self, tmp_path):
         block = StubDecoderBlock()
-        _, hook = self._hook(tmp_path, block)
+        hook = bind(make_preview(tmp_path), block)
         for step in range(3):
-            hook(step, 3, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
-        # load() is cached in the real block; we must not free/reload per preview.
+            hook(step, 3, x0(), 1.0)
         assert block.load_count == 3
 
-    def test_frame_list_is_capped(self, tmp_path):
-        _, hook = self._hook(tmp_path, StubDecoderBlock())
-        total = MAX_ANIMATION_FRAMES + 5
-        for step in range(total):
-            hook(step, total, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
-
-        with Image.open(tmp_path / "seed_42_progress.webp") as image:
-            # Halved once the cap is passed, so bounded but still accumulating.
-            assert 1 < image.n_frames <= MAX_ANIMATION_FRAMES
-        assert len(list(tmp_path.glob("*.png"))) == total  # every step still written
+    def test_single_frame_window_still_works(self, tmp_path):
+        hook = bind(make_preview(tmp_path, frames=1), StubDecoderBlock())
+        hook(0, 2, x0(), 1.0)
+        with Image.open(tmp_path / "seed_42_step001of002.webp") as image:
+            assert image.n_frames == 1
 
 
 # ---------------------------------------------------------------------------
 # interval
 # ---------------------------------------------------------------------------
 class TestInterval:
-    def _count_pngs(self, tmp_path, interval, num_steps):
-        preview = make_preview(tmp_path, interval=interval)
-        hook = preview.bind(
-            latent_frames=F,
-            latent_height=H,
-            latent_width=W,
-            decoder_block=StubDecoderBlock(),
-            patchifier=VideoLatentPatchifier(),
-        )
+    def _count_chunks(self, tmp_path, interval, num_steps):
+        hook = bind(make_preview(tmp_path, interval=interval), StubDecoderBlock())
         for step in range(num_steps):
-            hook(step, num_steps, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
-        return len(list(tmp_path.glob("*.png")))
+            hook(step, num_steps, x0(), 1.0)
+        return len(list(tmp_path.glob("*.webp")))
 
     def test_every_step(self, tmp_path):
-        assert self._count_pngs(tmp_path, interval=1, num_steps=9) == 9
+        assert self._count_chunks(tmp_path, interval=1, num_steps=9) == 9
 
     def test_every_third_step(self, tmp_path):
         # steps 0, 3, 6 by interval, plus step 8 because it is last.
-        assert self._count_pngs(tmp_path, interval=3, num_steps=9) == 4
+        assert self._count_chunks(tmp_path, interval=3, num_steps=9) == 4
 
     def test_final_step_always_previewed(self, tmp_path):
-        preview = make_preview(tmp_path, interval=100)
-        hook = preview.bind(
-            latent_frames=F,
-            latent_height=H,
-            latent_width=W,
-            decoder_block=StubDecoderBlock(),
-            patchifier=VideoLatentPatchifier(),
-        )
+        hook = bind(make_preview(tmp_path, interval=100), StubDecoderBlock())
         for step in range(5):
-            hook(step, 5, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
-        # step 0 (interval) and step 4 (last)
-        assert sorted(p.name for p in tmp_path.glob("*.png")) == [
-            "seed_42_step001of005.png",
-            "seed_42_step005of005.png",
+            hook(step, 5, x0(), 1.0)
+        assert sorted(p.name for p in tmp_path.glob("*.webp")) == [
+            "seed_42_step001of005.webp",
+            "seed_42_step005of005.webp",
         ]
 
 
@@ -303,18 +310,10 @@ class TestInterval:
 class TestFailureIsolation:
     def test_decode_failure_does_not_raise(self, tmp_path):
         preview = make_preview(tmp_path)
-        hook = preview.bind(
-            latent_frames=F,
-            latent_height=H,
-            latent_width=W,
-            decoder_block=ExplodingDecoderBlock(),
-            patchifier=VideoLatentPatchifier(),
-        )
-        hook(0, 4, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)  # must not raise
+        bind(preview, ExplodingDecoderBlock())(0, 4, x0(), 1.0)  # must not raise
         assert preview._disabled
 
     def test_disables_after_first_failure(self, tmp_path):
-        preview = make_preview(tmp_path)
         block = ExplodingDecoderBlock()
         calls = []
         original_load = block.load
@@ -324,22 +323,13 @@ class TestFailureIsolation:
             return original_load()
 
         block.load = counting_load
-        hook = preview.bind(
-            latent_frames=F, latent_height=H, latent_width=W, decoder_block=block, patchifier=VideoLatentPatchifier()
-        )
+        hook = bind(make_preview(tmp_path), block)
         for step in range(5):
-            hook(step, 5, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
+            hook(step, 5, x0(), 1.0)
         assert len(calls) == 1  # not retried on every subsequent step
 
     def test_generation_completes_despite_broken_preview(self, tmp_path):
-        preview = make_preview(tmp_path)
-        hook = preview.bind(
-            latent_frames=F,
-            latent_height=H,
-            latent_width=W,
-            decoder_block=ExplodingDecoderBlock(),
-            patchifier=VideoLatentPatchifier(),
-        )
+        hook = bind(make_preview(tmp_path), ExplodingDecoderBlock())
         output = run_denoise_loop(hook)
         assert output.video_latent.shape == (1, NUM_TOKENS, CHANNELS)
 
@@ -348,16 +338,9 @@ class TestFailureIsolation:
             def load(self):
                 raise KeyboardInterrupt
 
-        preview = make_preview(tmp_path)
-        hook = preview.bind(
-            latent_frames=F,
-            latent_height=H,
-            latent_width=W,
-            decoder_block=Interrupting(),
-            patchifier=VideoLatentPatchifier(),
-        )
+        hook = bind(make_preview(tmp_path), Interrupting())
         with pytest.raises(KeyboardInterrupt):
-            hook(0, 4, mx.zeros((1, NUM_TOKENS, CHANNELS)), 1.0)
+            hook(0, 4, x0(), 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -366,18 +349,18 @@ class TestFailureIsolation:
 class TestSamplerHook:
     def test_denoise_loop_fires_once_per_step(self):
         seen = []
-        run_denoise_loop(lambda idx, total, x0, sigma: seen.append((idx, total)), num_steps=4)
+        run_denoise_loop(lambda idx, total, pred, sigma: seen.append((idx, total)), num_steps=4)
         assert seen == [(0, 4), (1, 4), (2, 4), (3, 4)]
 
     def test_denoise_loop_passes_x0_not_noisy_latent(self):
         # StubX0Model predicts zeros; the running latent starts at ones.
         seen = []
-        run_denoise_loop(lambda idx, total, x0, sigma: seen.append(x0))
-        assert all(mx.all(x0 == 0).item() for x0 in seen)
+        run_denoise_loop(lambda idx, total, pred, sigma: seen.append(pred))
+        assert all(mx.all(pred == 0).item() for pred in seen)
 
     def test_denoise_loop_passes_descending_sigma(self):
         seen = []
-        run_denoise_loop(lambda idx, total, x0, sigma: seen.append(sigma), num_steps=4)
+        run_denoise_loop(lambda idx, total, pred, sigma: seen.append(sigma), num_steps=4)
         assert seen == sorted(seen, reverse=True)
 
     def test_denoise_loop_without_hook_is_unchanged(self):
@@ -402,6 +385,6 @@ class TestSamplerHook:
             video_guider_factory=factory,
             sigmas=[1.0, 0.75, 0.5, 0.25, 0.0],
             show_progress=False,
-            on_step=lambda idx, total, x0, sigma: seen.append((idx, total)),
+            on_step=lambda idx, total, pred, sigma: seen.append((idx, total)),
         )
         assert seen == [(0, 4), (1, 4), (2, 4), (3, 4)]

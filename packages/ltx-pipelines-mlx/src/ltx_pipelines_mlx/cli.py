@@ -22,6 +22,8 @@ import argparse
 import sys
 import time
 
+from ltx_pipelines_mlx.utils.stepwise import DEFAULT_PREVIEW_FRAMES
+
 DEFAULT_MODEL = "dgrauet/ltx-2.3-mlx-q8"
 DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
 
@@ -42,12 +44,12 @@ def _add_base_args(parser: argparse.ArgumentParser) -> None:
         "--stepwise-image-output-dir",
         default=None,
         help=(
-            "[EXPERIMENTAL] Write a preview PNG of one decoded latent frame every "
-            "N denoising steps to this directory, plus a growing animated WebP "
-            "(`*_progress.webp`) you can open mid-run to watch the frame resolve. "
-            "Costs roughly one full decode divided by the latent frame count per "
-            "preview, and keeps the VAE decoder resident through denoising, which "
-            "raises peak memory. This feature may change in future versions."
+            "[EXPERIMENTAL] Every N denoising steps, decode a short window of latent "
+            "frames from the in-progress prediction and write it to this directory as "
+            "a self-contained animated WebP — a couple of seconds of real motion at "
+            "the current denoise quality. One file per step, written once; play them "
+            "back to back for the whole progression. Keeps the VAE decoder resident "
+            "through denoising, which raises peak memory. May change in future versions."
         ),
     )
     parser.add_argument(
@@ -57,13 +59,23 @@ def _add_base_args(parser: argparse.ArgumentParser) -> None:
         help="Preview every N denoising steps (default: 1). The final step is always previewed.",
     )
     parser.add_argument(
+        "--stepwise-frames",
+        type=int,
+        default=DEFAULT_PREVIEW_FRAMES,
+        help=(
+            f"Latent frames decoded per preview (default: {DEFAULT_PREVIEW_FRAMES}). The VAE "
+            f"upsamples time 8x, so N latent frames yield 8N-7 pixel frames — the default gives "
+            f"{8 * DEFAULT_PREVIEW_FRAMES - 7}, about 2.3 s at 25 fps. Cost is linear in this and "
+            "independent of the clip's length. Set to 1 for a single still and no motion."
+        ),
+    )
+    parser.add_argument(
         "--stepwise-frame",
         type=int,
         default=None,
         help=(
-            "Latent frame to preview (default: the middle frame). Negative values "
-            "count from the end, so -1 is the last frame. Frame 0 is a poor choice "
-            "for image-conditioned runs — it is the clean conditioning image."
+            "Latent frame the preview window is centred on (default: the middle of the "
+            "clip). Negative values count from the end, so -1 is the last frame."
         ),
     )
 
@@ -83,6 +95,8 @@ def _build_stepwise(args: argparse.Namespace):
     from ltx_pipelines_mlx.utils.stepwise import StepwiseConfig, StepwisePreview
 
     path = Path(output_dir).expanduser()
+    # retake/extend take no --frame-rate; their previews play at the LTX default.
+    frame_rate = float(getattr(args, "frame_rate", None) or 24.0)
     try:
         path.mkdir(parents=True, exist_ok=True)
         probe = path / ".ltx-stepwise-write-test"
@@ -104,6 +118,8 @@ def _build_stepwise(args: argparse.Namespace):
             output_dir=path,
             interval=max(1, args.stepwise_interval),
             frame=args.stepwise_frame,
+            frames=max(1, args.stepwise_frames),
+            frame_rate=frame_rate,
             seed=args.seed,
         ),
         verbose=not args.quiet,
