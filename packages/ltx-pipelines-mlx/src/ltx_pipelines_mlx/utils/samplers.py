@@ -84,6 +84,7 @@ def denoise_loop(
     audio_attention_mask: mx.array | None = None,
     video_cross_attention_mask: mx.array | None = None,
     show_progress: bool = True,
+    on_step: callable | None = None,
 ) -> DenoiseOutput:
     """Run the Euler denoising loop for joint audio+video.
 
@@ -101,6 +102,10 @@ def denoise_loop(
         video_attention_mask: Attention mask for video.
         audio_attention_mask: Attention mask for audio.
         show_progress: Whether to show tqdm progress bar.
+        on_step: Optional per-step preview hook called as
+            ``on_step(step_idx, num_steps, video_x0, sigma)`` with the
+            mask-blended x0 prediction. Used for stepwise previews. Has no
+            effect on control flow.
 
     Returns:
         DenoiseOutput with final video and audio latents.
@@ -132,7 +137,7 @@ def denoise_loop(
     video_uniform = _is_uniform_mask(video_state.denoise_mask)
     audio_uniform = _is_uniform_mask(audio_state.denoise_mask)
 
-    for sigma, sigma_next in iterator:
+    for step_idx, (sigma, sigma_next) in enumerate(iterator):
         # Build sigma / per-token timesteps
         sigma_arr = mx.array([sigma], dtype=mx.bfloat16)
         B = video_x.shape[0]
@@ -163,6 +168,9 @@ def denoise_loop(
         # Apply denoise mask: blend with clean latent
         video_x0 = apply_denoise_mask(video_x0, video_state.clean_latent, video_state.denoise_mask)
         audio_x0 = apply_denoise_mask(audio_x0, audio_state.clean_latent, audio_state.denoise_mask)
+
+        if on_step is not None:
+            on_step(step_idx, len(steps), video_x0, sigma)
 
         # Euler step
         video_x = euler_step(video_x, video_x0, sigma, sigma_next)
@@ -261,6 +269,7 @@ def res2s_denoise_loop(
     audio_guider_factory: MultiModalGuiderFactory | None = None,
     tap: callable | None = None,
     teacache=None,
+    on_step: callable | None = None,
 ) -> DenoiseOutput:
     """Run the res_2s second-order denoising loop for joint audio+video.
 
@@ -292,6 +301,10 @@ def res2s_denoise_loop(
         show_progress: Whether to show tqdm progress bar.
         bongmath: Enable iterative anchor refinement for small steps.
         bongmath_max_iter: Max iterations for bong refinement.
+        on_step: Optional per-step preview hook called as
+            ``on_step(step_idx, num_steps, video_x0, sigma)`` with the
+            second-order (stage 2) x0 prediction, plus once more for the
+            terminal denoise. Has no effect on control flow.
 
     Returns:
         DenoiseOutput with final video and audio latents.
@@ -329,6 +342,9 @@ def res2s_denoise_loop(
     # Only compute for the n_full_steps pairs used in the loop (skip the
     # terminal 0.0 pair which is handled separately at the end).
     hs = [-math.log(sigmas[i + 1] / sigmas[i]) for i in range(n_full_steps)]
+
+    # The terminal denoise below is an extra preview-visible step.
+    total_steps = n_full_steps + (1 if sigmas[-1] == 0 else 0)
 
     phi_cache: dict = {}
     c2 = 0.5
@@ -558,6 +574,9 @@ def res2s_denoise_loop(
         if teacache is not None and should_compute_full:
             teacache.cache_residual(captured_residuals)
 
+        if on_step is not None:
+            on_step(step_idx, total_steps, denoised_v2, sigma)
+
         eps_2_v = denoised_v2 - x_anchor_v
         eps_2_a = denoised_a2 - x_anchor_a
 
@@ -579,6 +598,8 @@ def res2s_denoise_loop(
     # outside the controller's num_steps range.
     if sigmas[-1] == 0:
         video_x0, audio_x0 = _predict(video_x, audio_x, sigmas[n_full_steps])
+        if on_step is not None:
+            on_step(n_full_steps, total_steps, video_x0, sigmas[n_full_steps])
         video_x = video_x0
         audio_x = audio_x0
         mx.async_eval(video_x, audio_x)
@@ -610,6 +631,7 @@ def guided_denoise_loop(
     show_progress: bool = True,
     tap: callable | None = None,
     teacache=None,  # mlx_arsenal.diffusion.TeaCacheController-compatible
+    on_step: callable | None = None,
 ) -> DenoiseOutput:
     """Run the Euler denoising loop with multi-modal guidance (CFG/STG).
 
@@ -653,6 +675,11 @@ def guided_denoise_loop(
             previous step's cached residuals replace the block stack via
             ``block_stack_override``. The transformer head still runs
             on every pass.
+        on_step: Optional per-step preview hook called as
+            ``on_step(step_idx, num_steps, video_x0, sigma)`` with the
+            guided, mask-blended x0 prediction. Not called on steps the
+            guiders skip, since nothing new is computed there. Has no
+            effect on control flow.
 
     Returns:
         DenoiseOutput with final video and audio latents.
@@ -890,6 +917,9 @@ def guided_denoise_loop(
         # Track for skip_step
         last_video_x0 = video_x0
         last_audio_x0 = audio_x0
+
+        if on_step is not None:
+            on_step(step_idx, len(steps), video_x0, sigma)
 
         # Euler step
         video_x = euler_step(video_x, video_x0, sigma, sigma_next)

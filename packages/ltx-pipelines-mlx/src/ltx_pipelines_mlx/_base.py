@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ltx_core_mlx.conditioning.prompt_relay import PromptRelayInput
+    from ltx_pipelines_mlx.utils.stepwise import StepwisePreview
 
 
 class BasePipeline:
@@ -112,6 +113,10 @@ class BasePipeline:
         self.dit: LTXModel | None = None
         self.video_patchifier = VideoLatentPatchifier()
         self.audio_patchifier = AudioPatchifier()
+
+        # Stepwise previews. Set by the CLI after construction (like ``verbose``);
+        # None means no previews and zero cost in the denoising loops.
+        self.stepwise: StepwisePreview | None = None
 
     # -------------------- proxy properties to blocks --------------------
     # Subclasses still read/write these as direct attributes; the property
@@ -343,6 +348,35 @@ class BasePipeline:
             _materialize(dit.parameters())
             aggressive_cleanup()
             return dit
+
+    def _stepwise_hook(
+        self,
+        latent_frames: int,
+        latent_height: int,
+        latent_width: int,
+        *,
+        stage: int | None = None,
+    ) -> Callable | None:
+        """Return the ``on_step`` callable for a denoising loop, or None.
+
+        Binds this loop's latent geometry to the shared stepwise handler so the
+        samplers stay ignorant of pipelines, decoders and patchifiers. Pass
+        ``stage`` in multi-stage pipelines to keep each stage's previews (which
+        run at different resolutions) in separate files.
+
+        Note that previews force the VAE decoder to stay resident through
+        denoising, which the pipelines otherwise avoid — see ``utils.stepwise``.
+        """
+        if self.stepwise is None:
+            return None
+        return self.stepwise.bind(
+            latent_frames=latent_frames,
+            latent_height=latent_height,
+            latent_width=latent_width,
+            decoder_block=self.video_decoder_block,
+            patchifier=self.video_patchifier,
+            stage=stage,
+        )
 
     def _decode_and_save_video(
         self,

@@ -367,6 +367,7 @@ class RetakePipeline(BasePipeline):
             video_guider_factory=video_factory,
             audio_guider_factory=audio_factory,
             sigmas=sigmas,
+            on_step=self._stepwise_hook(F, H, W),
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -537,6 +538,7 @@ class RetakePipeline(BasePipeline):
             video_guider_factory=video_factory,
             audio_guider_factory=audio_factory,
             sigmas=sigmas,
+            on_step=self._stepwise_hook(F_total, H, W),
         )
         if self.low_memory:
             aggressive_cleanup()

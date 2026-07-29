@@ -67,6 +67,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         sigmas: list[float],
         cfg_scale: float = 3.0,
         stg_scale: float = 1.0,
+        on_step: callable | None = None,
     ) -> object:
         """Run Stage 1 denoising with Euler + CFG. Override for HQ (res2s)."""
         # Video: full guidance (ref LTX_2_3_PARAMS)
@@ -93,6 +94,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             video_guider_factory=video_factory,
             audio_guider_factory=audio_factory,
             sigmas=sigmas,
+            on_step=on_step,
         )
 
     def generate_and_save(
@@ -261,6 +263,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             sigmas=sigmas_1,
             cfg_scale=cfg_scale,
             stg_scale=stg_scale,
+            on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -345,6 +348,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_2,
+            on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
         )
         if self.low_memory:
             aggressive_cleanup()

@@ -232,6 +232,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
             video_cross_attention_mask=relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
             teacache=teacache_controller,
             tap=tap,
+            on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -321,6 +322,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_2,
             video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
+            on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
         )
         if self.low_memory:
             aggressive_cleanup()

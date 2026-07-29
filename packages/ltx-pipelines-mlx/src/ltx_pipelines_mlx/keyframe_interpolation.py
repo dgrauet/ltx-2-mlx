@@ -295,6 +295,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
                 video_guider_factory=video_factory,
                 audio_guider_factory=audio_factory,
                 sigmas=sigmas_1,
+                on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
             )
         else:
             self._pre_denoise_flush(video_state_1, audio_state_1)
@@ -305,6 +306,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
                 video_text_embeds=video_embeds,
                 audio_text_embeds=audio_embeds,
                 sigmas=sigmas_1,
+                on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
             )
         if self.low_memory:
             aggressive_cleanup()
@@ -392,6 +394,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
             video_text_embeds=video_embeds,
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_2,
+            on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
         )
         if self.low_memory:
             aggressive_cleanup()

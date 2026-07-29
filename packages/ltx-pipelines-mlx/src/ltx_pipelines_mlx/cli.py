@@ -38,6 +38,76 @@ def _add_base_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--seed", "-s", type=int, default=-1, help="Random seed (-1 = random)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress progress output")
+    parser.add_argument(
+        "--stepwise-image-output-dir",
+        default=None,
+        help=(
+            "[EXPERIMENTAL] Write a preview PNG of one decoded latent frame every "
+            "N denoising steps to this directory, plus a growing animated WebP "
+            "(`*_progress.webp`) you can open mid-run to watch the frame resolve. "
+            "Costs roughly one full decode divided by the latent frame count per "
+            "preview, and keeps the VAE decoder resident through denoising, which "
+            "raises peak memory. This feature may change in future versions."
+        ),
+    )
+    parser.add_argument(
+        "--stepwise-interval",
+        type=int,
+        default=1,
+        help="Preview every N denoising steps (default: 1). The final step is always previewed.",
+    )
+    parser.add_argument(
+        "--stepwise-frame",
+        type=int,
+        default=None,
+        help=(
+            "Latent frame to preview (default: the middle frame). Negative values "
+            "count from the end, so -1 is the last frame. Frame 0 is a poor choice "
+            "for image-conditioned runs — it is the clean conditioning image."
+        ),
+    )
+
+
+def _build_stepwise(args: argparse.Namespace):
+    """Build the stepwise preview handler from CLI args, or None when disabled.
+
+    Validates the output directory up front: a bad path should fail in the first
+    second, not minutes later when the first preview is written.
+    """
+    output_dir = getattr(args, "stepwise_image_output_dir", None)
+    if not output_dir:
+        return None
+
+    from pathlib import Path
+
+    from ltx_pipelines_mlx.utils.stepwise import StepwiseConfig, StepwisePreview
+
+    path = Path(output_dir).expanduser()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".ltx-stepwise-write-test"
+        probe.touch()
+        probe.unlink()
+    except OSError as exc:
+        raise SystemExit(f"--stepwise-image-output-dir {output_dir!r} is not usable: {exc}") from exc
+
+    if getattr(args, "low_ram", False):
+        print(
+            "[stepwise] warning: previews keep the VAE decoder resident through denoising, "
+            "raising peak memory — the opposite of what --low-ram is for.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    return StepwisePreview(
+        StepwiseConfig(
+            output_dir=path,
+            interval=max(1, args.stepwise_interval),
+            frame=args.stepwise_frame,
+            seed=args.seed,
+        ),
+        verbose=not args.quiet,
+    )
 
 
 def _build_tile_count_config(args: argparse.Namespace):
@@ -709,6 +779,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             tile_count=_build_tile_count_config(args),
         )
         pipe.verbose = not args.quiet
+        pipe.stepwise = _build_stepwise(args)
         if lora_paths:
             pipe._pending_loras = lora_paths
         kwargs: dict = dict(
@@ -749,6 +820,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             tile_count=_build_tile_count_config(args),
         )
         pipe.verbose = not args.quiet
+        pipe.stepwise = _build_stepwise(args)
         if lora_paths:
             pipe._pending_loras = lora_paths
         kwargs: dict = dict(
@@ -794,6 +866,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             tile_count=_build_tile_count_config(args),
         )
         pipe.verbose = not args.quiet
+        pipe.stepwise = _build_stepwise(args)
         if lora_paths:
             pipe._pending_loras = lora_paths
         # two-stage / HQ accept the upstream-iso multi-image conditioning list.
@@ -860,6 +933,7 @@ def _cmd_a2v(args: argparse.Namespace) -> None:
         low_ram_streaming=getattr(args, "low_ram", False),
     )
     pipe.verbose = not args.quiet
+    pipe.stepwise = _build_stepwise(args)
     kwargs: dict = dict(
         prompt=args.prompt,
         output_path=args.output,
@@ -902,6 +976,7 @@ def _cmd_retake(args: argparse.Namespace) -> None:
 
     pipe = RetakePipeline(model_dir=args.model, gemma_model_id=args.gemma)
     pipe.verbose = not args.quiet
+    pipe.stepwise = _build_stepwise(args)
     kwargs: dict = dict(
         prompt=args.prompt,
         video_path=args.video,
@@ -939,6 +1014,7 @@ def _cmd_extend(args: argparse.Namespace) -> None:
 
     pipe = RetakePipeline(model_dir=args.model, gemma_model_id=args.gemma)
     pipe.verbose = not args.quiet
+    pipe.stepwise = _build_stepwise(args)
     kwargs: dict = dict(
         prompt=args.prompt,
         video_path=args.video,
@@ -984,6 +1060,7 @@ def _cmd_keyframe(args: argparse.Namespace) -> None:
         distilled_lora_strength=args.lora_strength,
     )
     pipe.verbose = not args.quiet
+    pipe.stepwise = _build_stepwise(args)
     # Build guider params (defaults match reference LTX_2_3_PARAMS)
     from ltx_core_mlx.components.guiders import MultiModalGuiderParams
 
@@ -1067,6 +1144,7 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         distilled_lora_strength=getattr(args, "distilled_lora_strength", 0.5),
     )
     pipe.verbose = not args.quiet
+    pipe.stepwise = _build_stepwise(args)
 
     if not args.quiet and pipe.dev_mode:
         # _effective_lora_paths resolves + validates the distilled LoRA (raises
@@ -1118,6 +1196,7 @@ def _cmd_lipdub(args: argparse.Namespace) -> None:
         low_ram_streaming=getattr(args, "low_ram", False),
     )
     pipe.verbose = not args.quiet
+    pipe.stepwise = _build_stepwise(args)
     pipe.generate_and_save(
         prompt=args.prompt,
         output_path=args.output,
@@ -1157,6 +1236,7 @@ def _cmd_hdr_ic_lora(args: argparse.Namespace) -> None:
         low_ram_streaming=getattr(args, "low_ram", False),
     )
     pipe.verbose = not args.quiet
+    pipe.stepwise = _build_stepwise(args)
 
     pipe.generate_and_save(
         prompt=args.prompt,

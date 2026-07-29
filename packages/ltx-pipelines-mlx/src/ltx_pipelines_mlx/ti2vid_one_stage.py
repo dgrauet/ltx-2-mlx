@@ -258,6 +258,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             sigmas=sigmas,
             video_cross_attention_mask=relay_mask(F, H, W, video_state.latent.shape[1]),
             tap=tap,
+            on_step=self._stepwise_hook(F, H, W),
         )
         if self.low_memory:
             aggressive_cleanup()

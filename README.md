@@ -264,6 +264,56 @@ ltx-2-mlx enhance    Prompt enhancement (no generation)
 ltx-2-mlx info       Model info and memory estimate
 ```
 
+### Stepwise previews
+
+A generation is opaque until the final VAE decode, which for a long clip can be many
+minutes away. These flags decode one latent frame of the in-progress x0 prediction every
+N denoising steps, so you can see the frame resolving and kill a bad run early. They are
+available on every generating subcommand (`generate`, `a2v`, `retake`, `extend`,
+`keyframe`, `ic-lora`, `hdr-ic-lora`, `lipdub`).
+
+```
+--stepwise-image-output-dir DIR   Write preview PNGs + progress animation here
+--stepwise-interval N             Preview every N steps (default: 1; last step always previewed)
+--stepwise-frame I                Latent frame to preview (default: middle; -1 = last)
+```
+
+```bash
+ltx-2-mlx generate -p "a cat walking" -o out.mp4 --frame-rate 24 \
+  --stepwise-image-output-dir ./previews --stepwise-interval 2
+```
+
+Produces, for seed 42 on a two-stage run:
+
+```
+previews/
+  seed_42_s1_step001of030.png   # lossless per-step frames
+  seed_42_s1_step003of030.png
+  ...
+  seed_42_s1_progress.webp      # animated, rewritten after every preview
+  seed_42_s2_progress.webp      # stage 2 runs at a different resolution
+```
+
+`*_progress.webp` accumulates one animation frame per preview and is rewritten
+atomically, so you can open it *while the run is going* and reload to see new steps.
+Stage 1 and stage 2 get separate files.
+
+Notes:
+
+- **Cost** is roughly one full decode divided by the latent frame count, per preview —
+  the decoder is shape-generic on the temporal axis, so a one-frame slice runs the
+  up-block stack over `1/F_lat` of the volume. Raise `--stepwise-interval` if it shows up
+  in your step time.
+- **Memory**: previews keep the VAE decoder resident through denoising, which the
+  pipelines otherwise deliberately avoid. Combining this with `--low-ram` works but is
+  self-defeating, and prints a warning.
+- The default frame is the middle one, because frame 0 is the clean conditioning image on
+  image-conditioned runs and never changes.
+- Judge colour and fine detail from the PNGs, which are lossless. The animation is WebP at
+  quality 90 — full 24-bit colour, but re-encoded on every rewrite.
+- A preview failure never aborts a generation: the first one logs a warning and disables
+  previews for the rest of the run.
+
 ### Environment variables
 
 - `LTX2_GEMMA_EVAL_EVERY=N` — per-layer `mx.eval` cadence in the Gemma forward (default: `1`, i.e. eval every layer). Keeps each Metal command buffer below the macOS GPU watchdog (~10 s) deadline. Set to `0` on Mac Studio / M-series Ultra owners who never see the watchdog crash to recover full lazy-graph throughput.
