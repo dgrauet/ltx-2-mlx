@@ -1,9 +1,11 @@
-"""Bit-exactness tests for the AdaLN per-token dedupe.
+"""Bit-exactness tests for the AdaLN per-token dedupe and deferred gather.
 
 The dedupe replaces a ``B*N``-row AdaLN GEMM with a handful-of-rows GEMM plus
-a gather. It is only allowed to be used when it reproduces the full-size GEMM
-*bit for bit*, so every test here asserts ``mx.array_equal`` (exact), never
-``allclose``.
+a gather. The deferred gather then keeps the deduplicated form all the way into
+the transformer blocks, so the full ``(B*N, num_params*dim)`` float32 tensor is
+never materialised. Neither is allowed to be used unless it reproduces the
+original *bit for bit*, so every test here asserts ``mx.array_equal`` (exact),
+never ``allclose``.
 
 Runnable either under pytest or directly::
 
@@ -16,9 +18,10 @@ import mlx.core as mx
 import numpy as np
 
 from ltx_core_mlx.model.transformer import model as model_mod
-from ltx_core_mlx.model.transformer.adaln import AdaLayerNormSingle
+from ltx_core_mlx.model.transformer.adaln import AdaLayerNormSingle, PerTokenAdaLNParams
 from ltx_core_mlx.model.transformer.model import LTXModel
 from ltx_core_mlx.model.transformer.timestep_embedding import get_timestep_embedding
+from ltx_core_mlx.model.transformer.transformer import BasicAVTransformerBlock
 
 TIMESTEP_DIM = 256
 SCALE = 1000.0
@@ -46,8 +49,14 @@ def _reference(mod: AdaLayerNormSingle, t_emb: mx.array) -> tuple[mx.array, mx.a
     return params.reshape(b, n, -1), embedded.reshape(b, n, -1)
 
 
+def _materialise(x):
+    """Expand a deferred-gather carrier; pass plain arrays through."""
+    return x.gather() if isinstance(x, PerTokenAdaLNParams) else x
+
+
 def _deduped(mod: AdaLayerNormSingle, t_emb: mx.array) -> tuple[mx.array, mx.array]:
-    return LTXModel._adaln_per_token(None, mod, t_emb)  # method never touches `self`
+    params, embedded = LTXModel._adaln_per_token(None, mod, t_emb)  # method never touches `self`
+    return _materialise(params), _materialise(embedded)
 
 
 def _assert_identical(mod: AdaLayerNormSingle, t_emb: mx.array, label: str) -> None:
@@ -149,6 +158,110 @@ def test_unique_rows_declines_on_continuous_ramp() -> None:
     assert model_mod._unique_rows(flat) is None
 
 
+# --- deferred per-block gather ----------------------------------------------
+
+
+def _eager_unpack(params: mx.array, table: mx.array, num_params: int, dim: int) -> list[mx.array]:
+    """The pre-optimisation ``_unpack_adaln`` per-token branch, verbatim."""
+    b, n, _ = params.shape
+    p = params.reshape(b, n, num_params, dim)
+    p = p + table[None, None, :num_params, :]
+    return [p[:, :, i, :] for i in range(num_params)]
+
+
+def _assert_unpack_identical(dim: int, num_params: int, pattern: str, batch: int, tokens: int) -> None:
+    mod = _module(dim, num_params, seed=dim + num_params)
+    t_emb = _embed(_pattern(pattern, batch, tokens))
+    label = f"{dim}/{num_params}/{pattern}/{batch}x{tokens}"
+
+    lazy_params, _ = LTXModel._adaln_per_token(None, mod, t_emb)
+    assert isinstance(lazy_params, PerTokenAdaLNParams), f"{label}: expected a deferred-gather carrier"
+    assert lazy_params.shape == (batch, tokens, num_params * dim), f"{label}: carrier reports {lazy_params.shape}"
+    assert lazy_params.unique_rows < tokens, f"{label}: carrier kept {lazy_params.unique_rows} rows"
+
+    table = mx.random.normal((num_params, dim)).astype(mx.bfloat16)
+    mx.eval(table)
+
+    eager = _eager_unpack(lazy_params.gather(), table, num_params, dim)
+    lazy = BasicAVTransformerBlock._unpack_adaln(lazy_params, table, num_params, dim)
+    mx.eval(eager, lazy)
+    assert len(lazy) == len(eager)
+    for i, (got, ref) in enumerate(zip(lazy, eager, strict=True)):
+        assert got.shape == ref.shape, f"{label}: param {i} shape {got.shape} != {ref.shape}"
+        assert got.dtype == ref.dtype, f"{label}: param {i} dtype {got.dtype} != {ref.dtype}"
+        assert bool(mx.array_equal(got, ref).item()), f"{label}: param {i} not bit-identical"
+    del eager, lazy
+    mx.clear_cache()
+
+
+def test_lazy_unpack_is_bit_identical() -> None:
+    """Deferred per-block expansion == eager unpack of the gathered tensor."""
+    for pattern in ("uniform", "two", "four"):
+        _assert_unpack_identical(4096, 9, pattern, 1, 20000)
+    for dim, num_params in ((2048, 9), (4096, 4), (2048, 4)):
+        _assert_unpack_identical(dim, num_params, "two", 1, 20000)
+    _assert_unpack_identical(4096, 9, "two", 2, 8192)  # batch > 1
+    _assert_unpack_identical(4096, 9, "ramp", 1, 20000)  # worst case, still deduped
+
+
+def test_lazy_carrier_holds_only_the_distinct_rows() -> None:
+    """The whole point: what survives the call is a handful of rows, not B*N."""
+    mod = _module(4096, 9, seed=21)
+    params, embedded = LTXModel._adaln_per_token(None, mod, _embed(_pattern("two", 1, 20000)))
+    assert isinstance(params, PerTokenAdaLNParams)
+    assert isinstance(embedded, PerTokenAdaLNParams)
+    assert params.unique_rows == 2, f"expected 2 distinct rows, got {params.unique_rows}"
+    assert embedded.unique_rows == 2, f"expected 2 distinct rows, got {embedded.unique_rows}"
+    assert params.shape == (1, 20000, 9 * 4096)
+    assert embedded.shape == (1, 20000, 4096)
+
+
+def test_lazy_kill_switch_materialises_eagerly() -> None:
+    """LTX2_ADALN_LAZY=0 restores the eager gather, bit for bit."""
+    mod = _module(2048, 9, seed=13)
+    t_emb = _embed(_pattern("two", 1, 8192))
+    ref_p, ref_e = _reference(mod, t_emb)
+
+    prev = model_mod._ADALN_LAZY
+    model_mod._ADALN_LAZY = False
+    try:
+        got_p, got_e = LTXModel._adaln_per_token(None, mod, t_emb)
+    finally:
+        model_mod._ADALN_LAZY = prev
+    assert isinstance(got_p, mx.array), "kill switch must return a plain array"
+    assert isinstance(got_e, mx.array), "kill switch must return a plain array"
+    mx.eval(ref_p, ref_e, got_p, got_e)
+    assert bool(mx.array_equal(got_p, ref_p).item()), "kill-switch params not bit-identical"
+    assert bool(mx.array_equal(got_e, ref_e).item()), "kill-switch embedded not bit-identical"
+
+
+def test_lazy_declines_when_dedupe_declines() -> None:
+    """Nothing to defer without the dedupe -- both fallbacks return arrays."""
+    mod = _module(2048, 9, seed=17)
+    small = _embed(_pattern("two", 1, 512))  # below the dedupe row threshold
+    params, embedded = LTXModel._adaln_per_token(None, mod, small)
+    assert isinstance(params, mx.array) and isinstance(embedded, mx.array)
+
+    prev = model_mod._ADALN_DEDUPE
+    model_mod._ADALN_DEDUPE = False
+    try:
+        params, embedded = LTXModel._adaln_per_token(None, mod, _embed(_pattern("two", 1, 8192)))
+    finally:
+        model_mod._ADALN_DEDUPE = prev
+    assert isinstance(params, mx.array) and isinstance(embedded, mx.array)
+
+
+def test_scalar_and_per_token_unpack_paths_still_work() -> None:
+    """Plain arrays keep both original ``_unpack_adaln`` branches."""
+    table = mx.zeros((9, 32))
+    scalar = mx.random.normal((2, 9 * 32))
+    out = BasicAVTransformerBlock._unpack_adaln(scalar, table, 9, 32)
+    assert len(out) == 9 and out[0].shape == (2, 1, 32)
+    per_token = mx.random.normal((2, 7, 9 * 32))
+    out = BasicAVTransformerBlock._unpack_adaln(per_token, table, 9, 32)
+    assert len(out) == 9 and out[0].shape == (2, 7, 32)
+
+
 if __name__ == "__main__":
     import time
     import traceback
@@ -161,7 +274,7 @@ if __name__ == "__main__":
         try:
             fn()
             print(f"PASS  {name}  ({time.time() - t0:.1f}s)")
-        except Exception:  # noqa: BLE001
+        except Exception:
             failures += 1
             print(f"FAIL  {name}  ({time.time() - t0:.1f}s)")
             traceback.print_exc()

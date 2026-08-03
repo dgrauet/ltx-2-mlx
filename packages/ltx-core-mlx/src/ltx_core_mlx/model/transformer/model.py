@@ -26,7 +26,7 @@ import mlx.nn as nn
 import numpy as _np
 
 from ltx_core_mlx.guidance.perturbations import BatchedPerturbationConfig
-from ltx_core_mlx.model.transformer.adaln import AdaLayerNormSingle
+from ltx_core_mlx.model.transformer.adaln import AdaLayerNormSingle, PerTokenAdaLNParams
 from ltx_core_mlx.model.transformer.timestep_embedding import get_timestep_embedding
 from ltx_core_mlx.model.transformer.transformer import BasicAVTransformerBlock
 
@@ -42,7 +42,7 @@ _DIT_EVAL_EVERY = int(_os.environ.get("LTX2_DIT_EVAL_EVERY", "8"))
 _mx_eval = getattr(mx, "eval")  # noqa: B009
 
 # ---------------------------------------------------------------------------
-# AdaLN per-token dedupe
+# AdaLN per-token dedupe + deferred per-block gather
 # ---------------------------------------------------------------------------
 # When per-token timesteps are in play (any conditioning that puts some tokens
 # at a different sigma than the target tokens) the AdaLN MLP is evaluated on
@@ -66,6 +66,18 @@ _mx_eval = getattr(mx, "eval")  # noqa: B009
 #
 # LTX2_ADALN_DEDUPE=0 disables it entirely.
 _ADALN_DEDUPE = _os.environ.get("LTX2_ADALN_DEDUPE", "1") != "0"
+# Keep the deduplicated form all the way into the blocks instead of gathering
+# the full (B*N, num_params*dim) float32 tensor here. See PerTokenAdaLNParams:
+# that tensor is 2.95 GB for the 9-parameter video head at 20 000 tokens, plus
+# 1.31 GB for the 4-parameter AV cross-attention head, and it stays resident
+# across all 48 blocks. Deferring the gather into
+# BasicAVTransformerBlock._unpack_adaln expands one (B, N, dim) slice at a time
+# instead, which the block frees as it goes.
+#
+# Requires the dedupe (there is nothing to defer without it); falls back to the
+# eager gather whenever the dedupe declines.
+# LTX2_ADALN_LAZY=0 disables it independently of the dedupe.
+_ADALN_LAZY = _os.environ.get("LTX2_ADALN_LAZY", "1") != "0"
 # Below this many rows the GEMM is cheap and the bookkeeping is not worth it.
 _ADALN_DEDUPE_MIN_ROWS = int(_os.environ.get("LTX2_ADALN_DEDUPE_MIN_ROWS", "1024"))
 # Only worth it when the unique rows are a small fraction of the total.
@@ -161,8 +173,26 @@ def _gathered_equals(out_u: mx.array, inv: mx.array, ref: mx.array) -> bool:
     return True
 
 
-def _dedupe_adaln(adaln_module: AdaLayerNormSingle, flat: mx.array) -> tuple[mx.array, mx.array]:
+def _trim_rows(x: mx.array, u: int) -> mx.array:
+    """Drop the padding rows added by ``_pad_rows``, copying into a new buffer.
+
+    ``x[:u]`` would keep the padded buffer alive behind a view; a gather makes
+    the small result independent so the padded GEMM output can be released.
+    Row selection is a pure copy, so this is exact.
+    """
+    if int(x.shape[0]) == u:
+        return x
+    return mx.take(x, mx.arange(u, dtype=mx.int32), axis=0)
+
+
+def _dedupe_adaln(adaln_module: AdaLayerNormSingle, flat: mx.array) -> tuple[mx.array, mx.array, mx.array | None]:
     """Evaluate ``adaln_module`` on ``flat`` (M, D), deduplicating equal rows.
+
+    Returns ``(params, embedded, inverse)``. When ``inverse`` is None the two
+    arrays are already the full ``(M, ·)`` result; otherwise they hold only the
+    distinct rows and ``mx.take(x, inverse, axis=0)`` reconstructs the full
+    result exactly. Keeping the two forms distinct is what lets the caller
+    defer the gather (see ``PerTokenAdaLNParams``).
 
     Bitwise identical to ``adaln_module(flat)`` for every input: whenever the
     deduped path has not been *proven* equal for this shape signature, the
@@ -170,11 +200,13 @@ def _dedupe_adaln(adaln_module: AdaLayerNormSingle, flat: mx.array) -> tuple[mx.
     """
     m = int(flat.shape[0])
     if not _ADALN_DEDUPE or m < _ADALN_DEDUPE_MIN_ROWS:
-        return adaln_module(flat)
+        params, embedded = adaln_module(flat)
+        return params, embedded, None
 
     grouped = _unique_rows(flat)
     if grouped is None:  # no useful duplication in this input
-        return adaln_module(flat)
+        params, embedded = adaln_module(flat)
+        return params, embedded, None
     reps, inv, u = grouped
 
     # Verdicts are keyed on the *shrunken* row count actually used, so a change
@@ -190,14 +222,16 @@ def _dedupe_adaln(adaln_module: AdaLayerNormSingle, flat: mx.array) -> tuple[mx.
             pending.append((rows, sig))
             continue
         params_u, embedded_u = adaln_module(_pad_rows(reps, rows))
-        return mx.take(params_u, inv, axis=0), mx.take(embedded_u, inv, axis=0)
+        return _trim_rows(params_u, u), _trim_rows(embedded_u, u), inv
 
     if pending:
         # First time for these shapes: compute the reference once, test the
         # candidates against it, and return the reference itself so the
         # calibrating call is exact by construction.
-        return _calibrate_adaln_dedupe(adaln_module, flat, reps, inv, u, pending)
-    return adaln_module(flat)
+        ref_params, ref_embedded = _calibrate_adaln_dedupe(adaln_module, flat, reps, inv, u, pending)
+        return ref_params, ref_embedded, None
+    params, embedded = adaln_module(flat)
+    return params, embedded, None
 
 
 def _candidate_rows(u: int, m: int) -> list[int]:
@@ -492,7 +526,7 @@ class LTXModel(nn.Module):
         self,
         adaln_module: AdaLayerNormSingle,
         t_emb_per_token: mx.array,
-    ) -> tuple[mx.array, mx.array]:
+    ) -> tuple[mx.array | PerTokenAdaLNParams, mx.array | PerTokenAdaLNParams]:
         """Apply AdaLN with per-token timestep embeddings.
 
         Args:
@@ -500,21 +534,33 @@ class LTXModel(nn.Module):
             t_emb_per_token: (B, N, timestep_embedding_dim).
 
         Returns:
-            Tuple of (params, embedded_timestep):
-            - params: (B, N, num_params * dim)
-            - embedded_timestep: (B, N, dim)
+            Tuple of (params, embedded_timestep), logically shaped
+            (B, N, num_params * dim) and (B, N, dim). Both are either plain
+            ``mx.array`` or, when the rows deduplicated and ``LTX2_ADALN_LAZY``
+            is on, ``PerTokenAdaLNParams`` -- the distinct rows plus an index,
+            expanded later by whoever consumes them.
 
         The AdaLN MLP is row-independent and the per-token conditioning vector
         takes only a few distinct values in practice, so the flattened rows are
-        deduplicated before the GEMM and gathered back afterwards. The deduped
-        path is only ever used after it has been proven bitwise identical to
-        the full-size path for that shape signature (see the module header);
-        otherwise this falls back to the original full-size GEMM.
+        deduplicated before the GEMM. The deduped path is only ever used after
+        it has been proven bitwise identical to the full-size path for that
+        shape signature (see the module header); otherwise this falls back to
+        the original full-size GEMM.
         """
         B, N, D = t_emb_per_token.shape
         flat = t_emb_per_token.reshape(B * N, D)
-        params, embedded = _dedupe_adaln(adaln_module, flat)
-        return params.reshape(B, N, -1), embedded.reshape(B, N, -1)
+        params, embedded, inv = _dedupe_adaln(adaln_module, flat)
+        if inv is None:
+            return params.reshape(B, N, -1), embedded.reshape(B, N, -1)
+        if _ADALN_LAZY:
+            return (
+                PerTokenAdaLNParams(params, inv, B, N, adaln_module.num_params),
+                PerTokenAdaLNParams(embedded, inv, B, N, 1),
+            )
+        return (
+            mx.take(params, inv, axis=0).reshape(B, N, -1),
+            mx.take(embedded, inv, axis=0).reshape(B, N, -1),
+        )
 
     def compute_gate_signal(
         self,
@@ -812,7 +858,7 @@ class LTXModel(nn.Module):
     def _output_block(
         self,
         x: mx.array,
-        embedded_timestep: mx.array,
+        embedded_timestep: mx.array | PerTokenAdaLNParams,
         scale_shift_table: mx.array,
         proj: nn.Linear,
     ) -> mx.array:
@@ -822,6 +868,11 @@ class LTXModel(nn.Module):
         The table (2, dim) provides learnable base values; the embedded_timestep
         provides per-sample (or per-token) conditioning.
         """
+        # Per-token embedded timesteps arrive deduplicated and are only needed
+        # here, after the block stack -- expand at the point of use so the
+        # (B, N, dim) float32 tensor never spans the 48-block loop.
+        if isinstance(embedded_timestep, PerTokenAdaLNParams):
+            embedded_timestep = embedded_timestep.gather()
         # embedded_timestep: (B, dim) for scalar or (B, N, dim) for per-token
         if embedded_timestep.ndim == 2:
             embedded_timestep = embedded_timestep[:, None, :]  # (B, 1, dim)

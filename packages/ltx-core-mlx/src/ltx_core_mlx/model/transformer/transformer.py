@@ -22,6 +22,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from ltx_core_mlx.guidance.perturbations import BatchedPerturbationConfig, PerturbationType
+from ltx_core_mlx.model.transformer.adaln import PerTokenAdaLNParams
 from ltx_core_mlx.model.transformer.attention import Attention
 from ltx_core_mlx.model.transformer.feed_forward import FeedForward
 
@@ -157,16 +158,27 @@ class BasicAVTransformerBlock(nn.Module):
         self._norm_eps = norm_eps
 
     @staticmethod
-    def _unpack_adaln(params: mx.array, table: mx.array, num_params: int, dim: int) -> list[mx.array]:
+    def _unpack_adaln(
+        params: mx.array | PerTokenAdaLNParams,
+        table: mx.array,
+        num_params: int,
+        dim: int,
+    ) -> list[mx.array]:
         """Unpack AdaLN parameters and add scale_shift_table.
 
-        Handles both scalar (B, P*dim) and per-token (B, N, P*dim) inputs.
+        Handles scalar (B, P*dim) and per-token (B, N, P*dim) inputs, plus
+        per-token parameters still in deduplicated form
+        (``PerTokenAdaLNParams``), which are expanded one (B, N, dim) slice at
+        a time here instead of being materialised in full up front. All three
+        produce bit-identical values.
 
         Returns:
             List of P arrays, each broadcastable with (B, N, dim):
             - Scalar mode: (B, 1, dim)
             - Per-token mode: (B, N, dim)
         """
+        if isinstance(params, PerTokenAdaLNParams):
+            return params.unpack(table, num_params, dim)
         if params.ndim == 2:
             # Scalar: (B, P*dim) → (B, P, dim)
             p = params.reshape(-1, num_params, dim)
@@ -186,7 +198,7 @@ class BasicAVTransformerBlock(nn.Module):
     def compute_video_normed_sa(
         self,
         video_hidden: mx.array,
-        video_adaln_params: mx.array,
+        video_adaln_params: mx.array | PerTokenAdaLNParams,
     ) -> mx.array:
         """Modulated video input to self-attention — the TeaCache gate signal.
 
@@ -212,12 +224,12 @@ class BasicAVTransformerBlock(nn.Module):
         self,
         video_hidden: mx.array,
         audio_hidden: mx.array,
-        video_adaln_params: mx.array,
-        audio_adaln_params: mx.array,
+        video_adaln_params: mx.array | PerTokenAdaLNParams,
+        audio_adaln_params: mx.array | PerTokenAdaLNParams,
         video_prompt_adaln_params: mx.array,
         audio_prompt_adaln_params: mx.array,
-        av_ca_video_params: mx.array,
-        av_ca_audio_params: mx.array,
+        av_ca_video_params: mx.array | PerTokenAdaLNParams,
+        av_ca_audio_params: mx.array | PerTokenAdaLNParams,
         av_ca_a2v_gate_params: mx.array,
         av_ca_v2a_gate_params: mx.array,
         video_text_embeds: mx.array | None = None,
