@@ -23,6 +23,7 @@ from enum import Enum
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as _np
 
 from ltx_core_mlx.guidance.perturbations import BatchedPerturbationConfig
 from ltx_core_mlx.model.transformer.adaln import AdaLayerNormSingle
@@ -39,6 +40,213 @@ from ltx_core_mlx.model.transformer.transformer import BasicAVTransformerBlock
 # Set to 0 to disable (full lazy graph, original behaviour).
 _DIT_EVAL_EVERY = int(_os.environ.get("LTX2_DIT_EVAL_EVERY", "8"))
 _mx_eval = getattr(mx, "eval")  # noqa: B009
+
+# ---------------------------------------------------------------------------
+# AdaLN per-token dedupe
+# ---------------------------------------------------------------------------
+# When per-token timesteps are in play (any conditioning that puts some tokens
+# at a different sigma than the target tokens) the AdaLN MLP is evaluated on
+# every one of the B*N tokens, every step -- even though the per-token
+# conditioning vector only ever takes a handful of distinct values (the target
+# sigma, plus one per conditioning group). Deduplicating the rows turns a
+# B*N-row GEMM into a handful-of-rows GEMM plus a gather.
+#
+# Bit-exactness caveat (measured, not assumed): MLX dispatches different Metal
+# GEMM kernels depending on the row count, so a naively shrunk GEMM is NOT
+# guaranteed to reproduce the full-size one bit-for-bit -- the K-reduction
+# order can change. This implementation therefore
+#   (a) pads the unique rows up to a row count that lands on the same kernel
+#       as the full-size GEMM, and
+#   (b) verifies -- once per shape signature, against the real full-size
+#       result, with mx.array_equal -- that the deduped path is bitwise
+#       identical before it is ever used for a returned value.
+# If no candidate row count reproduces the full-size result exactly, the
+# signature is permanently marked not-deduplicable and the original code path
+# runs. The optimisation can therefore never change a single output bit.
+#
+# LTX2_ADALN_DEDUPE=0 disables it entirely.
+_ADALN_DEDUPE = _os.environ.get("LTX2_ADALN_DEDUPE", "1") != "0"
+# Below this many rows the GEMM is cheap and the bookkeeping is not worth it.
+_ADALN_DEDUPE_MIN_ROWS = int(_os.environ.get("LTX2_ADALN_DEDUPE_MIN_ROWS", "1024"))
+# Only worth it when the unique rows are a small fraction of the total.
+_ADALN_DEDUPE_MAX_FRAC = float(_os.environ.get("LTX2_ADALN_DEDUPE_MAX_FRAC", "0.5"))
+# Candidate padded row counts, cheapest first. 0 = "use the unique rows as-is".
+_ADALN_DEDUPE_PADS = (0, 256, 1024, 4096)
+# Chunk size (rows) for the one-time bitwise verification, to bound peak memory.
+_ADALN_VERIFY_CHUNK = 2048
+
+# signature -> padded row count to use, or None once proven not bit-identical.
+_ADALN_DEDUPE_PLAN: dict[tuple, int | None] = {}
+
+
+def _adaln_signature(adaln_module: AdaLayerNormSingle, flat: mx.array, padded_rows: int) -> tuple:
+    """Shape/dtype signature that determines MLX kernel selection.
+
+    Kernel choice depends on shapes, dtypes and strides -- never on values --
+    so a verdict established once for a signature holds for every later call
+    with the same signature. ``padded_rows`` is part of the signature because
+    it is the row count of the *shrunken* GEMM being validated.
+    """
+    lin = adaln_module.linear
+    w = lin.weight
+    return (
+        int(flat.shape[0]),
+        int(flat.shape[1]),
+        int(padded_rows),
+        int(adaln_module.num_params),
+        tuple(int(s) for s in w.shape),
+        str(w.dtype),
+        type(lin).__name__,
+        str(flat.dtype),
+    )
+
+
+def _unique_rows(flat: mx.array) -> tuple[mx.array, mx.array, int] | None:
+    """Exact unique-row decomposition of ``flat`` (M, D).
+
+    Uses the raw bit patterns of two columns of the sinusoidal timestep
+    embedding as a cheap grouping key (cos and sin of the fundamental
+    frequency -- jointly injective in the timestep over the principal period),
+    then *verifies the grouping exactly* against the full rows. A key collision
+    can therefore only ever cost the optimisation, never correctness.
+
+    Returns:
+        ``(reps, inverse, U)`` with ``reps`` (U, D) and ``inverse`` (M,) such
+        that ``mx.take(reps, inverse, axis=0)`` is bitwise ``flat``; or None
+        when the rows are not usefully duplicated.
+    """
+    m, d = int(flat.shape[0]), int(flat.shape[1])
+    half = d // 2
+    key = mx.stack([flat[:, 0], flat[:, half]], axis=1).astype(mx.float32)
+    key_bits = _np.ascontiguousarray(_np.asarray(key)).view(_np.uint32)
+    packed = (key_bits[:, 0].astype(_np.uint64) << _np.uint64(32)) | key_bits[:, 1].astype(_np.uint64)
+    uniq, first_idx, inverse = _np.unique(packed, return_index=True, return_inverse=True)
+    u = int(uniq.shape[0])
+    if u >= m or u > m * _ADALN_DEDUPE_MAX_FRAC:
+        return None
+    idx = mx.array(first_idx.astype(_np.int32))
+    inv = mx.array(_np.ascontiguousarray(inverse.reshape(-1)).astype(_np.int32))
+    reps = mx.take(flat, idx, axis=0)
+    # Exact grouping check: every row must equal its representative, bitwise.
+    if not bool(mx.array_equal(mx.take(reps, inv, axis=0), flat).item()):
+        return None
+    return reps, inv, u
+
+
+def _pad_rows(reps: mx.array, target: int) -> mx.array:
+    """Repeat the last row until ``reps`` has at least ``target`` rows.
+
+    Padding rows are pure filler: each GEMM output row is independent, so the
+    extra rows only influence which Metal kernel MLX selects.
+    """
+    u = int(reps.shape[0])
+    if target <= u:
+        return reps
+    filler = mx.broadcast_to(reps[-1:], (target - u, int(reps.shape[1])))
+    return mx.concatenate([reps, filler], axis=0)
+
+
+def _gathered_equals(out_u: mx.array, inv: mx.array, ref: mx.array) -> bool:
+    """Bitwise ``mx.take(out_u, inv, axis=0) == ref``, chunked to bound memory."""
+    if out_u.shape[-1] != ref.shape[-1]:
+        return False
+    m = int(ref.shape[0])
+    for start in range(0, m, _ADALN_VERIFY_CHUNK):
+        stop = min(start + _ADALN_VERIFY_CHUNK, m)
+        gathered = mx.take(out_u, inv[start:stop], axis=0)
+        equal = bool(mx.array_equal(gathered, ref[start:stop]).item())
+        del gathered
+        if not equal:
+            return False
+    return True
+
+
+def _dedupe_adaln(adaln_module: AdaLayerNormSingle, flat: mx.array) -> tuple[mx.array, mx.array]:
+    """Evaluate ``adaln_module`` on ``flat`` (M, D), deduplicating equal rows.
+
+    Bitwise identical to ``adaln_module(flat)`` for every input: whenever the
+    deduped path has not been *proven* equal for this shape signature, the
+    original full-size call is what is returned.
+    """
+    m = int(flat.shape[0])
+    if not _ADALN_DEDUPE or m < _ADALN_DEDUPE_MIN_ROWS:
+        return adaln_module(flat)
+
+    grouped = _unique_rows(flat)
+    if grouped is None:  # no useful duplication in this input
+        return adaln_module(flat)
+    reps, inv, u = grouped
+
+    # Verdicts are keyed on the *shrunken* row count actually used, so a change
+    # in the number of unique rows re-validates instead of silently reusing a
+    # verdict established for a different GEMM shape.
+    pending: list[tuple[int, tuple]] = []
+    for rows in _candidate_rows(u, m):
+        sig = _adaln_signature(adaln_module, flat, rows)
+        verdict = _ADALN_DEDUPE_PLAN.get(sig, -1)
+        if verdict is None:
+            continue  # already proven not bit-identical -- try a larger padding
+        if verdict == -1:
+            pending.append((rows, sig))
+            continue
+        params_u, embedded_u = adaln_module(_pad_rows(reps, rows))
+        return mx.take(params_u, inv, axis=0), mx.take(embedded_u, inv, axis=0)
+
+    if pending:
+        # First time for these shapes: compute the reference once, test the
+        # candidates against it, and return the reference itself so the
+        # calibrating call is exact by construction.
+        return _calibrate_adaln_dedupe(adaln_module, flat, reps, inv, u, pending)
+    return adaln_module(flat)
+
+
+def _candidate_rows(u: int, m: int) -> list[int]:
+    """Shrunken row counts worth trying, cheapest first, de-duplicated."""
+    out: list[int] = []
+    for pad in _ADALN_DEDUPE_PADS:
+        rows = max(u, pad)
+        if rows >= m:
+            break  # no saving left at this padding or beyond
+        if rows not in out:
+            out.append(rows)
+    return out
+
+
+def _calibrate_adaln_dedupe(
+    adaln_module: AdaLayerNormSingle,
+    flat: mx.array,
+    reps: mx.array,
+    inv: mx.array,
+    u: int,
+    pending: list[tuple[int, tuple]],
+) -> tuple[mx.array, mx.array]:
+    """Find a shrunken row count that reproduces the full-size GEMM exactly.
+
+    Returns the *reference* (full-size) result, so the calibrating call is
+    exact by construction. Records a verdict per candidate in
+    ``_ADALN_DEDUPE_PLAN``.
+    """
+    debug = bool(_os.environ.get("LTX2_ADALN_DEDUPE_DEBUG"))
+    ref_params, ref_embedded = adaln_module(flat)
+    _mx_eval(ref_params, ref_embedded)
+
+    for rows, sig in pending:
+        params_u, embedded_u = adaln_module(_pad_rows(reps, rows))
+        _mx_eval(params_u, embedded_u)
+        ok = _gathered_equals(params_u, inv, ref_params) and _gathered_equals(embedded_u, inv, ref_embedded)
+        del params_u, embedded_u
+        mx.clear_cache()
+        _ADALN_DEDUPE_PLAN[sig] = rows if ok else None
+        if debug:
+            print(
+                f"[adaln-dedupe] tokens={sig[0]} nparams={sig[3]} unique={u} gemm_rows={rows} -> "
+                f"{'ACCEPTED' if ok else 'rejected (not bit-identical)'}",
+                flush=True,
+            )
+        if ok:
+            break
+
+    return ref_params, ref_embedded
 
 
 class Modality(Enum):
@@ -295,10 +503,17 @@ class LTXModel(nn.Module):
             Tuple of (params, embedded_timestep):
             - params: (B, N, num_params * dim)
             - embedded_timestep: (B, N, dim)
+
+        The AdaLN MLP is row-independent and the per-token conditioning vector
+        takes only a few distinct values in practice, so the flattened rows are
+        deduplicated before the GEMM and gathered back afterwards. The deduped
+        path is only ever used after it has been proven bitwise identical to
+        the full-size path for that shape signature (see the module header);
+        otherwise this falls back to the original full-size GEMM.
         """
         B, N, D = t_emb_per_token.shape
         flat = t_emb_per_token.reshape(B * N, D)
-        params, embedded = adaln_module(flat)
+        params, embedded = _dedupe_adaln(adaln_module, flat)
         return params.reshape(B, N, -1), embedded.reshape(B, N, -1)
 
     def compute_gate_signal(
