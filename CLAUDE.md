@@ -242,6 +242,7 @@ Note: Connector attention **keeps** Sequential wrapping (`to_out.0.*` stays).
 
 ```python
 from ltx_core_mlx.utils.memory import aggressive_cleanup
+
 aggressive_cleanup()  # gc.collect() + mx.clear_cache()
 ```
 
@@ -253,7 +254,7 @@ Never decode all video frames in RAM. Stream frame-by-frame to ffmpeg:
 
 ```python
 for i in range(num_frames):
-    frame = decoder.decode_frame(latents[:, :, i:i+1])
+    frame = decoder.decode_frame(latents[:, :, i : i + 1])
     ffmpeg_proc.stdin.write(frame_to_bytes(frame))
     del frame
     if i % 8 == 0:
@@ -654,8 +655,8 @@ Timestep-aware residual caching (Liu et al., *Timestep Embedding Aware Cache*) f
 ```python
 pipeline.generate_and_save(
     prompt=...,
-    enable_teacache=True,           # default False
-    teacache_thresh=0.5,            # optional override
+    enable_teacache=True,  # default False
+    teacache_thresh=0.5,  # optional override
 )
 ```
 
