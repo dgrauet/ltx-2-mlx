@@ -5,14 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-_DISTILLED = (
-    Path(__file__).parents[1]
-    / "packages"
-    / "ltx-pipelines-mlx"
-    / "src"
-    / "ltx_pipelines_mlx"
-    / "distilled.py"
-)
+_DISTILLED = Path(__file__).parents[1] / "packages" / "ltx-pipelines-mlx" / "src" / "ltx_pipelines_mlx" / "distilled.py"
 
 _EXPECTED_CALLS = {
     "Loading VAE encoder": {"_load_vae_encoder"},

@@ -165,9 +165,7 @@ def _generate_profile_metadata(args: argparse.Namespace) -> dict[str, object]:
         "tile_frames": args.tile_frames,
         "tile_spatial": args.tile_spatial,
         "tile_overlap": args.tile_overlap,
-        "vae_decode_budget_gb": float(
-            os.environ.get("LTX2_VAE_DECODE_BUDGET_GB", "8.0")
-        ),
+        "vae_decode_budget_gb": float(os.environ.get("LTX2_VAE_DECODE_BUDGET_GB", "8.0")),
         "image_conditioning_count": len(args.images or []),
         "lora_count": len(args.lora or []),
         "prompt_characters": len(args.prompt),

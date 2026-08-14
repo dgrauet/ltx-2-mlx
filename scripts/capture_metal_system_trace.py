@@ -76,11 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     output = Path(args.output).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path = (
-        Path(args.manifest).expanduser().resolve()
-        if args.manifest
-        else Path(f"{output}.manifest.json")
-    )
+    manifest_path = Path(args.manifest).expanduser().resolve() if args.manifest else Path(f"{output}.manifest.json")
     toc_path = Path(f"{output}.toc.xml")
     record_command = _build_record_command(
         output,
@@ -115,9 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "started_unix_seconds": started,
         "ended_unix_seconds": time.time(),
         "target_command": target,
-        "forwarded_environment_names": [
-            assignment.partition("=")[0] for assignment in args.env
-        ],
+        "forwarded_environment_names": [assignment.partition("=")[0] for assignment in args.env],
         "trace_path": str(output),
         "trace_sha256": _sha256(output),
         "toc_path": str(toc_path),

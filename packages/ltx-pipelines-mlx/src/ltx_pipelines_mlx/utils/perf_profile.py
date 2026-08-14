@@ -174,9 +174,7 @@ def runtime_identity() -> dict[str, object]:
         "device_name": device.get("device_name"),
         "device_architecture": device.get("architecture"),
         "device_memory_bytes": device.get("memory_size"),
-        "device_recommended_working_set_bytes": device.get(
-            "max_recommended_working_set_size"
-        ),
+        "device_recommended_working_set_bytes": device.get("max_recommended_working_set_size"),
     }
 
 
@@ -211,9 +209,7 @@ class _JsonlProfiler:
                 self._observed_peak_mlx_gb,
                 float(mlx_peak),
             )
-        footprint_peak = memory.get(
-            "process_lifetime_max_phys_footprint_gb"
-        )
+        footprint_peak = memory.get("process_lifetime_max_phys_footprint_gb")
         if isinstance(footprint_peak, (float, int)):
             self._observed_peak_phys_footprint_gb = max(
                 self._observed_peak_phys_footprint_gb,
