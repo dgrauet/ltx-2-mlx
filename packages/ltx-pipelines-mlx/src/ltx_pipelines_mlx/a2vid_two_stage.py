@@ -34,7 +34,7 @@ from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_
 from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TI2VidTwoStagesPipeline
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
-from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
+from ltx_pipelines_mlx.utils.samplers import OnStepFn, denoise_loop, guided_denoise_loop
 
 
 class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
@@ -67,7 +67,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         sigmas: list[float],
         cfg_scale: float = 3.0,
         stg_scale: float = 1.0,
-        on_step: callable | None = None,
+        on_step: OnStepFn | None = None,
     ) -> object:
         """Run Stage 1 denoising with Euler + CFG. Override for HQ (res2s)."""
         # Video: full guidance (ref LTX_2_3_PARAMS)

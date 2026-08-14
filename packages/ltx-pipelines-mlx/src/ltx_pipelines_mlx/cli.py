@@ -105,10 +105,22 @@ def _build_stepwise(args: argparse.Namespace):
     except OSError as exc:
         raise SystemExit(f"--stepwise-image-output-dir {output_dir!r} is not usable: {exc}") from exc
 
+    # Warned unconditionally, not just under --low-ram: previews hold the VAE decoder
+    # and the transformer in memory at the same time, which is the shape of the jetsam
+    # kills fixed in 0.14.19. A jetsam kill is not an exception — the process dies with
+    # no traceback — so the handler's failure containment cannot cover it, and this line
+    # is the only thing that will point a user at previews afterwards.
+    print(
+        "[stepwise] warning: previews keep the VAE decoder resident through denoising, so "
+        "it and the transformer are in memory at once. On a memory-tight machine this can "
+        "get the process killed outright, with no error.",
+        file=sys.stderr,
+        flush=True,
+    )
     if getattr(args, "low_ram", False):
         print(
-            "[stepwise] warning: previews keep the VAE decoder resident through denoising, "
-            "raising peak memory — the opposite of what --low-ram is for.",
+            "[stepwise] warning: raising peak memory is the opposite of what --low-ram is "
+            "for; consider dropping one of the two.",
             file=sys.stderr,
             flush=True,
         )

@@ -5,6 +5,7 @@ Ported from ltx-pipelines denoising loop.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import mlx.core as mx
@@ -23,6 +24,11 @@ from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS
 from ltx_pipelines_mlx.utils.res2s import get_res2s_coefficients, phi
+
+# Per-step preview hook: ``on_step(step_idx, num_steps, video_x0, sigma)``.
+OnStepFn = Callable[[int, int, mx.array, float], None]
+# TeaCache calibration hook: ``tap(step_idx, gate_signal, video_residual, audio_residual)``.
+TapFn = Callable[[int, mx.array | None, mx.array, mx.array], None]
 
 
 def _channelwise_normalize(x: mx.array) -> mx.array:
@@ -84,7 +90,7 @@ def denoise_loop(
     audio_attention_mask: mx.array | None = None,
     video_cross_attention_mask: mx.array | None = None,
     show_progress: bool = True,
-    on_step: callable | None = None,
+    on_step: OnStepFn | None = None,
 ) -> DenoiseOutput:
     """Run the Euler denoising loop for joint audio+video.
 
@@ -267,9 +273,9 @@ def res2s_denoise_loop(
     bongmath_max_iter: int = 100,
     video_guider_factory: MultiModalGuiderFactory | None = None,
     audio_guider_factory: MultiModalGuiderFactory | None = None,
-    tap: callable | None = None,
+    tap: TapFn | None = None,
     teacache=None,
-    on_step: callable | None = None,
+    on_step: OnStepFn | None = None,
 ) -> DenoiseOutput:
     """Run the res_2s second-order denoising loop for joint audio+video.
 
@@ -360,7 +366,7 @@ def res2s_denoise_loop(
         v_x: mx.array,
         a_x: mx.array,
         sig: float,
-        run_pass: callable | None = None,
+        run_pass: Callable[[str, dict], tuple[mx.array, mx.array]] | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Run model prediction with optional guidance, then apply denoise mask.
 
@@ -629,9 +635,9 @@ def guided_denoise_loop(
     audio_attention_mask: mx.array | None = None,
     video_cross_attention_mask: mx.array | None = None,
     show_progress: bool = True,
-    tap: callable | None = None,
+    tap: TapFn | None = None,
     teacache=None,  # mlx_arsenal.diffusion.TeaCacheController-compatible
-    on_step: callable | None = None,
+    on_step: OnStepFn | None = None,
 ) -> DenoiseOutput:
     """Run the Euler denoising loop with multi-modal guidance (CFG/STG).
 

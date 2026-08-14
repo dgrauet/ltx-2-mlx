@@ -27,7 +27,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,6 +37,7 @@ from PIL import Image
 if TYPE_CHECKING:
     from ltx_core_mlx.components.patchifiers import VideoLatentPatchifier
     from ltx_pipelines_mlx.utils.blocks import VideoDecoder
+    from ltx_pipelines_mlx.utils.samplers import OnStepFn
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +152,7 @@ class StepwisePreview:
         decoder_block: VideoDecoder,
         patchifier: VideoLatentPatchifier,
         stage: int | None = None,
-    ) -> Callable[[int, int, mx.array, float], None] | None:
+    ) -> OnStepFn | None:
         """Return an ``on_step(step_idx, num_steps, video_x0, sigma)`` callable.
 
         Args:

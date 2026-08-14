@@ -388,3 +388,54 @@ class TestSamplerHook:
             on_step=lambda idx, total, pred, sigma: seen.append((idx, total)),
         )
         assert seen == [(0, 4), (1, 4), (2, 4), (3, 4)]
+
+
+# ---------------------------------------------------------------------------
+# CLI construction
+# ---------------------------------------------------------------------------
+def stepwise_args(tmp_path, **overrides):
+    import argparse
+
+    values = dict(
+        stepwise_image_output_dir=str(tmp_path / "previews"),
+        stepwise_interval=1,
+        stepwise_frame=None,
+        stepwise_frames=WINDOW,
+        frame_rate=24.0,
+        seed=42,
+        quiet=False,
+        low_ram=False,
+    )
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+class TestCLIMemoryWarning:
+    """The memory warning must not be conditional on --low-ram.
+
+    Previews hold the decoder and the transformer in memory at once, and the
+    resulting jetsam kill is not an exception — the handler's failure
+    containment cannot catch it, so this line is the only signal the user gets.
+    """
+
+    def test_warns_without_low_ram(self, tmp_path, capsys):
+        from ltx_pipelines_mlx.cli import _build_stepwise
+
+        assert _build_stepwise(stepwise_args(tmp_path)) is not None
+        err = capsys.readouterr().err
+        assert "VAE decoder resident" in err
+        assert "--low-ram" not in err
+
+    def test_low_ram_adds_a_second_line(self, tmp_path, capsys):
+        from ltx_pipelines_mlx.cli import _build_stepwise
+
+        _build_stepwise(stepwise_args(tmp_path, low_ram=True))
+        err = capsys.readouterr().err
+        assert "VAE decoder resident" in err
+        assert "--low-ram" in err
+
+    def test_silent_when_previews_are_off(self, tmp_path, capsys):
+        from ltx_pipelines_mlx.cli import _build_stepwise
+
+        assert _build_stepwise(stepwise_args(tmp_path, stepwise_image_output_dir=None)) is None
+        assert capsys.readouterr().err == ""

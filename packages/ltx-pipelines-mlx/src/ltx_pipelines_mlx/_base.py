@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ltx_core_mlx.conditioning.prompt_relay import PromptRelayInput
+    from ltx_pipelines_mlx.utils.samplers import OnStepFn
     from ltx_pipelines_mlx.utils.stepwise import StepwisePreview
 
 
@@ -356,7 +357,7 @@ class BasePipeline:
         latent_width: int,
         *,
         stage: int | None = None,
-    ) -> Callable | None:
+    ) -> OnStepFn | None:
         """Return the ``on_step`` callable for a denoising loop, or None.
 
         Binds this loop's latent geometry to the shared stepwise handler so the

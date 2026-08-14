@@ -320,8 +320,10 @@ half resolution.
 Notes:
 
 - **Memory**: previews keep the VAE decoder resident through denoising, which the
-  pipelines otherwise deliberately avoid. Combining this with `--low-ram` works but is
-  self-defeating, and prints a warning.
+  pipelines otherwise deliberately avoid — the decoder and the transformer are live at
+  the same time. On a memory-tight machine that can get the process killed by the OS
+  with no error at all, so enabling previews always prints a warning. Combining them
+  with `--low-ram` works but is self-defeating, and adds a second line saying so.
 - The window is centred on the middle of the clip by default, because frame 0 is the clean
   conditioning image on image-conditioned runs and never changes.
 - Multi-stage pipelines tag files `_s1` / `_s2`; the stages run at different resolutions.
