@@ -6,7 +6,6 @@ build-backend = "hatchling.build"
 name = "ltx-trainer-mlx"
 version = "0.14.19"
 description = "LTX-2 training toolkit ported to MLX for Apple Silicon"
-readme = "../../README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "dgrauet" }]
