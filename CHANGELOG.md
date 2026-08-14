@@ -10,6 +10,13 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.14.20](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.19...v0.14.20) (2026-08-14)
+
+
+### Bug Fixes
+
+* **ci:** unbreak the build and lint after hatchling 1.32 and ruff 0.16 ([#89](https://github.com/dgrauet/ltx-2-mlx/issues/89)) ([2167b5b](https://github.com/dgrauet/ltx-2-mlx/commit/2167b5b8075409067857d4b9b899ab144b1a57c1))
+
 ## [0.14.19](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.18...v0.14.19) (2026-07-19)
 
 

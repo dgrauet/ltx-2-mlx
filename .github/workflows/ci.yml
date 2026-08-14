@@ -14,10 +14,16 @@ jobs:
       - name: lint (ruff check)
         uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89  # v4.1.0
         with:
+          # Pin to the locked ruff so CI matches local `uv run ruff`. Without
+          # this the action installs the newest release and a ruff upgrade
+          # reddens every open PR at once (0.16.0 did, by formatting the
+          # Python snippets in CLAUDE.md).
+          version-file: uv.lock
           args: check packages/ tests/
       - name: format (ruff format)
         uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89  # v4.1.0
         with:
+          version-file: uv.lock
           args: format --check packages/ tests/
 
   syntax:
