@@ -86,9 +86,7 @@ class _OrderedFrameWriter:
 
     def __init__(self, stream: Any, *, overlap: bool) -> None:
         self._stream = stream
-        self._executor = (
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix="ltx-media-writer") if overlap else None
-        )
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ltx-media-writer") if overlap else None
         self._pending: Future[None] | None = None
         self.completed = 0
 
