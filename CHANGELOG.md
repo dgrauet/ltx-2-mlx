@@ -10,6 +10,13 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.14.21](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.20...v0.14.21) (2026-08-17)
+
+
+### Features
+
+* stepwise previews during generation ([#88](https://github.com/dgrauet/ltx-2-mlx/issues/88)) ([a42db21](https://github.com/dgrauet/ltx-2-mlx/commit/a42db21d39af53abdd57552b2952d95b74fe1d1a))
+
 ## [0.14.20](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.19...v0.14.20) (2026-08-14)
 
 
