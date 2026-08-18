@@ -24,6 +24,7 @@ via :func:`~ltx_2_mlx.model.video_vae.ops.remap_encoder_weight_keys`.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import subprocess
@@ -599,13 +600,13 @@ class VideoDecoder(nn.Module):
                 # that a writer that starts raising cannot leak the process.
                 try:
                     if proc.stdin and not proc.stdin.closed:
-                        proc.stdin.close()
-                except BrokenPipeError:
-                    # ffmpeg already exited; closing flushes buffered bytes into
-                    # a dead pipe.
-                    pass
-                proc.wait()
-                aggressive_cleanup()
+                        # ffmpeg may already have exited, and closing flushes
+                        # buffered bytes into a dead pipe.
+                        with contextlib.suppress(BrokenPipeError):
+                            proc.stdin.close()
+                finally:
+                    proc.wait()
+                    aggressive_cleanup()
 
 
 class VideoEncoder(nn.Module):
