@@ -591,8 +591,14 @@ class VideoDecoder(nn.Module):
             # otherwise propagate past this point and leave ffmpeg running until
             # garbage collection.
             frame_writer.shutdown()
-            if proc.stdin and not proc.stdin.closed:
-                proc.stdin.close()
+            try:
+                if proc.stdin and not proc.stdin.closed:
+                    proc.stdin.close()
+            except BrokenPipeError:
+                # ffmpeg already exited; closing flushes buffered bytes into a
+                # dead pipe. Reaping it still has to happen, so this cannot be
+                # allowed to skip the two calls below.
+                pass
             proc.wait()
             aggressive_cleanup()
 
