@@ -590,17 +590,22 @@ class VideoDecoder(nn.Module):
             # other than a closed pipe (a stalled stream raises OSError) would
             # otherwise propagate past this point and leave ffmpeg running until
             # garbage collection.
-            frame_writer.shutdown()
             try:
-                if proc.stdin and not proc.stdin.closed:
-                    proc.stdin.close()
-            except BrokenPipeError:
-                # ffmpeg already exited; closing flushes buffered bytes into a
-                # dead pipe. Reaping it still has to happen, so this cannot be
-                # allowed to skip the two calls below.
-                pass
-            proc.wait()
-            aggressive_cleanup()
+                frame_writer.shutdown()
+            finally:
+                # Reaping ffmpeg does not depend on how the writer shut down.
+                # Executor.shutdown() does not surface worker exceptions today,
+                # so this nesting is currently unreachable; it is structural so
+                # that a writer that starts raising cannot leak the process.
+                try:
+                    if proc.stdin and not proc.stdin.closed:
+                        proc.stdin.close()
+                except BrokenPipeError:
+                    # ffmpeg already exited; closing flushes buffered bytes into
+                    # a dead pipe.
+                    pass
+                proc.wait()
+                aggressive_cleanup()
 
 
 class VideoEncoder(nn.Module):
