@@ -69,8 +69,14 @@ def _write_all(buffer: memoryview, stream: Any) -> None:
     try:
         while view:
             written = stream.write(view)
+            # A stream that reports neither progress nor an error would spin
+            # this loop forever. That is a broken stream implementation, not a
+            # closed pipe, so it does not raise BrokenPipeError.
             if written is None or written <= 0:
-                raise BrokenPipeError("stream accepted no data")
+                raise OSError(
+                    f"stream.write() reported {written!r} bytes written; "
+                    f"cannot make progress on {len(view)} remaining bytes"
+                )
             view = view[written:]
     finally:
         view.release()
@@ -114,8 +120,15 @@ class _OrderedFrameWriter:
 
 
 def _media_write_overlap_enabled() -> bool:
-    value = os.environ.get("LTX2_MEDIA_WRITE_OVERLAP", "1").strip().lower()
-    return value not in {"0", "false", "no", "off"}
+    """Whether frame writes overlap decode on a worker thread. Off by default.
+
+    The zero-copy write path is unconditional and free. Overlapping the write
+    on a second thread measured 0.8% end to end on a 512x512x25 q8 render,
+    inside run-to-run noise, so it stays opt-in rather than adding concurrency
+    to the decode loop for no measured gain.
+    """
+    value = os.environ.get("LTX2_MEDIA_WRITE_OVERLAP", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _compute_decode_tiling(

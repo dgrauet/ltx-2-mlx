@@ -49,12 +49,14 @@ def test_ordered_frame_writer_preserves_exact_bytes(overlap: bool) -> None:
     assert writer.completed == 3
 
 
-def test_ordered_frame_writer_propagates_pipe_failure() -> None:
+def test_ordered_frame_writer_propagates_stalled_write() -> None:
+    # A sink that accepts zero bytes is a stalled stream, not a closed pipe;
+    # the error surfaces as OSError naming the byte counts.
     sink = _ShortWriter(limit=0)
     writer = _OrderedFrameWriter(sink, overlap=True)
     try:
         writer.submit(bytearray([1, 2, 3]))
-        with pytest.raises(BrokenPipeError):
+        with pytest.raises(OSError, match="reported 0 bytes written"):
             writer.finish()
     finally:
         writer.shutdown()
