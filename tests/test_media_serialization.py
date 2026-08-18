@@ -8,7 +8,11 @@ import wave
 import mlx.core as mx
 import pytest
 
-from ltx_core_mlx.model.video_vae.video_vae import _OrderedFrameWriter, _write_all
+from ltx_core_mlx.model.video_vae.video_vae import (
+    _media_write_overlap_enabled,
+    _OrderedFrameWriter,
+    _write_all,
+)
 from ltx_pipelines_mlx.utils._orchestration import save_waveform
 
 
@@ -49,6 +53,29 @@ def test_ordered_frame_writer_preserves_exact_bytes(overlap: bool) -> None:
     assert writer.completed == 3
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, False),
+        ("1", True),
+        ("true", True),
+        ("YES", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("", False),
+        ("maybe", False),
+    ],
+)
+def test_media_write_overlap_is_opt_in(monkeypatch, value, expected) -> None:
+    # Pins the default: the zero-copy write path is unconditional, the worker
+    # thread is not. Without this, reverting the default would pass the suite.
+    monkeypatch.delenv("LTX2_MEDIA_WRITE_OVERLAP", raising=False)
+    if value is not None:
+        monkeypatch.setenv("LTX2_MEDIA_WRITE_OVERLAP", value)
+    assert _media_write_overlap_enabled() is expected
+
+
 def test_ordered_frame_writer_propagates_stalled_write() -> None:
     # A sink that accepts zero bytes is a stalled stream, not a closed pipe;
     # the error surfaces as OSError naming the byte counts.
@@ -56,8 +83,11 @@ def test_ordered_frame_writer_propagates_stalled_write() -> None:
     writer = _OrderedFrameWriter(sink, overlap=True)
     try:
         writer.submit(bytearray([1, 2, 3]))
-        with pytest.raises(OSError, match="reported 0 bytes written"):
+        with pytest.raises(OSError, match="reported 0 bytes written") as excinfo:
             writer.finish()
+        # Exactly OSError: BrokenPipeError subclasses it, so a bare raises()
+        # would still pass if the stalled-write path regressed to a pipe error.
+        assert type(excinfo.value) is OSError
     finally:
         writer.shutdown()
 

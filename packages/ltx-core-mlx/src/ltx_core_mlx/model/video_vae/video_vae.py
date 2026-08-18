@@ -586,11 +586,15 @@ class VideoDecoder(nn.Module):
                 latent.shape[2] * 8 - 7,
             )
         finally:
+            # Subprocess teardown belongs here, not after the try: a write error
+            # other than a closed pipe (a stalled stream raises OSError) would
+            # otherwise propagate past this point and leave ffmpeg running until
+            # garbage collection.
             frame_writer.shutdown()
-        if proc.stdin and not proc.stdin.closed:
-            proc.stdin.close()
-        proc.wait()
-        aggressive_cleanup()
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.close()
+            proc.wait()
+            aggressive_cleanup()
 
 
 class VideoEncoder(nn.Module):
