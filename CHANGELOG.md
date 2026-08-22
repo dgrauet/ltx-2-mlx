@@ -10,6 +10,13 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.14.22](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.21...v0.14.22) (2026-08-22)
+
+
+### Bug Fixes
+
+* **tests:** stop weight-gated tests from silently skipping, and unbreak them ([#95](https://github.com/dgrauet/ltx-2-mlx/issues/95)) ([803951a](https://github.com/dgrauet/ltx-2-mlx/commit/803951af67bdb9cafea317d163de1711e9120ae9))
+
 ## [0.14.21](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.20...v0.14.21) (2026-08-17)
 
 
