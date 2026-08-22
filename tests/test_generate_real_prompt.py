@@ -237,9 +237,10 @@ class TestRealPromptGeneration:
             try:
                 for i in range(num_frames_out):
                     proc.stdin.write(np.array(frames[i]).tobytes())
-                proc.stdin.close()
             except BrokenPipeError:
                 pass
+            # communicate() closes stdin itself; closing it here first makes its
+            # flush raise ValueError on Python 3.11.
             proc.communicate()
 
         print(f"\n  Output: {output_dir}")
