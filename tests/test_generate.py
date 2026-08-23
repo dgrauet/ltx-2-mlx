@@ -226,9 +226,10 @@ class TestFullGeneration:
                 for i in range(num_frames_out):
                     frame = np.array(frames[i])
                     proc.stdin.write(frame.tobytes())
-                proc.stdin.close()
             except BrokenPipeError:
                 pass
+            # communicate() closes stdin itself; closing it here first makes its
+            # flush raise ValueError on Python 3.11.
             _, stderr = proc.communicate()
             if proc.returncode != 0:
                 print(f"  ffmpeg warning: {stderr.decode()[-200:]}")
