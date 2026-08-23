@@ -652,6 +652,7 @@ class LTXModel(nn.Module):
             theta=self.config.rope_theta,
             max_pos=max_pos,
             rope_type=self.config.rope_type,
+            double_precision=self.config.double_precision_rope,
         )
 
 

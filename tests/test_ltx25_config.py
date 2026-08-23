@@ -110,3 +110,21 @@ def test_keyframes_pos_embedding_created_when_configured():
     assert bool(mx.all(m25.keyframes_abs_pos_embedding == 0).item())
     m23 = _tiny({})
     assert not hasattr(m23, "keyframes_abs_pos_embedding")
+
+
+def test_rope_double_precision_flag():
+    from ltx_core_mlx.model.transformer.rope import compute_freqs, generate_freq_grid
+
+    grid32 = generate_freq_grid(theta=10000.0, num_pos_dims=3, inner_dim=128)
+    grid64 = generate_freq_grid(theta=10000.0, num_pos_dims=3, inner_dim=128, double_precision=True)
+    assert grid64.dtype == mx.float32  # toujours casté en sortie
+
+    positions = mx.array([[[0.5, 100.0, 200.0]]])
+    f32 = compute_freqs(grid32, positions, max_pos=[20, 2048, 2048])
+    f64 = compute_freqs(grid64, positions, max_pos=[20, 2048, 2048], double_precision=True)
+    assert f64.dtype == mx.float32
+    assert bool(mx.all(mx.isfinite(f64)).item())
+
+    # Flag off == comportement actuel, bit-identique.
+    again = compute_freqs(grid32, positions, max_pos=[20, 2048, 2048])
+    assert bool(mx.array_equal(f32, again).item())

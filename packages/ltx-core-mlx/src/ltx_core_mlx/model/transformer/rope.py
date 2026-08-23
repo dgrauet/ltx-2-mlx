@@ -23,6 +23,7 @@ def generate_freq_grid(
     theta: float,
     num_pos_dims: int,
     inner_dim: int,
+    double_precision: bool = False,
 ) -> mx.array:
     """Generate log-spaced frequency indices for RoPE.
 
@@ -32,26 +33,43 @@ def generate_freq_grid(
         theta: Base frequency (default 10000.0).
         num_pos_dims: Number of position dimensions (3 for video, 1 for audio).
         inner_dim: Total attention dimension (heads * head_dim).
+        double_precision: If True, compute the intermediate table in float64
+            on the CPU stream (mirrors upstream's ``frequencies_precision:
+            float64``), then cast back to float32 before returning. mx.float64
+            is CPU-only in MLX, so the f64 computation is confined to
+            ``mx.stream(mx.cpu)`` and never re-enters the GPU graph.
 
     Returns:
-        Frequency indices of shape (inner_dim // (2 * num_pos_dims),).
+        Frequency indices of shape (inner_dim // (2 * num_pos_dims),), always
+        float32.
     """
     n_elem = 2 * num_pos_dims
     num_freqs = inner_dim // n_elem
 
-    indices = theta ** mx.linspace(
-        math.log(1.0) / math.log(theta),
-        math.log(theta) / math.log(theta),
-        num_freqs,
-    ).astype(mx.float32)
+    def _compute(dtype: mx.Dtype) -> mx.array:
+        indices = theta ** mx.linspace(
+            math.log(1.0) / math.log(theta),
+            math.log(theta) / math.log(theta),
+            num_freqs,
+        ).astype(dtype)
 
-    return indices * (math.pi / 2.0)
+        return indices * (math.pi / 2.0)
+
+    if double_precision:
+        # float64 is CPU-only in MLX: compute the tables on the CPU stream,
+        # cast to float32 before they re-enter the GPU graph. Mirrors
+        # upstream's double_precision_rope (frequencies_precision: float64).
+        with mx.stream(mx.cpu):
+            result = _compute(dtype=mx.float64).astype(mx.float32)
+        return result
+    return _compute(dtype=mx.float32)
 
 
 def compute_freqs(
     freq_indices: mx.array,
     positions: mx.array,
     max_pos: list[int],
+    double_precision: bool = False,
 ) -> mx.array:
     """Compute RoPE frequency angles from positions and freq grid.
 
@@ -61,25 +79,41 @@ def compute_freqs(
         freq_indices: (num_freqs,) from generate_freq_grid.
         positions: (B, N, num_pos_dims) integer position indices.
         max_pos: Maximum position per axis for normalization.
+        double_precision: If True, compute the intermediate table in float64
+            on the CPU stream (mirrors upstream's ``frequencies_precision:
+            float64``), then cast back to float32 before returning. mx.float64
+            is CPU-only in MLX, so the f64 computation is confined to
+            ``mx.stream(mx.cpu)`` and never re-enters the GPU graph.
 
     Returns:
-        Frequency angles of shape (B, N, num_freqs * num_pos_dims).
+        Frequency angles of shape (B, N, num_freqs * num_pos_dims), always
+        float32.
     """
     num_pos_dims = positions.shape[-1]
 
-    # Fractional positions: pos / max_pos -> [0, 1]
-    frac_positions = mx.stack(
-        [positions[:, :, i].astype(mx.float32) / max_pos[i] for i in range(num_pos_dims)],
-        axis=-1,
-    )  # (B, N, num_pos_dims)
+    def _compute(dtype: mx.Dtype) -> mx.array:
+        # Fractional positions: pos / max_pos -> [0, 1]
+        frac_positions = mx.stack(
+            [positions[:, :, i].astype(dtype) / max_pos[i] for i in range(num_pos_dims)],
+            axis=-1,
+        )  # (B, N, num_pos_dims)
 
-    # Scale to [-1, 1] and multiply with freq indices
-    # (B, N, num_pos_dims, 1) * (num_freqs,) -> (B, N, num_pos_dims, num_freqs)
-    scaled = freq_indices * (frac_positions[..., None] * 2.0 - 1.0)
+        # Scale to [-1, 1] and multiply with freq indices
+        # (B, N, num_pos_dims, 1) * (num_freqs,) -> (B, N, num_pos_dims, num_freqs)
+        scaled = freq_indices.astype(dtype) * (frac_positions[..., None] * 2.0 - 1.0)
 
-    # Transpose last two dims and flatten: (B, N, num_freqs, num_pos_dims) -> (B, N, num_freqs * num_pos_dims)
-    freqs = scaled.transpose(0, 1, 3, 2).reshape(positions.shape[0], positions.shape[1], -1)
-    return freqs
+        # Transpose last two dims and flatten: (B, N, num_freqs, num_pos_dims) -> (B, N, num_freqs * num_pos_dims)
+        freqs = scaled.transpose(0, 1, 3, 2).reshape(positions.shape[0], positions.shape[1], -1)
+        return freqs
+
+    if double_precision:
+        # float64 is CPU-only in MLX: compute the tables on the CPU stream,
+        # cast to float32 before they re-enter the GPU graph. Mirrors
+        # upstream's double_precision_rope (frequencies_precision: float64).
+        with mx.stream(mx.cpu):
+            result = _compute(dtype=mx.float64).astype(mx.float32)
+        return result
+    return _compute(dtype=mx.float32)
 
 
 def precompute_rope_freqs(
@@ -89,6 +123,7 @@ def precompute_rope_freqs(
     theta: float = 10000.0,
     max_pos: list[int] | None = None,
     rope_type: str = "split",
+    double_precision: bool = False,
 ) -> tuple[mx.array, mx.array, str]:
     """Precompute per-head RoPE cos/sin frequencies.
 
@@ -104,6 +139,9 @@ def precompute_rope_freqs(
             or ``"interleaved"`` (legacy mode, kept for completeness).
             Upstream switched the default from ``"interleaved"`` to ``"split"``
             in PR #212 since all production checkpoints use SPLIT.
+        double_precision: Compute the frequency tables in float64 on the CPU
+            stream (mirrors upstream's ``frequencies_precision: float64``);
+            output is always cast back to float32.
 
     Returns:
         Tuple of (cos_freqs, sin_freqs, rope_type).
@@ -112,8 +150,8 @@ def precompute_rope_freqs(
     if max_pos is None:
         max_pos = [20, 2048, 2048][:num_pos_dims]
 
-    freq_indices = generate_freq_grid(theta, num_pos_dims, inner_dim)
-    freqs = compute_freqs(freq_indices, positions, max_pos)
+    freq_indices = generate_freq_grid(theta, num_pos_dims, inner_dim, double_precision=double_precision)
+    freqs = compute_freqs(freq_indices, positions, max_pos, double_precision=double_precision)
     B, N, num_freqs = freqs.shape
 
     if rope_type == "interleaved":
