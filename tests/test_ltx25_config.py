@@ -128,3 +128,43 @@ def test_rope_double_precision_flag():
     # Flag off == comportement actuel, bit-identique.
     again = compute_freqs(grid32, positions, max_pos=[20, 2048, 2048])
     assert bool(mx.array_equal(f32, again).item())
+
+
+def test_embeddings_connector_double_precision_rope():
+    from ltx_core_mlx.text_encoders.gemma.embeddings_connector import Embeddings1DConnector
+
+    mx.random.seed(0)
+    hidden_states = mx.random.normal((1, 16, 32))
+
+    connector_default = Embeddings1DConnector(
+        dim=32,
+        num_heads=2,
+        head_dim=16,
+        num_layers=1,
+        num_registers=0,
+        max_pos=64,
+    )
+    connector_f64 = Embeddings1DConnector(
+        dim=32,
+        num_heads=2,
+        head_dim=16,
+        num_layers=1,
+        num_registers=0,
+        max_pos=64,
+        double_precision_rope=True,
+    )
+    # Same weights for both instances so the only difference is the flag.
+    connector_f64.update(connector_default.parameters())
+
+    assert connector_default.double_precision_rope is False
+    assert connector_f64.double_precision_rope is True
+
+    out_default = connector_default(hidden_states)
+    out_f64 = connector_f64(hidden_states)
+
+    assert out_default.dtype == mx.float32
+    assert out_f64.dtype == mx.float32
+
+    # double_precision_rope=True must not change the default (flag off) path.
+    out_default_again = connector_default(hidden_states)
+    assert bool(mx.array_equal(out_default, out_default_again).item())

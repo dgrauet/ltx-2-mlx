@@ -244,6 +244,11 @@ class Embeddings1DConnector(nn.Module):
         ff_mult: Feed-forward inner dimension multiplier.
         max_pos: Maximum position for RoPE.
         norm_output: Whether to apply affine-free layer norm to the output.
+        double_precision_rope: Compute this connector's own RoPE tables in
+            float64 on the CPU stream (mirrors upstream's
+            ``frequencies_precision: float64``); output is always cast back
+            to float32. Defaults False; checkpoint-config wiring lands with
+            the text-encoder configurator slice.
     """
 
     def __init__(
@@ -257,6 +262,7 @@ class Embeddings1DConnector(nn.Module):
         max_pos: int = 4096,
         norm_output: bool = True,
         apply_gated_attention: bool = True,
+        double_precision_rope: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -264,6 +270,11 @@ class Embeddings1DConnector(nn.Module):
         self.max_pos = max_pos
         self.norm_output = norm_output
         self.head_dim = head_dim
+        # Wiring from checkpoint config (transformer_config["frequencies_precision"]
+        # == "float64") lands with the text-encoder configurator slice (PR 3),
+        # mirroring upstream's VideoConnectorConfigurator. Default False keeps
+        # every existing caller bit-identical until that slice wires it up.
+        self.double_precision_rope = double_precision_rope
 
         # Learnable register tokens — (num_registers, dim)
         self.learnable_registers = mx.zeros((num_registers, dim))
@@ -321,6 +332,7 @@ class Embeddings1DConnector(nn.Module):
             theta=10000.0,
             max_pos=[self.max_pos],
             rope_type="split",
+            double_precision=self.double_precision_rope,
         )
 
         # No attention mask for self-attention (all positions valid after register replacement)
