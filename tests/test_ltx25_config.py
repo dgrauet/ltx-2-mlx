@@ -184,3 +184,15 @@ def test_25_shaped_weights_without_config_raise(tmp_path):
         validate_config_matches_weights(path, LTXModelConfig())  # défauts 2.3
     # La config 2.5 correspondante passe.
     validate_config_matches_weights(path, LTXModelConfig(ff_bias=False))
+
+
+def test_23_pack_requests_double_precision_rope():
+    """The shipped 2.3 packs declare frequencies_precision=float64 — the field
+    our port left inert until the versioned config landed, which is why the
+    2.3 SHA baseline moved (re-baselined 2026-08-24, upstream-faithful)."""
+    from tests.conftest import MODEL_DIR
+
+    if MODEL_DIR is None:
+        pytest.skip("q8 2.3 pack not found")
+    c = LTXModelConfig.from_checkpoint_dir(MODEL_DIR)
+    assert c.double_precision_rope is True
