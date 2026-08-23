@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # `edited` matters: commitlint checks the PR title, and without it a title
+    # fixed after a red run never re-runs, leaving the check stuck red until an
+    # unrelated commit is pushed. The other three are the default set, which
+    # naming any type at all would otherwise drop.
+    types: [opened, synchronize, reopened, edited]
 
 jobs:
   lint:
