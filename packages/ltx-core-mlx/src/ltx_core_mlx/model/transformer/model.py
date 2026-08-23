@@ -70,6 +70,13 @@ class LTXModelConfig:
     positional_embedding_max_pos: tuple[int, ...] = (20, 2048, 2048)
     audio_positional_embedding_max_pos: tuple[int, ...] = (20,)
     norm_eps: float = 1e-6
+    # 2.5 fields, read from the checkpoint config. Defaults reproduce 2.3
+    # exactly — the mapping and defaults mirror upstream model_configurator.py.
+    ff_bias: bool = True
+    audio_ff_bias: bool = True
+    use_prompt_adaln_single: bool = True
+    use_keyframes_abs_pos_embedding: bool = False
+    double_precision_rope: bool = False
 
     @classmethod
     def from_checkpoint_config(cls, config: dict) -> LTXModelConfig:
@@ -96,6 +103,10 @@ class LTXModelConfig:
         """
         t = config.get("transformer", config)
         d = cls()
+        if t.get("share_ff", False):
+            raise ValueError(
+                "share_ff=true is not supported (upstream asserts it False; no shipped checkpoint sets it)"
+            )
         return cls(
             num_layers=t.get("num_layers", d.num_layers),
             video_dim=t.get("cross_attention_dim", d.video_dim),
@@ -117,6 +128,11 @@ class LTXModelConfig:
                 t.get("audio_positional_embedding_max_pos", d.audio_positional_embedding_max_pos)
             ),
             norm_eps=t.get("norm_eps", d.norm_eps),
+            ff_bias=t.get("ff_bias", d.ff_bias),
+            audio_ff_bias=t.get("audio_ff_bias", d.audio_ff_bias),
+            use_prompt_adaln_single=t.get("use_prompt_adaln_single", d.use_prompt_adaln_single),
+            use_keyframes_abs_pos_embedding=t.get("use_keyframes_abs_pos_embedding", d.use_keyframes_abs_pos_embedding),
+            double_precision_rope=t.get("frequencies_precision", "") == "float64",
         )
 
     @classmethod
