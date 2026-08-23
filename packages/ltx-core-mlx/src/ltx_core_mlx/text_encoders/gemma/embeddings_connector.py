@@ -244,11 +244,13 @@ class Embeddings1DConnector(nn.Module):
         ff_mult: Feed-forward inner dimension multiplier.
         max_pos: Maximum position for RoPE.
         norm_output: Whether to apply affine-free layer norm to the output.
-        double_precision_rope: Compute this connector's own RoPE tables in
-            float64 on the CPU stream (mirrors upstream's
-            ``frequencies_precision: float64``); output is always cast back
-            to float32. Defaults False; checkpoint-config wiring lands with
-            the text-encoder configurator slice.
+        double_precision_rope: Compute this connector's own RoPE frequency
+            grid in float64 on the CPU stream (mirrors upstream's
+            ``frequencies_precision: float64``, applied identically by
+            upstream's video/audio connector configurators); output is
+            always cast back to float32. Wired from
+            ``LTXModelConfig.from_checkpoint_dir(...).double_precision_rope``
+            at ``PromptEncoder.load()`` (utils/blocks.py).
     """
 
     def __init__(
@@ -270,10 +272,10 @@ class Embeddings1DConnector(nn.Module):
         self.max_pos = max_pos
         self.norm_output = norm_output
         self.head_dim = head_dim
-        # Wiring from checkpoint config (transformer_config["frequencies_precision"]
-        # == "float64") lands with the text-encoder configurator slice (PR 3),
-        # mirroring upstream's VideoConnectorConfigurator. Default False keeps
-        # every existing caller bit-identical until that slice wires it up.
+        # Read from checkpoint config (transformer_config["frequencies_precision"]
+        # == "float64") and passed down from GemmaFeaturesExtractorV2 by
+        # PromptEncoder.load() (utils/blocks.py), mirroring upstream's
+        # video/audio connector configurators which read the same key.
         self.double_precision_rope = double_precision_rope
 
         # Learnable register tokens — (num_registers, dim)

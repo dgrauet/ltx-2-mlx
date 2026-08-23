@@ -5,6 +5,12 @@ Ported from ltx-core/src/ltx_core/model/transformer/feed_forward.py
 Weight keys (relative to parent ``ff`` or ``audio_ff``):
     ``proj_in.{weight,bias}``  -- input projection with GELU (tanh approx)
     ``proj_out.{weight,bias}`` -- output projection
+
+The ``.bias`` keys are present only when the layer was constructed with
+``bias=True`` (LTX-2.3 default). LTX-2.5 packs set ``ff_bias=False`` /
+``audio_ff_bias=False`` in ``embedded_config.json``, in which case
+``proj_in``/``proj_out`` have no bias tensors at all — see
+``LTXModelConfig.ff_bias`` / ``audio_ff_bias``.
 """
 
 from __future__ import annotations

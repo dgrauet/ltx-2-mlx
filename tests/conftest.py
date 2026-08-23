@@ -44,4 +44,3 @@ def _local_pack(name: str) -> Path | None:
 
 
 LTX25_Q8_DIR = _local_pack("ltx-2.5-mlx-q8")
-LTX25_BF16_DIR = _local_pack("ltx-2.5-mlx")

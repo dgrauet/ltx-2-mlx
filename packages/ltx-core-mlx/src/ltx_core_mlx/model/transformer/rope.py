@@ -47,12 +47,14 @@ def generate_freq_grid(
     num_freqs = inner_dim // n_elem
 
     if not double_precision:
-        # NOTE: this branch must stay byte-for-byte identical to the
-        # pre-double-precision-rope code (no shared helper with the f64
-        # branch below) — under --low-ram the block is mx.compile'd, and an
-        # extra graph node (even a value-identical no-op cast) changes
-        # kernel fusion / reduction order enough to diverge the SHA-gate
-        # render after 11 denoise steps. See PR review on Task 4 fix round 2.
+        # NOTE: kept as a duplicated branch rather than a shared
+        # `_compute(dtype)` helper as hardening — an added graph node (even
+        # a value-identical no-op cast) can change mx.compile's kernel
+        # fusion / reduction order enough to move a bit-exact render's
+        # output hash. The shipped 2.3/2.5 packs both set
+        # frequencies_precision=float64, so production traffic actually
+        # runs the branch below; this one exists for callers that pass
+        # double_precision=False explicitly (tests, future non-f64 packs).
         indices = theta ** mx.linspace(
             math.log(1.0) / math.log(theta),
             math.log(theta) / math.log(theta),
@@ -63,7 +65,8 @@ def generate_freq_grid(
 
     # float64 is CPU-only in MLX: compute the table on the CPU stream, cast
     # to float32 before it re-enters the GPU graph. Mirrors upstream's
-    # double_precision_rope (frequencies_precision: float64).
+    # generate_freq_grid_np (double_precision_rope / frequencies_precision:
+    # float64) — upstream computes this grid in f64 but returns float32.
     with mx.stream(mx.cpu):
         indices = theta ** mx.linspace(
             math.log(1.0) / math.log(theta),
@@ -79,63 +82,40 @@ def compute_freqs(
     freq_indices: mx.array,
     positions: mx.array,
     max_pos: list[int],
-    double_precision: bool = False,
 ) -> mx.array:
     """Compute RoPE frequency angles from positions and freq grid.
 
     Reference: ltx-core rope.py generate_freqs + get_fractional_positions
 
+    Upstream's ``double_precision_rope`` only switches the frequency-grid
+    generator (:func:`generate_freq_grid`); ``generate_freqs`` (this
+    function's upstream analog) always runs the fractional-position math in
+    float32 regardless of that flag. No ``double_precision`` parameter here
+    — matching upstream exactly, not "going further" than it.
+
     Args:
         freq_indices: (num_freqs,) from generate_freq_grid.
         positions: (B, N, num_pos_dims) integer position indices.
         max_pos: Maximum position per axis for normalization.
-        double_precision: If True, compute the intermediate table in float64
-            on the CPU stream (mirrors upstream's ``frequencies_precision:
-            float64``), then cast back to float32 before returning. mx.float64
-            is CPU-only in MLX, so the f64 computation is confined to
-            ``mx.stream(mx.cpu)`` and never re-enters the GPU graph.
 
     Returns:
-        Frequency angles of shape (B, N, num_freqs * num_pos_dims), always
-        float32.
+        Frequency angles of shape (B, N, num_freqs * num_pos_dims).
     """
     num_pos_dims = positions.shape[-1]
 
-    if not double_precision:
-        # NOTE: this branch must stay byte-for-byte identical to the
-        # pre-double-precision-rope code (no shared helper with the f64
-        # branch below) — under --low-ram the block is mx.compile'd, and an
-        # extra graph node (even a value-identical no-op cast) changes
-        # kernel fusion / reduction order enough to diverge the SHA-gate
-        # render after 11 denoise steps. See PR review on Task 4 fix round 2.
-        # Fractional positions: pos / max_pos -> [0, 1]
-        frac_positions = mx.stack(
-            [positions[:, :, i].astype(mx.float32) / max_pos[i] for i in range(num_pos_dims)],
-            axis=-1,
-        )  # (B, N, num_pos_dims)
+    # Fractional positions: pos / max_pos -> [0, 1]
+    frac_positions = mx.stack(
+        [positions[:, :, i].astype(mx.float32) / max_pos[i] for i in range(num_pos_dims)],
+        axis=-1,
+    )  # (B, N, num_pos_dims)
 
-        # Scale to [-1, 1] and multiply with freq indices
-        # (B, N, num_pos_dims, 1) * (num_freqs,) -> (B, N, num_pos_dims, num_freqs)
-        scaled = freq_indices * (frac_positions[..., None] * 2.0 - 1.0)
+    # Scale to [-1, 1] and multiply with freq indices
+    # (B, N, num_pos_dims, 1) * (num_freqs,) -> (B, N, num_pos_dims, num_freqs)
+    scaled = freq_indices * (frac_positions[..., None] * 2.0 - 1.0)
 
-        # Transpose last two dims and flatten: (B, N, num_freqs, num_pos_dims) -> (B, N, num_freqs * num_pos_dims)
-        freqs = scaled.transpose(0, 1, 3, 2).reshape(positions.shape[0], positions.shape[1], -1)
-        return freqs
-
-    # float64 is CPU-only in MLX: compute the table on the CPU stream, cast
-    # to float32 before it re-enters the GPU graph. Mirrors upstream's
-    # double_precision_rope (frequencies_precision: float64).
-    with mx.stream(mx.cpu):
-        frac_positions = mx.stack(
-            [positions[:, :, i].astype(mx.float64) / max_pos[i] for i in range(num_pos_dims)],
-            axis=-1,
-        )  # (B, N, num_pos_dims)
-
-        scaled = freq_indices.astype(mx.float64) * (frac_positions[..., None] * 2.0 - 1.0)
-
-        freqs = scaled.transpose(0, 1, 3, 2).reshape(positions.shape[0], positions.shape[1], -1)
-        result = freqs.astype(mx.float32)
-    return result
+    # Transpose last two dims and flatten: (B, N, num_freqs, num_pos_dims) -> (B, N, num_freqs * num_pos_dims)
+    freqs = scaled.transpose(0, 1, 3, 2).reshape(positions.shape[0], positions.shape[1], -1)
+    return freqs
 
 
 def precompute_rope_freqs(
@@ -161,9 +141,11 @@ def precompute_rope_freqs(
             or ``"interleaved"`` (legacy mode, kept for completeness).
             Upstream switched the default from ``"interleaved"`` to ``"split"``
             in PR #212 since all production checkpoints use SPLIT.
-        double_precision: Compute the frequency tables in float64 on the CPU
-            stream (mirrors upstream's ``frequencies_precision: float64``);
-            output is always cast back to float32.
+        double_precision: Compute the frequency grid (only) in float64 on
+            the CPU stream (mirrors upstream's ``frequencies_precision:
+            float64``, which switches only the grid generator, not the
+            per-position fractional math); output is always cast back to
+            float32.
 
     Returns:
         Tuple of (cos_freqs, sin_freqs, rope_type).
@@ -173,7 +155,7 @@ def precompute_rope_freqs(
         max_pos = [20, 2048, 2048][:num_pos_dims]
 
     freq_indices = generate_freq_grid(theta, num_pos_dims, inner_dim, double_precision=double_precision)
-    freqs = compute_freqs(freq_indices, positions, max_pos, double_precision=double_precision)
+    freqs = compute_freqs(freq_indices, positions, max_pos)
     B, N, num_freqs = freqs.shape
 
     if rope_type == "interleaved":

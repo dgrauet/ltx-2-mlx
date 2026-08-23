@@ -47,6 +47,7 @@ import mlx.core as mx
 
 from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
+from ltx_core_mlx.model.transformer.model import LTXModelConfig
 from ltx_core_mlx.model.upsampler.model import LatentUpsampler
 from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder as _VideoVAEDecoder
 from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder as _VideoVAEEncoder
@@ -95,7 +96,13 @@ class PromptEncoder:
             aggressive_cleanup()
 
         if self._feature_extractor is None:
-            self._feature_extractor = GemmaFeaturesExtractorV2()
+            # Same checkpoint field the DiT reads (LTXModelConfig.from_checkpoint_dir
+            # parses "frequencies_precision" == "float64" from embedded_config.json /
+            # config.json); upstream's video AND audio connector configurators read
+            # it independently of the DiT configurator, so the connector needs its
+            # own read here rather than inheriting the DiT's LTXModelConfig instance.
+            double_precision_rope = LTXModelConfig.from_checkpoint_dir(self.model_dir).double_precision_rope
+            self._feature_extractor = GemmaFeaturesExtractorV2(double_precision_rope=double_precision_rope)
             connector_weights = load_split_safetensors(self.model_dir / "connector.safetensors", prefix="connector.")
             self._feature_extractor.connector.load_weights(list(connector_weights.items()))
             aggressive_cleanup()

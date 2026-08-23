@@ -113,25 +113,51 @@ def test_keyframes_pos_embedding_created_when_configured():
 
 
 def test_rope_double_precision_flag():
+    """double_precision only switches generate_freq_grid (upstream-exact scope:
+    generate_freq_grid_np computes in f64 but returns float32; generate_freqs
+    always runs in f32 regardless of the flag — compute_freqs has no
+    double_precision parameter at all)."""
     from ltx_core_mlx.model.transformer.rope import compute_freqs, generate_freq_grid
 
     grid32 = generate_freq_grid(theta=10000.0, num_pos_dims=3, inner_dim=128)
     grid64 = generate_freq_grid(theta=10000.0, num_pos_dims=3, inner_dim=128, double_precision=True)
     assert grid64.dtype == mx.float32  # toujours casté en sortie
+    # Non-vacuous: the f64 path must actually produce a different grid, not
+    # silently collapse to the f32 one (verified real: maxdiff ~2.4e-4).
+    assert not bool(mx.array_equal(grid32, grid64).item())
 
     positions = mx.array([[[0.5, 100.0, 200.0]]])
     f32 = compute_freqs(grid32, positions, max_pos=[20, 2048, 2048])
-    f64 = compute_freqs(grid64, positions, max_pos=[20, 2048, 2048], double_precision=True)
-    assert f64.dtype == mx.float32
-    assert bool(mx.all(mx.isfinite(f64)).item())
+    f64_from_f64_grid = compute_freqs(grid64, positions, max_pos=[20, 2048, 2048])
+    assert f64_from_f64_grid.dtype == mx.float32
+    assert bool(mx.all(mx.isfinite(f64_from_f64_grid)).item())
+    # The f64 grid still propagates a (smaller) difference through compute_freqs
+    # even though compute_freqs itself runs entirely in f32.
+    assert not bool(mx.array_equal(f32, f64_from_f64_grid).item())
 
     # Flag off == comportement actuel, bit-identique.
     again = compute_freqs(grid32, positions, max_pos=[20, 2048, 2048])
     assert bool(mx.array_equal(f32, again).item())
 
 
-def test_embeddings_connector_double_precision_rope():
+def test_embeddings_connector_double_precision_rope(monkeypatch):
+    """The flag must actually reach precompute_rope_freqs, not just round-trip
+    through a stored attribute (a test only checking output dtype/shape would
+    still pass if the pass-through to precompute_rope_freqs were deleted)."""
+    from ltx_core_mlx.model.transformer import rope as rope_module
     from ltx_core_mlx.text_encoders.gemma.embeddings_connector import Embeddings1DConnector
+
+    # Embeddings1DConnector.__call__ does `from ...rope import precompute_rope_freqs`
+    # freshly at call time, so the spy must live on the rope module (patching an
+    # imported-name alias on embeddings_connector itself would never be seen).
+    calls = []
+    real_precompute = rope_module.precompute_rope_freqs
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs.get("double_precision"))
+        return real_precompute(*args, **kwargs)
+
+    monkeypatch.setattr(rope_module, "precompute_rope_freqs", spy)
 
     mx.random.seed(0)
     hidden_states = mx.random.normal((1, 16, 32))
@@ -159,14 +185,21 @@ def test_embeddings_connector_double_precision_rope():
     assert connector_default.double_precision_rope is False
     assert connector_f64.double_precision_rope is True
 
+    calls.clear()
     out_default = connector_default(hidden_states)
+    assert calls == [False]
+
+    calls.clear()
     out_f64 = connector_f64(hidden_states)
+    assert calls == [True]  # the flag actually reached precompute_rope_freqs
 
     assert out_default.dtype == mx.float32
     assert out_f64.dtype == mx.float32
 
     # double_precision_rope=True must not change the default (flag off) path.
+    calls.clear()
     out_default_again = connector_default(hidden_states)
+    assert calls == [False]
     assert bool(mx.array_equal(out_default, out_default_again).item())
 
 
