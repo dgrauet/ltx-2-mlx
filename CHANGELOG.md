@@ -10,6 +10,18 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.14.23](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.22...v0.14.23) (2026-08-23)
+
+
+### Features
+
+* **scripts:** add a numerics report to gate mlx upgrades on evidence ([#98](https://github.com/dgrauet/ltx-2-mlx/issues/98)) ([ead5fce](https://github.com/dgrauet/ltx-2-mlx/commit/ead5fce0a2934d66575b16ae7fe91baafe808f7c))
+
+
+### Performance Improvements
+
+* **media:** zero-copy frame/audio writes, opt-in write overlap ([#83](https://github.com/dgrauet/ltx-2-mlx/issues/83)) ([0d536c9](https://github.com/dgrauet/ltx-2-mlx/commit/0d536c90e20f22404d4021699251fc13eb09fa17))
+
 ## [0.14.22](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.21...v0.14.22) (2026-08-22)
 
 
