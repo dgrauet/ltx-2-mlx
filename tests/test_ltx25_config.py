@@ -168,3 +168,19 @@ def test_embeddings_connector_double_precision_rope():
     # double_precision_rope=True must not change the default (flag off) path.
     out_default_again = connector_default(hidden_states)
     assert bool(mx.array_equal(out_default, out_default_again).item())
+
+
+def test_25_shaped_weights_without_config_raise(tmp_path):
+    """Un transformer sans biais de ff + une config 2.3 -> erreur explicite."""
+    from ltx_core_mlx.utils.weights import validate_config_matches_weights
+
+    # Un header minimal de forme 2.5 : le poids existe, le bias non.
+    path = tmp_path / "transformer-dev.safetensors"
+    mx.save_safetensors(
+        str(path),
+        {"transformer.transformer_blocks.0.ff.proj_in.weight": mx.zeros((4, 4))},
+    )
+    with pytest.raises(ValueError, match="ff_bias"):
+        validate_config_matches_weights(path, LTXModelConfig())  # défauts 2.3
+    # La config 2.5 correspondante passe.
+    validate_config_matches_weights(path, LTXModelConfig(ff_bias=False))

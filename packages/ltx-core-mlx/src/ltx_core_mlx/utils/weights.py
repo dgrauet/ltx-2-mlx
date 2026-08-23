@@ -111,6 +111,39 @@ def derive_quant_params(
     return bits, group_size
 
 
+def validate_config_matches_weights(transformer_path: Path, config) -> None:
+    """Refuse a 2.5-shaped checkpoint driven by a 2.3 config.
+
+    A pack whose ``ff.proj_in`` has no bias was exported from LTX-2.5
+    (``ff_bias=false``). If the config in hand still says ``ff_bias=True``,
+    the checkpoint directory is missing its ``embedded_config.json`` and
+    ``from_checkpoint_dir`` fell back to 2.3 defaults — the silent-wrong
+    class of #37. Fail here, with the cause, instead of deep inside
+    ``load_weights``.
+
+    Reads only the safetensors header (a few KB), never the tensors.
+    """
+    import json
+    import struct
+
+    with open(transformer_path, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        keys = json.loads(f.read(header_len)).keys()
+
+    probe = "transformer.transformer_blocks.0.ff.proj_in"
+    if f"{probe}.weight" not in keys and f"{probe}.scales" not in keys:
+        return  # not a transformer file we understand; loading will complain
+    has_bias = f"{probe}.bias" in keys
+    if not has_bias and config.ff_bias:
+        raise ValueError(
+            f"{transformer_path.name} is a 2.5-shaped checkpoint (no ff biases) "
+            "but the config in use says ff_bias=True — embedded_config.json is "
+            "missing or unreadable in the checkpoint directory. Refusing to "
+            "load with 2.3 defaults (see issue #37 for what silent config "
+            "fallbacks cost)."
+        )
+
+
 def _derive_quant_params(
     model: nn.Module,
     weights: dict[str, mx.array],

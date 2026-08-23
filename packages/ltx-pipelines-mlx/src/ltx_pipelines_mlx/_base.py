@@ -25,7 +25,11 @@ from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
 from ltx_core_mlx.utils.memory import aggressive_cleanup
-from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
+from ltx_core_mlx.utils.weights import (
+    apply_quantization,
+    load_split_safetensors,
+    validate_config_matches_weights,
+)
 from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
 from ltx_pipelines_mlx.utils.progress import phase
 
@@ -339,7 +343,9 @@ class BasePipeline:
 
             transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
             transformer_weights = self._fuse_pending_loras(transformer_weights, pending_loras)
-            dit = LTXModel(LTXModelConfig.from_checkpoint_dir(transformer_path.parent))
+            config = LTXModelConfig.from_checkpoint_dir(transformer_path.parent)
+            validate_config_matches_weights(transformer_path, config)
+            dit = LTXModel(config)
             apply_quantization(dit, transformer_weights)
             dit.load_weights(list(transformer_weights.items()))
             # Force materialisation so the phase marker reports actual load

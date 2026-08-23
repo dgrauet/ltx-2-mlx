@@ -24,7 +24,12 @@ from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
 from ltx_core_mlx.utils.memory import aggressive_cleanup
-from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors, remap_audio_vae_keys
+from ltx_core_mlx.utils.weights import (
+    apply_quantization,
+    load_split_safetensors,
+    remap_audio_vae_keys,
+    validate_config_matches_weights,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +92,9 @@ def load_transformer(
     # Read hyperparameters from the checkpoint config so values like
     # av_ca_timestep_scale_multiplier track the checkpoint, not hardcoded
     # dataclass defaults (issue #37).
-    model = LTXModel(LTXModelConfig.from_checkpoint_dir(model_dir))
+    config = LTXModelConfig.from_checkpoint_dir(model_dir)
+    validate_config_matches_weights(tf_path, config)
+    model = LTXModel(config)
     weights = load_split_safetensors(tf_path, prefix="transformer.")
     apply_quantization(model, weights)
     model.load_weights(list(weights.items()))

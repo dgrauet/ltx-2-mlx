@@ -65,6 +65,7 @@ def test_pending_loras_takes_fusion_path(pipeline_stub):
         patch("ltx_pipelines_mlx._base.apply_quantization") as apply_q,
         patch("ltx_pipelines_mlx._base.LTXModel") as LTXModel_cls,
         patch("ltx_pipelines_mlx._base.aggressive_cleanup"),
+        patch("ltx_pipelines_mlx._base.validate_config_matches_weights"),
         patch("ltx_pipelines_mlx.utils._orchestration.load_transformer") as orch_load,
     ):
         dit_instance = MagicMock(name="dit")

@@ -22,7 +22,11 @@ from huggingface_hub import snapshot_download
 
 from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
 from ltx_core_mlx.utils.memory import aggressive_cleanup
-from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
+from ltx_core_mlx.utils.weights import (
+    apply_quantization,
+    load_split_safetensors,
+    validate_config_matches_weights,
+)
 
 if TYPE_CHECKING:
     from ltx_pipelines_mlx.utils.blocks import AudioDecoder, VideoDecoder
@@ -103,6 +107,7 @@ def load_transformer(
     hardcoded dataclass defaults (issue #37).
     """
     config = LTXModelConfig.from_checkpoint_dir(transformer_path.parent)
+    validate_config_matches_weights(transformer_path, config)
     dit = LTXModel(config)
     weights = load_split_safetensors(transformer_path, prefix="transformer.")
     if low_ram_streaming:
