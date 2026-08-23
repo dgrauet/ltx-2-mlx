@@ -66,10 +66,35 @@ jobs:
         continue-on-error: true
       - run: uv run pytest tests/ -v -m "not slow" --tb=short
 
+  # Lints the pull request TITLE, not the individual commits.
+  #
+  # Squash is the only merge method, and `squash_merge_commit_title` is
+  # PR_TITLE, so the PR title is the subject that lands on main and the one
+  # release-please reads to pick a version bump. The commits inside a PR are
+  # discarded by the squash, so requiring conventional-commit subjects on them
+  # asked contributors to reword messages that never reach the history the rule
+  # exists to protect -- see the #83 thread.
+  #
+  # The push branch is a backstop: on main the squashed subject is the PR title,
+  # so linting it catches anything that reached main another way.
   commitlint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-      - uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed  # v6.2.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "22"
+      - name: Install commitlint
+        run: npm install --no-save @commitlint/cli @commitlint/config-conventional
+      - name: Lint the pull request title
+        if: github.event_name == 'pull_request'
+        # Via env, never interpolated into the script: a PR title is
+        # attacker-controlled text and would otherwise be a command injection.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE" | npx commitlint
+      - name: Lint the pushed commit
+        if: github.event_name == 'push'
+        run: npx commitlint --from HEAD~1 --to HEAD
