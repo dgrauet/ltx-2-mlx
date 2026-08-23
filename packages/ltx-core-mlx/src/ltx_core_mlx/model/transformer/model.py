@@ -231,6 +231,8 @@ class LTXModel(nn.Module):
                 av_cross_head_dim=config.av_cross_head_dim,
                 ff_mult=config.ff_mult,
                 norm_eps=config.norm_eps,
+                ff_bias=config.ff_bias,
+                audio_ff_bias=config.audio_ff_bias,
             )
             for _ in range(config.num_layers)
         ]

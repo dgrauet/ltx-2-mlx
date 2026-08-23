@@ -46,6 +46,8 @@ class BasicAVTransformerBlock(nn.Module):
         av_cross_head_dim: Per-head dim for cross-modal attention (default 64).
         ff_mult: Feed-forward expansion factor.
         norm_eps: Epsilon for layer norms.
+        ff_bias: Whether the video feed-forward Linear layers use bias.
+        audio_ff_bias: Whether the audio feed-forward Linear layers use bias.
     """
 
     def __init__(
@@ -60,6 +62,8 @@ class BasicAVTransformerBlock(nn.Module):
         av_cross_head_dim: int = 64,
         ff_mult: float = 4.0,
         norm_eps: float = 1e-6,
+        ff_bias: bool = True,
+        audio_ff_bias: bool = True,
     ):
         super().__init__()
 
@@ -133,10 +137,10 @@ class BasicAVTransformerBlock(nn.Module):
         )
 
         # ---- Video feed-forward ----
-        self.ff = FeedForward(video_dim, dim_out=video_dim, mult=ff_mult)
+        self.ff = FeedForward(video_dim, dim_out=video_dim, mult=ff_mult, bias=ff_bias)
 
         # ---- Audio feed-forward ----
-        self.audio_ff = FeedForward(audio_dim, dim_out=audio_dim, mult=ff_mult)
+        self.audio_ff = FeedForward(audio_dim, dim_out=audio_dim, mult=ff_mult, bias=audio_ff_bias)
 
         # ---- Scale-shift tables (raw parameters, added to timestep-computed params) ----
         # Video self-attn: 9 params (shift, scale, gate) x 3 (self-attn, text-xattn, ff)

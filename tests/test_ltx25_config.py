@@ -7,7 +7,8 @@ mapping consomme + quelques champs 2.3 pour vérifier la non-régression.
 
 import pytest
 
-from ltx_core_mlx.model.transformer.model import LTXModelConfig
+from ltx_core_mlx.model.transformer.feed_forward import FeedForward
+from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
 
 CONFIG_25 = {
     "transformer": {
@@ -64,3 +65,39 @@ def test_share_ff_true_is_rejected():
     bad = {"transformer": {**CONFIG_25["transformer"], "share_ff": True}}
     with pytest.raises(ValueError, match="share_ff"):
         LTXModelConfig.from_checkpoint_config(bad)
+
+
+def test_feed_forward_bias_toggle():
+    with_bias = FeedForward(64, mult=2.0)
+    without = FeedForward(64, mult=2.0, bias=False)
+    assert "bias" in with_bias.proj_in
+    assert "bias" in with_bias.proj_out
+    assert "bias" not in without.proj_in
+    assert "bias" not in without.proj_out
+
+
+def _tiny(cfg_kwargs: dict) -> LTXModel:
+    return LTXModel(
+        LTXModelConfig(
+            num_layers=1,
+            video_dim=64,
+            audio_dim=32,
+            video_num_heads=2,
+            audio_num_heads=2,
+            video_head_dim=32,
+            audio_head_dim=16,
+            av_cross_num_heads=2,
+            av_cross_head_dim=16,
+            **cfg_kwargs,
+        )
+    )
+
+
+def test_model_threads_ff_bias_to_blocks():
+    m25 = _tiny({"ff_bias": False, "audio_ff_bias": True})
+    block = m25.transformer_blocks[0]
+    assert "bias" not in block.ff.proj_in
+    assert "bias" in block.audio_ff.proj_in
+    # Défauts 2.3 : tout le monde a des biais.
+    m23 = _tiny({})
+    assert "bias" in m23.transformer_blocks[0].ff.proj_in
