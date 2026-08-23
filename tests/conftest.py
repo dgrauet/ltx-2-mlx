@@ -35,3 +35,13 @@ def find_q8_model_dir() -> Path | None:
 
 
 MODEL_DIR = find_q8_model_dir()
+
+
+def _local_pack(name: str) -> Path | None:
+    """Local (non-hub) converted pack, used by the LTX-2.5 contract tests."""
+    candidate = Path.home() / "Work/mlx/models" / name
+    return candidate if (candidate / "embedded_config.json").exists() else None
+
+
+LTX25_Q8_DIR = _local_pack("ltx-2.5-mlx-q8")
+LTX25_BF16_DIR = _local_pack("ltx-2.5-mlx")

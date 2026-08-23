@@ -204,6 +204,15 @@ class LTXModel(nn.Module):
         self.scale_shift_table = mx.zeros((2, vd))
         self.audio_scale_shift_table = mx.zeros((2, ad))
 
+        # Marks tokens whose latent encodes a single standalone pixel frame.
+        # Zero-initialized, so a checkpoint that predates it behaves
+        # identically until the parameter is trained. Applied by the keyframe
+        # conditioning path (not in this forward) — mirror of upstream
+        # model.py. Only created when the checkpoint config asks for it, so
+        # 2.3 checkpoints keep their exact parameter tree.
+        if config.use_keyframes_abs_pos_embedding:
+            self.keyframes_abs_pos_embedding = mx.zeros((1, vd))
+
         # --- Timestep AdaLN (9-param: self-attn shift/scale/gate x3) ---
         self.adaln_single = AdaLayerNormSingle(vd, num_params=9, timestep_dim=t_dim)
         self.audio_adaln_single = AdaLayerNormSingle(ad, num_params=9, timestep_dim=t_dim)

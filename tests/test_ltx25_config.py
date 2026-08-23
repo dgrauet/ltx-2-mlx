@@ -5,6 +5,7 @@ embedded_config.json du pack 2.5 (sha a59ff335…), tronquée aux champs que le
 mapping consomme + quelques champs 2.3 pour vérifier la non-régression.
 """
 
+import mlx.core as mx
 import pytest
 
 from ltx_core_mlx.model.transformer.feed_forward import FeedForward
@@ -101,3 +102,11 @@ def test_model_threads_ff_bias_to_blocks():
     # Défauts 2.3 : tout le monde a des biais.
     m23 = _tiny({})
     assert "bias" in m23.transformer_blocks[0].ff.proj_in
+
+
+def test_keyframes_pos_embedding_created_when_configured():
+    m25 = _tiny({"use_keyframes_abs_pos_embedding": True})
+    assert m25.keyframes_abs_pos_embedding.shape == (1, 64)
+    assert bool(mx.all(m25.keyframes_abs_pos_embedding == 0).item())
+    m23 = _tiny({})
+    assert not hasattr(m23, "keyframes_abs_pos_embedding")
