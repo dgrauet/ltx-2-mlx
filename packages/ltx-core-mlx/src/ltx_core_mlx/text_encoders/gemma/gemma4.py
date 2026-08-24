@@ -28,15 +28,54 @@ Two details worth calling out because they diverge from Gemma 3:
 
 from __future__ import annotations
 
+import json
 import math
+import struct
+from pathlib import Path
 
 import mlx.core as mx
 import mlx.nn as nn
+
+from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
 
 from .gemma4_config import Gemma4TextConfig
 
 _ROPE_DEFAULT = "default"
 _ROPE_PROPORTIONAL = "proportional"
+
+_SLIDING_ATTENTION = "sliding_attention"
+_FULL_ATTENTION = "full_attention"
+
+# The pack's text_encoder.safetensors also carries the multimodal (vision +
+# audio/video projector) tensors of the wider Gemma4Unified checkpoint that
+# this text-only port does not load: 9 vision_model tensors, 1 audio
+# projector, 1 multi-modal projector, and the 4 text_embedding_projection
+# tensors (loaded by the connector, not the tower -- see
+# ``text_encoders/gemma/embeddings_connector.py``). Any pack key that is
+# neither under ``text_encoder.model.`` nor in this allowlist is a real
+# format-drift signal and must fail loudly rather than being silently
+# dropped.
+GEMMA4_PACK_IGNORE_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "text_encoder.audio_projector.embedding_projection.weight",
+        "text_encoder.multi_modal_projector.embedding_projection.weight",
+        "text_encoder.text_embedding_projection.audio_aggregate_embed.bias",
+        "text_encoder.text_embedding_projection.audio_aggregate_embed.weight",
+        "text_encoder.text_embedding_projection.video_aggregate_embed.bias",
+        "text_encoder.text_embedding_projection.video_aggregate_embed.weight",
+        "text_encoder.vision_model.patch_dense.bias",
+        "text_encoder.vision_model.patch_dense.weight",
+        "text_encoder.vision_model.patch_ln1.bias",
+        "text_encoder.vision_model.patch_ln1.weight",
+        "text_encoder.vision_model.patch_ln2.bias",
+        "text_encoder.vision_model.patch_ln2.weight",
+        "text_encoder.vision_model.pos_embedding",
+        "text_encoder.vision_model.pos_norm.bias",
+        "text_encoder.vision_model.pos_norm.weight",
+    }
+)
+
+_TEXT_ENCODER_PACK_PREFIX = "text_encoder.model."
 
 
 class Gemma4RMSNorm(nn.Module):
@@ -238,6 +277,17 @@ def build_attention_mask(
 
     if padding_mask is not None:
         visible = mx.logical_and(visible, (padding_mask != 0)[:, None, None, :])
+        # A padded query position can end up with zero visible keys (e.g.
+        # left-padding: causal + its own key being masked leaves nothing),
+        # which turns that softmax row into all -inf. 0 * NaN then poisons
+        # every downstream position once k_eq_v layers reuse attention
+        # output as the next layer's values. HF's masking utils sidestep
+        # this the same way (``AttentionMaskConverter._unmask_unattended``):
+        # unmask the diagonal on any row left fully masked. The resulting
+        # hidden state at that position is unused by callers regardless.
+        row_all_masked = mx.logical_not(mx.any(visible, axis=-1, keepdims=True))
+        diag = (mx.arange(seq_len)[None, :] == mx.arange(seq_len)[:, None])[None, None, :, :]
+        visible = mx.logical_or(visible, mx.logical_and(row_all_masked, diag))
 
     return mx.where(visible, mx.array(0.0, dtype=dtype), mx.array(-mx.inf, dtype=dtype))
 
@@ -380,3 +430,214 @@ def gelu_tanh(x: mx.array) -> mx.array:
         The activated tensor.
     """
     return 0.5 * x * (1 + mx.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * mx.power(x, 3))))
+
+
+class Gemma4DecoderLayer(nn.Module):
+    """One Gemma-4 decoder layer: pre/post norm sandwich around attn + MLP.
+
+    Unlike Gemma 3's single pre-norm per sublayer, Gemma 4 wraps each
+    sublayer with both an input norm and a post-sublayer norm before the
+    residual add, and finishes with a per-layer scalar gate (``layer_scalar``,
+    a real pack tensor -- not just a constant -- even though its trained
+    value is typically ~1).
+
+    Args:
+        config: The parsed text tower config.
+        layer_idx: Zero-based layer index; selects the attention flavor.
+    """
+
+    def __init__(self, config: Gemma4TextConfig, layer_idx: int):
+        super().__init__()
+        self.self_attn = Gemma4Attention(config, layer_idx)
+        self.mlp = Gemma4MLP(config)
+        self.input_layernorm = Gemma4RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Gemma4RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_feedforward_layernorm = Gemma4RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_feedforward_layernorm = Gemma4RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.layer_scalar = mx.ones((1,))
+
+    def __call__(
+        self,
+        hidden_states: mx.array,
+        cos: mx.array,
+        sin: mx.array,
+        mask: mx.array | None = None,
+    ) -> mx.array:
+        """Run one decoder layer.
+
+        Args:
+            hidden_states: ``(B, T, hidden_size)`` layer input.
+            cos: Rotary cosine table for this layer's attention flavor.
+            sin: Rotary sine table for this layer's attention flavor.
+            mask: Additive attention mask for this layer's flavor.
+
+        Returns:
+            ``(B, T, hidden_size)`` layer output.
+        """
+        residual = hidden_states
+        attn_out = self.self_attn(self.input_layernorm(hidden_states), cos, sin, mask)
+        hidden_states = residual + self.post_attention_layernorm(attn_out)
+
+        residual = hidden_states
+        mlp_out = self.mlp(self.pre_feedforward_layernorm(hidden_states))
+        hidden_states = residual + self.post_feedforward_layernorm(mlp_out)
+
+        return hidden_states * self.layer_scalar
+
+
+def _safetensors_header_keys(path: Path) -> set[str]:
+    """Read only the JSON header of a safetensors file (no tensor data).
+
+    Args:
+        path: Path to the ``.safetensors`` file.
+
+    Returns:
+        The set of tensor keys in the file.
+    """
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(n))
+    return {k for k in header if k != "__metadata__"}
+
+
+class Gemma4TextModel(nn.Module):
+    """The Gemma-4 unified text tower: scaled embeddings + N decoder layers + final norm.
+
+    Port of ``Gemma4UnifiedTextModel`` (text-only path: no vision/audio
+    inputs, no KV cache, no shared-KV layers -- ruled out by
+    :meth:`Gemma4TextConfig.from_text_encoder_config`).
+
+    Args:
+        config: The parsed text tower config.
+    """
+
+    def __init__(self, config: Gemma4TextConfig):
+        super().__init__()
+        self.config = config
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.embed_scale = math.sqrt(config.hidden_size)
+        self.layers = [Gemma4DecoderLayer(config, i) for i in range(config.num_hidden_layers)]
+        self.norm = Gemma4RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # Keyed by layer_types string, not layer index: rotary tables only
+        # depend on the attention flavor. Leading underscore keeps these
+        # out of the MLX parameter tree -- their inv_freq buffers are
+        # derived from config, not loaded from the pack.
+        self._rotary_by_type = {
+            _SLIDING_ATTENTION: Gemma4RotaryEmbedding(
+                config.head_dim, config.rope_local_theta, rope_type=_ROPE_DEFAULT
+            ),
+            _FULL_ATTENTION: Gemma4RotaryEmbedding(
+                config.global_head_dim,
+                config.rope_global_theta,
+                rope_type=_ROPE_PROPORTIONAL,
+                partial_rotary_factor=config.partial_rotary_factor,
+            ),
+        }
+
+    def __call__(
+        self,
+        input_ids: mx.array,
+        attention_mask: mx.array | None = None,
+    ) -> list[mx.array]:
+        """Run the tower and collect every layer's hidden states.
+
+        Args:
+            input_ids: Token ids, shape ``(B, T)``.
+            attention_mask: Optional ``(B, T)`` mask, nonzero on real
+                (non-padding) tokens. This port always left-pads.
+
+        Returns:
+            ``num_hidden_layers + 1`` hidden states, mirroring
+            ``output_hidden_states=True``: the scaled token embeddings,
+            then the raw (pre-final-norm) output of each decoder layer in
+            order. The final RMSNorm is *not* folded into the last entry
+            here -- call ``self.norm`` on it explicitly to get
+            ``last_hidden_state``.
+        """
+        batch, seq_len = input_ids.shape
+        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = hidden_states * mx.array(self.embed_scale, dtype=hidden_states.dtype)
+
+        position_ids = mx.arange(seq_len)[None, :]
+        position_ids = mx.broadcast_to(position_ids, (batch, seq_len))
+
+        rope_tables = {
+            layer_type: self._rotary_by_type[layer_type](position_ids)
+            for layer_type in sorted(set(self.config.layer_types))
+        }
+        masks = {
+            _FULL_ATTENTION: build_attention_mask(
+                seq_len, sliding_window=None, padding_mask=attention_mask, dtype=hidden_states.dtype
+            ),
+            _SLIDING_ATTENTION: build_attention_mask(
+                seq_len,
+                sliding_window=self.config.sliding_window,
+                padding_mask=attention_mask,
+                dtype=hidden_states.dtype,
+            ),
+        }
+
+        hidden_states_list = [hidden_states]
+        for i, layer in enumerate(self.layers):
+            layer_type = self.config.layer_types[i]
+            cos, sin = rope_tables[layer_type]
+            hidden_states = layer(hidden_states, cos, sin, masks[layer_type])
+            hidden_states_list.append(hidden_states)
+
+        return hidden_states_list
+
+    @classmethod
+    def load_from_pack(cls, model_dir: str | Path) -> Gemma4TextModel:
+        """Build and load a Gemma-4 tower from an LTX-2.5 pack directory.
+
+        Reads ``text_encoder_config.json`` to build the config, then loads
+        ``text_encoder.safetensors`` -- everything under the
+        ``text_encoder.model.`` prefix feeds the tower; every other key
+        must be in :data:`GEMMA4_PACK_IGNORE_ALLOWLIST` (the multimodal
+        tensors owned by other components) or this raises. Quantization is
+        applied when ``quantize_config.json`` declares a ``text_encoder``
+        component.
+
+        Args:
+            model_dir: Path to the pack directory.
+
+        Returns:
+            The loaded tower.
+
+        Raises:
+            ValueError: If ``text_encoder.safetensors`` has a key that is
+                neither under the model prefix nor in the ignore allowlist
+                (silent format drift -- see #52's silent-no-op class).
+        """
+        model_dir = Path(model_dir)
+
+        with open(model_dir / "text_encoder_config.json") as f:
+            raw_config = json.load(f)
+        config = Gemma4TextConfig.from_text_encoder_config(raw_config)
+        model = cls(config)
+
+        safetensors_path = model_dir / "text_encoder.safetensors"
+        all_keys = _safetensors_header_keys(safetensors_path)
+        stray = {
+            k for k in all_keys if not k.startswith(_TEXT_ENCODER_PACK_PREFIX) and k not in GEMMA4_PACK_IGNORE_ALLOWLIST
+        }
+        if stray:
+            raise ValueError(
+                f"{safetensors_path.name} has keys outside the text tower's "
+                f"prefix ({_TEXT_ENCODER_PACK_PREFIX!r}) and the ignore "
+                f"allowlist -- refusing to silently drop them: {sorted(stray)[:10]}"
+            )
+
+        weights = load_split_safetensors(safetensors_path, prefix=_TEXT_ENCODER_PACK_PREFIX)
+
+        quantize_config_path = model_dir / "quantize_config.json"
+        if quantize_config_path.exists():
+            with open(quantize_config_path) as f:
+                quant_config = json.load(f)
+            quantization = quant_config.get("quantization", {})
+            if "text_encoder" in quantization.get("components", {}):
+                apply_quantization(model, weights, group_size=quantization.get("group_size", 64))
+
+        model.load_weights(list(weights.items()))
+        return model

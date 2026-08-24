@@ -453,3 +453,177 @@ def test_mlp_matches_reference(ref, tiny_config, layer_idx):
     got = mlp(mx.array(ref[f"L{layer_idx}.mlp_in"]))
 
     assert _max_abs_diff(got, ref[f"L{layer_idx}.mlp_out"]) < PARITY_ATOL
+
+
+# ---------------------------------------------------------------------------
+# Full-tower assembly (Gemma4TextModel): embeddings + N layers + final norm.
+# ---------------------------------------------------------------------------
+
+
+def _load_tiny_tower(ref, tiny_config):
+    """Build a Gemma4TextModel matching the tiny reference config and load
+    its weights from the reference npz's ``w.*`` state dict."""
+    import mlx.core as mx
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import Gemma4TextModel
+
+    tower = Gemma4TextModel(tiny_config)
+    weights = [(key[2:], mx.array(value)) for key, value in ref.items() if key.startswith("w.")]
+    tower.load_weights(weights)
+    return tower
+
+
+@pytest.mark.slow
+@_needs_parity_npz
+def test_tower_matches_reference_hidden_states(ref, tiny_config):
+    """embed_tokens (x sqrt(hidden)) + both layers reproduce hs.0/hs.1/hs.2."""
+    import mlx.core as mx
+
+    tower = _load_tiny_tower(ref, tiny_config)
+
+    got = tower(mx.array(ref["input_ids"]))
+
+    assert len(got) == tiny_config.num_hidden_layers + 1 == 3
+    for i, hs in enumerate(got):
+        assert _max_abs_diff(hs, ref[f"hs.{i}"]) < PARITY_ATOL
+
+
+@pytest.mark.slow
+@_needs_parity_npz
+def test_tower_final_norm_matches_reference(ref, tiny_config):
+    """self.norm applied to the last hidden state reproduces hs.final."""
+    import mlx.core as mx
+
+    tower = _load_tiny_tower(ref, tiny_config)
+
+    got = tower(mx.array(ref["input_ids"]))
+    final = tower.norm(got[-1])
+
+    assert _max_abs_diff(final, ref["hs.final"]) < PARITY_ATOL
+
+
+@pytest.mark.slow
+@_needs_parity_npz
+def test_tower_matches_reference_padded_batch(ref, tiny_config):
+    """Left-padded batch (row 0 padded, row 1 not): padding_mask path.
+
+    Padded query positions can legitimately diverge (an all-masked softmax
+    row is undefined in both frameworks), so only real (non-padded) token
+    positions are compared.
+    """
+    import mlx.core as mx
+    import numpy as np
+
+    tower = _load_tiny_tower(ref, tiny_config)
+
+    input_ids = mx.array(ref["padded.input_ids"])
+    attention_mask = mx.array(ref["padded.attention_mask"])
+    valid = np.asarray(ref["padded.attention_mask"]) != 0  # (B, T)
+
+    got = tower(input_ids, attention_mask=attention_mask)
+
+    assert len(got) == tiny_config.num_hidden_layers + 1 == 3
+    for i, hs in enumerate(got):
+        got_np = np.array(mx.array(hs).astype(mx.float32))
+        want_np = ref[f"padded.hs.{i}"]
+        diff = np.abs(got_np - want_np)[valid]
+        assert float(diff.max()) < PARITY_ATOL
+
+    final = tower.norm(got[-1])
+    final_np = np.array(mx.array(final).astype(mx.float32))
+    want_final = ref["padded.hs.final"]
+    diff = np.abs(final_np - want_final)[valid]
+    assert float(diff.max()) < PARITY_ATOL
+
+
+# ---------------------------------------------------------------------------
+# Load contract: the fail-loud allowlist logic, tested against synthetic
+# key sets (fast -- no pack access needed).
+# ---------------------------------------------------------------------------
+
+
+def test_pack_ignore_allowlist_has_exactly_15_entries():
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import GEMMA4_PACK_IGNORE_ALLOWLIST
+
+    assert len(GEMMA4_PACK_IGNORE_ALLOWLIST) == 15
+    assert all(
+        k.startswith("text_encoder.") and not k.startswith("text_encoder.model.") for k in GEMMA4_PACK_IGNORE_ALLOWLIST
+    )
+
+
+def test_load_from_pack_rejects_stray_keys(tmp_path):
+    """A key neither under the model prefix nor in the allowlist must fail loudly."""
+    import json
+    import struct
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import Gemma4TextModel
+
+    text_config = _TINY_PACK_CONFIG["text_config"]
+    (tmp_path / "text_encoder_config.json").write_text(json.dumps(_TINY_PACK_CONFIG))
+
+    header = {
+        "text_encoder.model.embed_tokens.weight": {
+            "dtype": "F32",
+            "shape": [text_config["vocab_size"], text_config["hidden_size"]],
+            "data_offsets": [0, 0],
+        },
+        "text_encoder.bogus_new_component.weight": {
+            "dtype": "F32",
+            "shape": [1],
+            "data_offsets": [0, 0],
+        },
+    }
+    header_bytes = json.dumps(header).encode("utf-8")
+    with open(tmp_path / "text_encoder.safetensors", "wb") as f:
+        f.write(struct.pack("<Q", len(header_bytes)))
+        f.write(header_bytes)
+
+    with pytest.raises(ValueError, match=r"text_encoder\.bogus_new_component\.weight"):
+        Gemma4TextModel.load_from_pack(tmp_path)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(LTX25_Q8_DIR is None, reason="local ltx-2.5-mlx-q8 pack not found")
+def test_25_gemma4_config_covers_every_pack_tensor():
+    """Mirrors tests/test_ltx25_load_contract.py: two-direction key check
+    against the real q8 pack, without materializing the 16 GB of weights.
+
+    ``mx.load`` mmaps without materializing, and ``Gemma4TextModel(config)``
+    only allocates a lazy parameter tree -- shapes are known without
+    evaluating, so this stays cheap even for the real 12B-param tower.
+    """
+    import json
+
+    from mlx.utils import tree_flatten
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import (
+        GEMMA4_PACK_IGNORE_ALLOWLIST,
+        Gemma4TextModel,
+        _safetensors_header_keys,
+    )
+    from ltx_core_mlx.text_encoders.gemma.gemma4_config import Gemma4TextConfig
+
+    with open(LTX25_Q8_DIR / "text_encoder_config.json") as f:
+        raw_config = json.load(f)
+    config = Gemma4TextConfig.from_text_encoder_config(raw_config)
+    model = Gemma4TextModel(config)
+
+    model_keys = {f"text_encoder.model.{k}" for k, _ in tree_flatten(model.parameters())}
+
+    pack = _safetensors_header_keys(LTX25_Q8_DIR / "text_encoder.safetensors")
+    pack_model = {k for k in pack if k.startswith("text_encoder.model.")}
+    pack_other = pack - pack_model
+
+    assert pack_other == GEMMA4_PACK_IGNORE_ALLOWLIST
+
+    # Quantized layers save weight/scales/biases separately; normalize back
+    # onto a single ".weight" entry, same convention as the DiT contract.
+    pack_normalized = {
+        k.removesuffix(".scales").removesuffix(".biases") + ".weight" if k.endswith((".scales", ".biases")) else k
+        for k in pack_model
+    }
+    missing_in_model = sorted(pack_normalized - model_keys)
+    unfed_params = sorted(model_keys - pack_normalized)
+    assert not missing_in_model, f"pack tensors nobody would load: {missing_in_model[:10]}"
+    assert not unfed_params, f"model params the pack does not feed: {unfed_params[:10]}"
+    assert len(pack_normalized) == 666

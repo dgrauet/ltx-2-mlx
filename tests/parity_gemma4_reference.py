@@ -24,6 +24,11 @@ forward pass, and dumps:
 * ``mask.<layer_type>`` -- the additive attention masks;
 * ``L<i>.{attn_in,attn_out,mlp_in,mlp_out}`` -- per-layer submodule
   boundaries, so the MLX blocks can be checked in isolation.
+* ``padded.hs.<i>`` / ``padded.hs.final`` / ``padded.input_ids`` /
+  ``padded.attention_mask`` -- a second forward pass over a batch of 2,
+  row 0 left-padded by 3 tokens, exercising the ``padding_mask`` path
+  through ``build_attention_mask`` (unexercised by the all-ones batch=1
+  case above).
 """
 
 from __future__ import annotations
@@ -146,6 +151,41 @@ def main() -> None:
         handle.remove()
 
     store("hs.final", result.last_hidden_state)
+
+    # Padded-batch case (batch=2, row 0 left-padded by PAD_LEN tokens): the
+    # padding_mask path through build_attention_mask is unexercised by the
+    # batch=1 case above, since attention_mask there is all-ones. Reuses the
+    # same per-layer hook mechanism, under a "padded." prefix.
+    PAD_LEN = 3
+    padded_input_ids = torch.randint(0, TINY_CONFIG["vocab_size"], (2, SEQ_LEN), generator=generator)
+    padded_input_ids[0, :PAD_LEN] = TINY_CONFIG["pad_token_id"]
+    padded_attention_mask = torch.ones((2, SEQ_LEN), dtype=torch.long)
+    padded_attention_mask[0, :PAD_LEN] = 0
+
+    padded_handles = []
+    for idx, layer in enumerate(model.layers):
+        padded_handles.append(
+            layer.register_forward_pre_hook(
+                lambda _m, inputs, i=idx: store(f"padded.hs.{i}", inputs[0]),
+            )
+        )
+        padded_handles.append(
+            layer.register_forward_hook(
+                lambda _m, _inputs, output, i=idx: store(
+                    f"padded.hs.{i + 1}", output[0] if isinstance(output, tuple) else output
+                ),
+            )
+        )
+
+    with torch.no_grad():
+        padded_result = model(input_ids=padded_input_ids, attention_mask=padded_attention_mask)
+
+    for handle in padded_handles:
+        handle.remove()
+
+    store("padded.hs.final", padded_result.last_hidden_state)
+    out["padded.input_ids"] = padded_input_ids.numpy()
+    out["padded.attention_mask"] = padded_attention_mask.numpy()
 
     # Rotary tables + masks, recomputed the same way the model does.
     position_ids = torch.arange(SEQ_LEN).unsqueeze(0)
