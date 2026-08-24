@@ -96,8 +96,11 @@ class PromptEncoder:
 
     def load(self) -> None:
         """Load Gemma + connector if not already loaded."""
+        # Recomputed unconditionally (not just inside the "text encoder unset"
+        # branch below) so a stale _encoder_kind from a prior partial-free
+        # state can never skip the gemma4 projection merge further down.
+        self._encoder_kind = select_text_encoder(self.model_dir)
         if self._text_encoder is None:
-            self._encoder_kind = select_text_encoder(self.model_dir)
             if self._encoder_kind == "gemma4":
                 # LTX-2.5 pack: Gemma 4 unified tower ships in the DiT pack
                 # itself -- pack-local load, no mlx-community download.

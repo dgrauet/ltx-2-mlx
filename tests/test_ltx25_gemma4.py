@@ -6,6 +6,7 @@ parses the real pack when available (``LTX25_Q8_DIR``).
 """
 
 from pathlib import Path
+from typing import ClassVar
 
 import mlx.core as mx
 import numpy as np
@@ -206,6 +207,45 @@ def test_rejects_wrong_model_type():
         Gemma4TextConfig.from_text_encoder_config(bad)
 
 
+def test_rejects_wrong_root_model_type():
+    """Root-level model_type (config["model_type"], sibling of text_config) must
+    also be gemma4_unified -- distinct from text_config.model_type checked above."""
+    import copy
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4_config import Gemma4TextConfig
+
+    bad = copy.deepcopy(_FULL_CONFIG)
+    bad["model_type"] = "gemma3"
+    with pytest.raises(ValueError, match="model_type"):
+        Gemma4TextConfig.from_text_encoder_config(bad)
+
+
+def test_rejects_flipped_sliding_rope_type():
+    """A pack with sliding_attention.rope_type != "default" parses fine under
+    every other check (same keys, same types) and would silently compute wrong
+    rotary tables -- must be caught explicitly."""
+    import copy
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4_config import Gemma4TextConfig
+
+    bad = copy.deepcopy(_FULL_CONFIG)
+    bad["text_config"]["rope_parameters"]["sliding_attention"]["rope_type"] = "proportional"
+    with pytest.raises(ValueError, match=r"rope_parameters\.sliding_attention\.rope_type"):
+        Gemma4TextConfig.from_text_encoder_config(bad)
+
+
+def test_rejects_flipped_full_attention_rope_type():
+    """Mirror of the sliding-side guard, for full_attention.rope_type != "proportional"."""
+    import copy
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4_config import Gemma4TextConfig
+
+    bad = copy.deepcopy(_FULL_CONFIG)
+    bad["text_config"]["rope_parameters"]["full_attention"]["rope_type"] = "default"
+    with pytest.raises(ValueError, match=r"rope_parameters\.full_attention\.rope_type"):
+        Gemma4TextConfig.from_text_encoder_config(bad)
+
+
 def test_defaults_when_fields_absent():
     """use_bidirectional_attention, attention_k_eq_v, num_kv_shared_layers
     default per the HF configuration_gemma4_unified.py reference."""
@@ -285,6 +325,7 @@ _needs_parity_npz = pytest.mark.skipif(
 # JSON shape so Gemma4TextConfig parses it.
 _TINY_PACK_CONFIG = {
     "gemma_version": "tiny-parity",
+    "model_type": "gemma4_unified",
     "text_config": {
         "model_type": "gemma4_unified_text",
         "vocab_size": 128,
@@ -916,11 +957,36 @@ class TestCheckGemmaVersion:
 
 
 class TestPromptEncoderWiring:
-    """Proves the 2.3 (gemma3) construction site is untouched and the selection is real."""
+    """Proves the 2.3 (gemma3) construction site is untouched and the selection is real.
+
+    ``_stub_feature_extractor_deps`` fakes ``load_split_safetensors`` with a
+    prefix-keyed recorder (rather than a blanket ``{}``) so these tests stay
+    load-bearing against the gemma4 ``text_embedding_projection`` merge
+    (commit 8bc5640): a stub that ignores ``prefix`` would go on returning
+    the same ``{}`` even if that merge were reverted, and both spy tests
+    below would stay green while the real load path silently regressed.
+    """
+
+    _CONNECTOR_WEIGHTS: ClassVar[dict[str, str]] = {
+        "connector.video_embeddings_connector.some.weight": "CONNECTOR_TENSOR"
+    }
+    _PROJECTION_WEIGHTS: ClassVar[dict[str, str]] = {
+        "video_aggregate_embed.weight": "VIDEO_AGG_W",
+        "video_aggregate_embed.bias": "VIDEO_AGG_B",
+        "audio_aggregate_embed.weight": "AUDIO_AGG_W",
+        "audio_aggregate_embed.bias": "AUDIO_AGG_B",
+    }
 
     def _stub_feature_extractor_deps(self, monkeypatch):
         """Neutralize the connector-loading half of PromptEncoder.load() so these
-        tests exercise only the text-encoder selection/construction branch."""
+        tests exercise only the text-encoder selection/construction branch --
+        while still recording every ``load_split_safetensors`` call (path, prefix)
+        and returning prefix-appropriate fake weights, so callers can assert on
+        exactly which safetensors files got merged into the connector.
+
+        Returns ``(blocks_mod, load_calls)``: ``load_calls`` accumulates
+        ``(path, prefix)`` tuples in call order.
+        """
         import types
 
         from ltx_pipelines_mlx.utils import blocks as blocks_mod
@@ -930,11 +996,25 @@ class TestPromptEncoderWiring:
             "from_checkpoint_dir",
             classmethod(lambda cls, model_dir: types.SimpleNamespace(double_precision_rope=False)),
         )
-        monkeypatch.setattr(blocks_mod, "load_split_safetensors", lambda path, prefix="": {})
+
+        load_calls: list[tuple[Path, str]] = []
+
+        def _stub_load_split_safetensors(path, prefix=""):
+            load_calls.append((path, prefix))
+            if prefix == "connector.":
+                return dict(self._CONNECTOR_WEIGHTS)
+            if prefix == "text_encoder.text_embedding_projection.":
+                return dict(self._PROJECTION_WEIGHTS)
+            raise AssertionError(f"unexpected load_split_safetensors call: path={path!r} prefix={prefix!r}")
+
+        monkeypatch.setattr(blocks_mod, "load_split_safetensors", _stub_load_split_safetensors)
 
         class _DummyConnector:
+            def __init__(self) -> None:
+                self.load_weights_called_with: dict | None = None
+
             def load_weights(self, weights):
-                pass
+                self.load_weights_called_with = dict(weights)
 
         class _DummyFeatureExtractor:
             def __init__(self, double_precision_rope: bool) -> None:
@@ -942,13 +1022,13 @@ class TestPromptEncoderWiring:
                 self.connector = _DummyConnector()
 
         monkeypatch.setattr(blocks_mod, "GemmaFeaturesExtractorV2", _DummyFeatureExtractor)
-        return blocks_mod
+        return blocks_mod, load_calls
 
     def test_gemma3_path_never_constructs_gemma4_text_encoder(self, tmp_path, monkeypatch):
         from ltx_core_mlx.text_encoders.gemma.encoders import gemma4_encoder as gemma4_encoder_mod
         from ltx_pipelines_mlx.utils.blocks import PromptEncoder
 
-        blocks_mod = self._stub_feature_extractor_deps(monkeypatch)
+        blocks_mod, load_calls = self._stub_feature_extractor_deps(monkeypatch)
 
         # tmp_path has neither text_encoder.safetensors nor text_encoder_config.json
         # -> select_text_encoder(tmp_path) == "gemma3".
@@ -984,10 +1064,16 @@ class TestPromptEncoderWiring:
         assert isinstance(encoder._text_encoder, _DummyGemma3)
         assert _DummyGemma3.load_called_with == "mlx-community/gemma-3-12b-it-4bit"
 
+        # F1: the gemma3 path must call load_split_safetensors exactly once,
+        # for connector.safetensors only -- no text_encoder.safetensors
+        # projection merge (that file doesn't even exist on this path).
+        assert load_calls == [(encoder.model_dir / "connector.safetensors", "connector.")]
+        assert encoder._feature_extractor.connector.load_weights_called_with == self._CONNECTOR_WEIGHTS
+
     def test_gemma4_path_constructs_gemma4_text_encoder(self, tmp_path, monkeypatch):
         from ltx_pipelines_mlx.utils.blocks import PromptEncoder
 
-        blocks_mod = self._stub_feature_extractor_deps(monkeypatch)
+        blocks_mod, load_calls = self._stub_feature_extractor_deps(monkeypatch)
 
         (tmp_path / "text_encoder.safetensors").touch()
         _write_json(tmp_path / "text_encoder_config.json", {"gemma_version": "gemma4-12b-ltx-v1"})
@@ -1013,6 +1099,24 @@ class TestPromptEncoderWiring:
 
         assert isinstance(encoder._text_encoder, _DummyGemma4)
         assert _DummyGemma4.load_called_with == encoder.model_dir
+
+        # F1 (commit 8bc5640 pin): the gemma4 path must merge weights from
+        # TWO files -- connector.safetensors AND the tower's
+        # text_encoder.safetensors under the projection prefix -- in that
+        # order, and hand the connector all of it re-prefixed correctly.
+        assert load_calls == [
+            (encoder.model_dir / "connector.safetensors", "connector."),
+            (encoder.model_dir / "text_encoder.safetensors", "text_encoder.text_embedding_projection."),
+        ]
+
+        merged = encoder._feature_extractor.connector.load_weights_called_with
+        assert merged is not None
+        expected_projection_keys = {f"text_embedding_projection.{k}" for k in self._PROJECTION_WEIGHTS}
+        assert expected_projection_keys <= merged.keys()
+        for k, v in self._PROJECTION_WEIGHTS.items():
+            assert merged[f"text_embedding_projection.{k}"] == v
+        # Original connector.safetensors weights must survive the merge too.
+        assert self._CONNECTOR_WEIGHTS.keys() <= merged.keys()
 
 
 class TestEnhanceGemma4Guard:

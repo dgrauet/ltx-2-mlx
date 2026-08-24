@@ -17,8 +17,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _TEXT_MODEL_TYPE = "gemma4_unified_text"
+_ROOT_MODEL_TYPE = "gemma4_unified"
 _SLIDING_ATTENTION = "sliding_attention"
 _FULL_ATTENTION = "full_attention"
+
+# Sliding layers use plain (non-scaled) RoPE; full-attention layers use Gemma
+# 4's "proportional" scaling (see gemma4.py's rotary embedding). A pack with
+# these two flipped parses fine under every other check here -- same key set,
+# same types -- and silently computes the wrong rotary tables for every
+# layer, so it needs its own explicit guard.
+_EXPECTED_ROPE_TYPE = {
+    _SLIDING_ATTENTION: "default",
+    _FULL_ATTENTION: "proportional",
+}
 
 
 @dataclass
@@ -83,12 +94,19 @@ class Gemma4TextConfig:
             The parsed tower configuration.
 
         Raises:
-            ValueError: If ``text_config.model_type`` is not
+            ValueError: If the root ``model_type`` is not
+                ``"gemma4_unified"``, if ``text_config.model_type`` is not
                 ``"gemma4_unified_text"``, if ``num_kv_shared_layers`` is
-                nonzero (KV-sharing across layers is not ported), or if
+                nonzero (KV-sharing across layers is not ported), if
                 ``use_bidirectional_attention == "all"`` (this port always
-                encodes text causally).
+                encodes text causally), or if either attention type's
+                ``rope_parameters.*.rope_type`` does not match the expected
+                flavor (sliding: ``"default"``, full: ``"proportional"``).
         """
+        root_model_type = config.get("model_type")
+        if root_model_type != _ROOT_MODEL_TYPE:
+            raise ValueError(f"Unsupported model_type: {root_model_type!r} (expected {_ROOT_MODEL_TYPE!r})")
+
         text_config = config["text_config"]
 
         model_type = text_config.get("model_type")
@@ -111,6 +129,15 @@ class Gemma4TextConfig:
         rope_parameters = text_config["rope_parameters"]
         full_rope = rope_parameters[_FULL_ATTENTION]
         sliding_rope = rope_parameters[_SLIDING_ATTENTION]
+
+        for attention_type, rope_config in ((_SLIDING_ATTENTION, sliding_rope), (_FULL_ATTENTION, full_rope)):
+            expected_rope_type = _EXPECTED_ROPE_TYPE[attention_type]
+            actual_rope_type = rope_config.get("rope_type")
+            if actual_rope_type != expected_rope_type:
+                raise ValueError(
+                    f"Unsupported rope_parameters.{attention_type}.rope_type: {actual_rope_type!r} "
+                    f"(expected {expected_rope_type!r})"
+                )
 
         return cls(
             gemma_version=config.get("gemma_version"),
