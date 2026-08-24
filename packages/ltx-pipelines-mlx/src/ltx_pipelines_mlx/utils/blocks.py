@@ -65,6 +65,23 @@ if TYPE_CHECKING:
 _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags the literal mx.eval pattern
 
 
+def _video_vae_names(model_dir: str | Path) -> tuple[str, str]:
+    """Resolve the video VAE decoder/encoder file base names by pack evidence.
+
+    LTX-2.5 ships a conv video VAE as ``vae_decoder_conv.safetensors`` /
+    ``vae_encoder_conv.safetensors``. Detects it by the decoder conv file's
+    presence and falls back to the 2.3 names (``vae_decoder`` /
+    ``vae_encoder``) otherwise, so 2.3 packs load byte-identically.
+
+    Returns:
+        ``(decoder_name, encoder_name)`` base names (without
+        ``.safetensors``), also used as the key prefix (``f"{name}."``).
+    """
+    if (Path(model_dir) / "vae_decoder_conv.safetensors").exists():
+        return "vae_decoder_conv", "vae_encoder_conv"
+    return "vae_decoder", "vae_encoder"
+
+
 def _resolve_model_dir(model_dir: str | Path) -> Path:
     """Resolve a model dir — download from HuggingFace if not a local path."""
     path = Path(model_dir)
@@ -212,7 +229,8 @@ class ImageConditioner:
         if self._encoder is not None:
             return self._encoder
         self._encoder = _VideoVAEEncoder()
-        weights = load_split_safetensors(self.model_dir / "vae_encoder.safetensors", prefix="vae_encoder.")
+        _decoder_name, encoder_name = _video_vae_names(self.model_dir)
+        weights = load_split_safetensors(self.model_dir / f"{encoder_name}.safetensors", prefix=f"{encoder_name}.")
         weights = {
             k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
             for k, v in weights.items()
@@ -251,7 +269,8 @@ class VideoDecoder:
         if self._decoder is not None:
             return self._decoder
         self._decoder = _VideoVAEDecoder()
-        weights = load_split_safetensors(self.model_dir / "vae_decoder.safetensors", prefix="vae_decoder.")
+        decoder_name, _encoder_name = _video_vae_names(self.model_dir)
+        weights = load_split_safetensors(self.model_dir / f"{decoder_name}.safetensors", prefix=f"{decoder_name}.")
         self._decoder.load_weights(list(weights.items()))
         aggressive_cleanup()
         return self._decoder
