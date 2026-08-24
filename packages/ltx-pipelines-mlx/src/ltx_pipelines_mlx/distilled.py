@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 
+from ltx_core_mlx.components.diffusion_steps import EulerAncestralDiffusionStep
 from ltx_core_mlx.components.patchifiers import (
     compute_video_latent_shape,
     snap_output_dimensions,
@@ -35,11 +36,17 @@ from ltx_core_mlx.utils.positions import (
     compute_video_positions,
 )
 
-from .scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS
+from .scheduler import (
+    DISTILLED_SIGMAS,
+    LTX_2_5_DISTILLED_SIGMAS,
+    LTX_2_5_STAGE_2_DISTILLED_SIGMAS,
+    STAGE_2_SIGMAS,
+)
 from .ti2vid_two_stages import TI2VidTwoStagesPipeline
+from .utils.generation import is_ltx25_pack
 from .utils.helpers import create_noised_state
 from .utils.progress import phase
-from .utils.samplers import denoise_loop
+from .utils.samplers import denoise_loop, euler_ancestral_denoising_loop
 
 _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags mx.eval pattern
 
@@ -67,6 +74,11 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
     - Run simple ``denoise_loop`` with ``DISTILLED_SIGMAS`` for stage 1.
     - Run the same distilled transformer for stage 2 with ``STAGE_2_SIGMAS``.
 
+    On an LTX-2.5 pack (detected once at construction via
+    :func:`~ltx_pipelines_mlx.utils.generation.is_ltx25_pack`) both stages
+    instead run the ancestral (SDE) Euler loop on the ``LTX_2_5_*`` sigma
+    tables, and stage 2 resolves the ``spatial_upscaler_x2_v1_0`` upscaler.
+
     Args:
         model_dir: Path to model weights or HuggingFace repo ID. Must
             contain the distilled checkpoint (e.g. ``dgrauet/ltx-2.3-mlx-q8``
@@ -92,6 +104,12 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             low_ram_streaming=low_ram_streaming,
             tile_count=tile_count,
         )
+        # Resolved once, here, because ``super().__init__`` has just turned
+        # ``model_dir`` into a concrete local path (downloading the HF repo if
+        # needed) — the same point where every other model-dir-derived fact
+        # (prompt encoder, conditioners, decoder blocks) is bound. Reading the
+        # checkpoint config later, per stage, would re-open it on every call.
+        self._is_25 = is_ltx25_pack(self.model_dir)
 
     def load(self) -> None:
         """Load distilled DiT + VAE encoder + upsampler (skip decoders).
@@ -119,6 +137,63 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
 
         self._loaded = True
 
+    def _run_denoise_loop(
+        self,
+        *,
+        model,
+        video_state,
+        audio_state,
+        video_text_embeds: mx.array,
+        audio_text_embeds: mx.array,
+        sigmas: list[float],
+        video_cross_attention_mask: mx.array | None,
+        on_step,
+        seed: int,
+    ):
+        """Dispatch one stage onto the deterministic (2.3) or ancestral (2.5) loop.
+
+        LTX-2.5 distilled checkpoints are trained for the ancestral (SDE) Euler
+        sampler; 2.3 checkpoints keep the deterministic loop they were shipped
+        with. Upstream makes the same choice through ``DiffusionStage``'s
+        ``stepper`` / ``loop`` overrides (``_stage_1_sampler_kwargs``).
+
+        Divergence from upstream: upstream applies the ancestral override to
+        stage 1 only (``_stage_1_sampler_kwargs``) and keeps stage 2's 3-step
+        refinement on the deterministic sampler. Here both stages of a 2.5 pack
+        run ancestral; the terminal sigma still short-circuits to the x0
+        prediction, so stage 2 does not end on injected noise.
+
+        The two loops differ only in the model keyword (``model=`` vs upstream's
+        ``transformer=``) and in the ancestral extras (``stepper`` /
+        ``noise_seed``): positions and attention masks are resolved from the
+        :class:`LatentState` by both, so the call structure is otherwise the
+        one already used at the 2.3 call sites.
+        """
+        if not self._is_25:
+            return denoise_loop(
+                model=model,
+                video_state=video_state,
+                audio_state=audio_state,
+                video_text_embeds=video_text_embeds,
+                audio_text_embeds=audio_text_embeds,
+                sigmas=sigmas,
+                video_cross_attention_mask=video_cross_attention_mask,
+                on_step=on_step,
+            )
+
+        return euler_ancestral_denoising_loop(
+            transformer=model,
+            video_state=video_state,
+            audio_state=audio_state,
+            video_text_embeds=video_text_embeds,
+            audio_text_embeds=audio_text_embeds,
+            sigmas=sigmas,
+            stepper=EulerAncestralDiffusionStep(eta=ANCESTRAL_ETA, s_noise=ANCESTRAL_S_NOISE),
+            noise_seed=seed + ANCESTRAL_NOISE_SEED_OFFSET,
+            video_cross_attention_mask=video_cross_attention_mask,
+            on_step=on_step,
+        )
+
     def generate_two_stage(  # type: ignore[override]
         self,
         prompt: str,
@@ -133,6 +208,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         image: str | None = None,
         images=None,
         prompt_relay=None,
+        enable_teacache: bool = False,
         **_unused_kwargs,
     ) -> tuple[mx.array, mx.array]:
         """Generate video using the distilled two-stage pipeline.
@@ -146,13 +222,29 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             stage1_steps: Stage 1 steps (default: full DISTILLED_SIGMAS = 8).
             stage2_steps: Stage 2 steps (default: full STAGE_2_SIGMAS = 3).
             image: Optional reference image for I2V conditioning.
+            enable_teacache: Accepted for signature compatibility with
+                :meth:`TI2VidTwoStagesPipeline.generate_two_stage`. Ignored on
+                LTX-2.3 packs (the 8-step distilled flow has never used
+                TeaCache); rejected on LTX-2.5 packs.
             **_unused_kwargs: Accepted (and ignored) for signature compatibility
-                with :meth:`TI2VidTwoStagesPipeline.generate_two_stage`. CFG / STG /
-                TeaCache flags don't apply to the distilled flow.
+                with :meth:`TI2VidTwoStagesPipeline.generate_two_stage`. CFG / STG
+                flags don't apply to the distilled flow.
 
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
+
+        Raises:
+            ValueError: when ``enable_teacache`` is requested on an LTX-2.5 pack.
         """
+        if enable_teacache and self._is_25:
+            raise ValueError(
+                "TeaCache is not calibrated for LTX-2.5 packs: the polynomial "
+                "coefficients and threshold were fitted on the LTX-2.3 dev "
+                "model with the deterministic Euler sampler, and the 2.5 "
+                "distilled path runs an ancestral (SDE) sampler whose per-step "
+                "residual deltas differ. Re-run without --enable-teacache."
+            )
+
         # --- Prompt Relay setup (temporal prompt gating on video cross-attn) ---
         encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
 
@@ -230,7 +322,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             legacy_scalar_blend=True,
         )
 
-        sigmas_1 = DISTILLED_SIGMAS[: stage1_steps + 1] if stage1_steps else DISTILLED_SIGMAS
+        stage1_table = LTX_2_5_DISTILLED_SIGMAS if self._is_25 else DISTILLED_SIGMAS
+        sigmas_1 = stage1_table[: stage1_steps + 1] if stage1_steps else stage1_table
 
         stage1_dit = self.dit
         if self._tile_count is not None:
@@ -242,7 +335,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         x0_model = X0Model(stage1_dit)
 
         self._pre_denoise_flush(video_state, audio_state)
-        output_1 = denoise_loop(
+        output_1 = self._run_denoise_loop(
             model=x0_model,
             video_state=video_state,
             audio_state=audio_state,
@@ -251,6 +344,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             sigmas=sigmas_1,
             video_cross_attention_mask=relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
             on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
+            seed=seed,
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -292,7 +386,11 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
 
         # --- Stage 2: full resolution refine (no LoRA swap — already distilled) ---
         video_tokens, _ = self.video_patchifier.patchify(video_upscaled)
-        sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
+        stage2_table = LTX_2_5_STAGE_2_DISTILLED_SIGMAS if self._is_25 else STAGE_2_SIGMAS
+        sigmas_2 = stage2_table[: stage2_steps + 1] if stage2_steps else stage2_table
+        # Upstream renoises the upscaled stage-1 latent at ``stage_2_sigmas[0]``
+        # (``ModalitySpec(noise_scale=stage_2_sigmas[0].item())``); our
+        # ``create_noised_state(sigma=...)`` below is that same mechanism.
         start_sigma = sigmas_2[0]
 
         video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
@@ -327,7 +425,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             stage2_x0_model = X0Model(TiledLTXModel(self.dit, tiler_2))
 
         self._pre_denoise_flush(video_state_2, audio_state_2)
-        output_2 = denoise_loop(
+        output_2 = self._run_denoise_loop(
             model=stage2_x0_model,
             video_state=video_state_2,
             audio_state=audio_state_2,
@@ -336,6 +434,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             sigmas=sigmas_2,
             video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
             on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
+            seed=seed,
         )
         if self.low_memory:
             aggressive_cleanup()

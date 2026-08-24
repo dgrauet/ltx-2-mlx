@@ -110,6 +110,12 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         distilled_lora_strength: LoRA fusion strength (default 1.0).
     """
 
+    #: Whether the checkpoint is an LTX-2.5 weight pack. Resolved once per
+    #: pipeline instance by the subclasses that support 2.5 packs (currently
+    #: :class:`~ltx_pipelines_mlx.distilled.DistilledPipeline`); the class
+    #: default keeps every other two-stage pipeline on the 2.3 behaviour.
+    _is_25: bool = False
+
     def __init__(
         self,
         model_dir: str,
@@ -229,8 +235,13 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         object.__setattr__(self.dit, "_lora_sources", existing)
         aggressive_cleanup()
 
-    def _load_upsampler(self) -> None:
-        """Load the spatial upsampler from config and weights.
+    def _resolve_upsampler_path(self) -> Path:
+        """Return the spatial-upscaler weights file to load for stage 2.
+
+        LTX-2.5 packs ship ``spatial_upscaler_x2_v1_0.safetensors``; the 2.3
+        packs ship ``spatial_upscaler_x2_v1_1.safetensors`` (or the older
+        ``ltx-2.3-spatial-upscaler-x2`` name). The 2.5 name is only consulted
+        on 2.5 packs, so the 2.3 resolution order is untouched.
 
         Raises:
             FileNotFoundError: when no upsampler weights file is present in the
@@ -240,27 +251,42 @@ class TI2VidTwoStagesPipeline(BasePipeline):
                 with no other error. A missing file must therefore fail loud
                 rather than silently degrade.
         """
-        import json
+        stems = ["ltx-2.3-spatial-upscaler-x2", "spatial_upscaler_x2_v1_1"]
+        if self._is_25:
+            stems.insert(0, "spatial_upscaler_x2_v1_0")
 
         # Try new v1.1+ naming, then old naming
         weights_path = self.model_dir / "spatial_upscaler_x2_v1_1.safetensors"
-        for stem in ["ltx-2.3-spatial-upscaler-x2", "spatial_upscaler_x2_v1_1"]:
+        for stem in stems:
             resolved = self._resolve_safetensors(self.model_dir, stem)
             if resolved.exists():
                 weights_path = resolved
                 break
 
         if not weights_path.exists():
+            expected = "spatial_upscaler_x2_v1_0.safetensors" if self._is_25 else "spatial_upscaler_x2_v1_1.safetensors"
             raise FileNotFoundError(
                 f"Spatial upsampler weights not found in {self.model_dir} "
-                "(looked for spatial_upscaler_x2_v1_1.safetensors and "
-                "ltx-2.3-spatial-upscaler-x2*.safetensors). The two-stage and "
+                f"(looked for {', '.join(f'{s}*.safetensors' for s in stems)}). "
+                "The two-stage and "
                 "distilled pipelines require it for stage-2 upscaling; without "
                 "it the latent is upscaled by an untrained module and the "
                 "output degrades into a periodic 'mosaic' grid. Download it, "
                 "e.g.: hf download dgrauet/ltx-2.3-mlx-q8 "
-                f"spatial_upscaler_x2_v1_1.safetensors --local-dir {self.model_dir}"
+                f"{expected} --local-dir {self.model_dir}"
             )
+        return weights_path
+
+    def _load_upsampler(self) -> None:
+        """Load the spatial upsampler from config and weights.
+
+        Raises:
+            FileNotFoundError: propagated from :meth:`_resolve_upsampler_path`
+                when no upsampler weights file is present in the model dir.
+        """
+        import json
+
+        weights_path = self._resolve_upsampler_path()
 
         config_path = self.model_dir / f"{weights_path.stem}_config.json"
         if config_path.exists():
