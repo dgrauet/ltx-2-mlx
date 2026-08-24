@@ -35,6 +35,8 @@ def ltx2_schedule(
 
 __all__ = [
     "DISTILLED_SIGMAS",
+    "LTX_2_5_DISTILLED_SIGMAS",
+    "LTX_2_5_STAGE_2_DISTILLED_SIGMAS",
     "STAGE_2_SIGMAS",
     "get_sigma_schedule",
     "ltx2_schedule",
@@ -58,6 +60,31 @@ DISTILLED_SIGMAS: list[float] = [
 # Sigma schedule for stage 2 refinement (two-stage pipeline).
 # 4 values = 3 steps.
 STAGE_2_SIGMAS: list[float] = [
+    0.909375,
+    0.725,
+    0.421875,
+    0.0,
+]
+
+# Predefined sigma schedule for LTX-2.5 8-step distilled model.
+# Upstream reuses the name DISTILLED_SIGMAS; we diverge on surface (LTX_2_5_ prefix)
+# to keep both model tables in scope without ambiguity.
+# 9 values = 8 steps (iterate consecutive pairs: sigmas[i], sigmas[i+1]).
+LTX_2_5_DISTILLED_SIGMAS: list[float] = [
+    1.0,
+    0.99375,
+    0.9875,
+    0.98125,
+    0.975,
+    0.909375,
+    0.725,
+    0.421875,
+    0.0,
+]
+
+# Sigma schedule for LTX-2.5 stage 2 refinement (two-stage pipeline).
+# 4 values = 3 steps.
+LTX_2_5_STAGE_2_DISTILLED_SIGMAS: list[float] = [
     0.909375,
     0.725,
     0.421875,

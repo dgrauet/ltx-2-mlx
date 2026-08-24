@@ -226,3 +226,21 @@ def test_preserved_tokens_stay_clean_after_renoise():
     preserved = out.video_latent[:, :3, :]
     expected = video_state.clean_latent[:, :3, :]
     assert mx.array_equal(preserved, expected).item()
+
+
+def test_25_sigma_tables():
+    from ltx_pipelines_mlx.scheduler import (
+        DISTILLED_SIGMAS,
+        LTX_2_5_DISTILLED_SIGMAS,
+        LTX_2_5_STAGE_2_DISTILLED_SIGMAS,
+        STAGE_2_SIGMAS,
+    )
+
+    assert LTX_2_5_DISTILLED_SIGMAS == [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0]
+    assert LTX_2_5_STAGE_2_DISTILLED_SIGMAS == [0.909375, 0.725, 0.421875, 0.0]
+    # Le 0.0 terminal est porteur (bug de troncature témoin) et l'invariant
+    # de sous-schedule est le même qu'en 2.3.
+    assert LTX_2_5_DISTILLED_SIGMAS[-1] == 0.0
+    assert LTX_2_5_DISTILLED_SIGMAS[-4:] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS
+    # Les tables 2.3 ne bougent pas d'un octet.
+    assert DISTILLED_SIGMAS[-4:] == STAGE_2_SIGMAS
