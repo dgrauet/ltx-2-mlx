@@ -290,7 +290,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         config_path = self.model_dir / f"{weights_path.stem}_config.json"
         if config_path.exists():
-            config = json.loads(config_path.read_text()).get("config", {})
+            raw_config = json.loads(config_path.read_text())
+            # Old format nests fields under a "config" key; newer conversions
+            # (e.g. LTX-2.5) emit the fields flat at the top level.
+            config = raw_config.get("config", raw_config)
             self.upsampler = LatentUpsampler.from_config(config)
         else:
             self.upsampler = LatentUpsampler()

@@ -150,7 +150,11 @@ class ICLoraPipeline(BasePipeline):
             config_path = model_dir / f"{name}_config.json"
             weights_path = model_dir / f"{name}.safetensors"
             if config_path.exists():
-                config = json.loads(config_path.read_text()).get("config", {})
+                raw_config = json.loads(config_path.read_text())
+                # Old format nests fields under a "config" key; newer
+                # conversions (e.g. LTX-2.5) emit the fields flat at the
+                # top level.
+                config = raw_config.get("config", raw_config)
                 self.upsampler = LatentUpsampler.from_config(config)
             else:
                 self.upsampler = LatentUpsampler()

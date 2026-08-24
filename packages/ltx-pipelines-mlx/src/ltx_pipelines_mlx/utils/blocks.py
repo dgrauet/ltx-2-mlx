@@ -420,7 +420,10 @@ class VideoUpsampler:
         weights_path = self.model_dir / f"{self.name}.safetensors"
 
         if config_path.exists():
-            config = json.loads(config_path.read_text()).get("config", {})
+            raw_config = json.loads(config_path.read_text())
+            # Old format nests fields under a "config" key; newer conversions
+            # (e.g. LTX-2.5) emit the fields flat at the top level.
+            config = raw_config.get("config", raw_config)
             self._upsampler = LatentUpsampler.from_config(config)
         else:
             self._upsampler = LatentUpsampler()
