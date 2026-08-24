@@ -12,6 +12,7 @@ import mlx.core as mx
 from mlx_arsenal.diffusion import euler_step
 from tqdm import tqdm
 
+from ltx_core_mlx.components.diffusion_steps import EulerAncestralDiffusionStep
 from ltx_core_mlx.components.guiders import MultiModalGuiderFactory
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState, apply_denoise_mask
 from ltx_core_mlx.guidance.perturbations import (
@@ -181,6 +182,176 @@ def denoise_loop(
         # Euler step
         video_x = euler_step(video_x, video_x0, sigma, sigma_next)
         audio_x = euler_step(audio_x, audio_x0, sigma, sigma_next)
+
+        # Force computation for memory efficiency
+        mx.async_eval(video_x, audio_x)
+
+    aggressive_cleanup()
+
+    return DenoiseOutput(video_latent=video_x, audio_latent=audio_x)
+
+
+# --- Ancestral (SDE) Euler sampler ---
+
+
+def euler_ancestral_denoising_loop(
+    sigmas: list[float] | None,
+    video_state: LatentState,
+    audio_state: LatentState,
+    stepper: EulerAncestralDiffusionStep,
+    transformer: X0Model,
+    video_text_embeds: mx.array,
+    audio_text_embeds: mx.array,
+    *,
+    noise_seed: int,
+    video_positions: mx.array | None = None,
+    audio_positions: mx.array | None = None,
+    video_attention_mask: mx.array | None = None,
+    audio_attention_mask: mx.array | None = None,
+    video_cross_attention_mask: mx.array | None = None,
+    show_progress: bool = True,
+    on_step: OnStepFn | None = None,
+) -> DenoiseOutput:
+    """Run the ancestral (SDE) Euler denoising loop for joint audio+video.
+
+    Structurally identical to :func:`denoise_loop` (per-token timesteps,
+    ``X0Model`` call contract, ``apply_denoise_mask`` blending) but advances
+    the sample with :class:`EulerAncestralDiffusionStep` instead of a plain
+    Euler step. Mirrors upstream ``ltx_pipelines.utils.samplers.
+    euler_ancestral_denoising_loop`` / ``_ancestral_euler_denoising_loop``.
+
+    Noise semantics (upstream-iso):
+      - ``mx.random.seed(noise_seed)`` is set once before the loop (MLX
+        translation of the single upstream generator); each step draws the
+        video noise first, then the audio noise, so the random sequence
+        stays consistent across modalities.
+      - Noise is drawn raw: ``mx.random.normal(shape).astype(mx.float32)`` —
+        no channel-wise normalization (that variant is reserved for res2s).
+      - ``draw_noise = stepper.eta > 0``.
+      - Stepping happens in float32. On a terminal sigma (``sigma_next ==
+        0``) the latent short-circuits to the (already mask-blended) x0
+        prediction. Otherwise the stepper advances the sample and, only when
+        ``draw_noise``, the conditioning mask is re-applied *after* the
+        noise injection (``apply_denoise_mask(x_next, clean_latent,
+        denoise_mask)``) before casting back to the model dtype.
+
+    Args:
+        sigmas: Sigma schedule (defaults to ``DISTILLED_SIGMAS``). Already
+            includes the terminal ``0.0``.
+        video_state: Video latent state.
+        audio_state: Audio latent state.
+        stepper: ``EulerAncestralDiffusionStep`` instance carrying ``eta``
+            and ``s_noise``.
+        transformer: ``X0Model`` wrapping the LTX transformer.
+        video_text_embeds: Text embeddings for video conditioning.
+        audio_text_embeds: Text embeddings for audio conditioning.
+        noise_seed: Seed for the ancestral noise draws.
+        video_positions: Positional embeddings for video.
+        audio_positions: Positional embeddings for audio.
+        video_attention_mask: Attention mask for video.
+        audio_attention_mask: Attention mask for audio.
+        video_cross_attention_mask: Optional video->text cross-attention mask.
+        show_progress: Whether to show tqdm progress bar.
+        on_step: Optional per-step preview hook, see :func:`denoise_loop`.
+
+    Returns:
+        DenoiseOutput with final video and audio latents.
+    """
+    if sigmas is None:
+        sigmas = DISTILLED_SIGMAS
+
+    # Resolve positions: explicit params override, then fall back to state
+    if video_positions is None and video_state.positions is not None:
+        video_positions = video_state.positions
+    if audio_positions is None and audio_state.positions is not None:
+        audio_positions = audio_state.positions
+
+    # Resolve attention masks from state
+    if video_attention_mask is None and video_state.attention_mask is not None:
+        video_attention_mask = video_state.attention_mask
+    if audio_attention_mask is None and audio_state.attention_mask is not None:
+        audio_attention_mask = audio_state.attention_mask
+
+    video_x = video_state.latent
+    audio_x = audio_state.latent
+    video_dtype = video_x.dtype
+    audio_dtype = audio_x.dtype
+
+    steps = list(zip(sigmas[:-1], sigmas[1:]))
+    iterator = tqdm(steps, desc="Denoising (ancestral)", disable=not show_progress)
+
+    video_uniform = _is_uniform_mask(video_state.denoise_mask)
+    audio_uniform = _is_uniform_mask(audio_state.denoise_mask)
+
+    draw_noise = stepper.eta > 0
+    mx.random.seed(noise_seed)
+
+    for step_idx, (sigma, sigma_next) in enumerate(iterator):
+        sigma_arr = mx.array([sigma], dtype=mx.bfloat16)
+        B = video_x.shape[0]
+
+        call_kwargs: dict = dict(
+            video_latent=video_x,
+            audio_latent=audio_x,
+            sigma=mx.broadcast_to(sigma_arr, (B,)),
+            video_text_embeds=video_text_embeds,
+            audio_text_embeds=audio_text_embeds,
+            video_positions=video_positions,
+            audio_positions=audio_positions,
+            video_attention_mask=video_attention_mask,
+            audio_attention_mask=audio_attention_mask,
+        )
+        if video_cross_attention_mask is not None:
+            call_kwargs["video_cross_attention_mask"] = video_cross_attention_mask
+
+        # Pass per-token timesteps when mask is not uniform
+        if not video_uniform:
+            call_kwargs["video_timesteps"] = _compute_per_token_timesteps(sigma, video_state.denoise_mask)
+        if not audio_uniform:
+            call_kwargs["audio_timesteps"] = _compute_per_token_timesteps(sigma, audio_state.denoise_mask)
+
+        # Predict x0
+        video_x0, audio_x0 = transformer(**call_kwargs)
+
+        # Apply denoise mask: blend with clean latent
+        video_x0 = apply_denoise_mask(video_x0, video_state.clean_latent, video_state.denoise_mask)
+        audio_x0 = apply_denoise_mask(audio_x0, audio_state.clean_latent, audio_state.denoise_mask)
+
+        if on_step is not None:
+            on_step(step_idx, len(steps), video_x0, sigma)
+
+        if sigma_next == 0:
+            # Terminal step: short-circuit to the (already mask-blended) x0 prediction.
+            video_x = video_x0.astype(video_dtype)
+            audio_x = audio_x0.astype(audio_dtype)
+        else:
+            # Video draw first, then audio, from the same seeded generator.
+            video_noise = mx.random.normal(video_x.shape).astype(mx.float32) if draw_noise else None
+            audio_noise = mx.random.normal(audio_x.shape).astype(mx.float32) if draw_noise else None
+
+            video_x_next = stepper.step(
+                sample=video_x.astype(mx.float32),
+                denoised_sample=video_x0,
+                sigmas=sigmas,
+                step_index=step_idx,
+                noise=video_noise,
+            )
+            audio_x_next = stepper.step(
+                sample=audio_x.astype(mx.float32),
+                denoised_sample=audio_x0,
+                sigmas=sigmas,
+                step_index=step_idx,
+                noise=audio_noise,
+            )
+
+            if draw_noise:
+                # Re-apply the conditioning mask AFTER noise injection: the point
+                # that breaks I2V if forgotten (preserved tokens must not get renoised).
+                video_x_next = apply_denoise_mask(video_x_next, video_state.clean_latent, video_state.denoise_mask)
+                audio_x_next = apply_denoise_mask(audio_x_next, audio_state.clean_latent, audio_state.denoise_mask)
+
+            video_x = video_x_next.astype(video_dtype)
+            audio_x = audio_x_next.astype(audio_dtype)
 
         # Force computation for memory efficiency
         mx.async_eval(video_x, audio_x)
