@@ -75,9 +75,10 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
     - Run the same distilled transformer for stage 2 with ``STAGE_2_SIGMAS``.
 
     On an LTX-2.5 pack (detected once at construction via
-    :func:`~ltx_pipelines_mlx.utils.generation.is_ltx25_pack`) both stages
-    instead run the ancestral (SDE) Euler loop on the ``LTX_2_5_*`` sigma
-    tables, and stage 2 resolves the ``spatial_upscaler_x2_v1_0`` upscaler.
+    :func:`~ltx_pipelines_mlx.utils.generation.is_ltx25_pack`) both stages run
+    on the ``LTX_2_5_*`` sigma tables, stage 1 switches to the ancestral (SDE)
+    Euler loop (stage 2 stays deterministic, as upstream), and stage 2 resolves
+    the ``spatial_upscaler_x2_v1_0`` upscaler.
 
     Args:
         model_dir: Path to model weights or HuggingFace repo ID. Must
@@ -149,19 +150,23 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         video_cross_attention_mask: mx.array | None,
         on_step,
         seed: int,
+        ancestral: bool,
     ):
-        """Dispatch one stage onto the deterministic (2.3) or ancestral (2.5) loop.
+        """Dispatch one stage onto the deterministic or ancestral (SDE) loop.
 
         LTX-2.5 distilled checkpoints are trained for the ancestral (SDE) Euler
         sampler; 2.3 checkpoints keep the deterministic loop they were shipped
         with. Upstream makes the same choice through ``DiffusionStage``'s
-        ``stepper`` / ``loop`` overrides (``_stage_1_sampler_kwargs``).
+        ``stepper`` / ``loop`` overrides, and scopes them to stage 1 only
+        (``_stage_1_sampler_kwargs``) — quoting upstream ``distilled.py``:
 
-        Divergence from upstream: upstream applies the ancestral override to
-        stage 1 only (``_stage_1_sampler_kwargs``) and keeps stage 2's 3-step
-        refinement on the deterministic sampler. Here both stages of a 2.5 pack
-        run ancestral; the terminal sigma still short-circuits to the x0
-        prediction, so stage 2 does not end on injected noise.
+            Stage 1 samples with the ancestral (SDE) Euler sampler or the
+            deterministic one according to ``self.use_ancestral_sampler``.
+            Stage 2 is always deterministic -- its 3-step refinement schedule
+            is too short to remove freshly injected noise.
+
+        Hence ``ancestral`` is passed per stage rather than read off
+        ``self._is_25``: only stage 1 of a 2.5 pack sets it.
 
         The two loops differ only in the model keyword (``model=`` vs upstream's
         ``transformer=``) and in the ancestral extras (``stepper`` /
@@ -169,7 +174,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         :class:`LatentState` by both, so the call structure is otherwise the
         one already used at the 2.3 call sites.
         """
-        if not self._is_25:
+        if not ancestral:
             return denoise_loop(
                 model=model,
                 video_state=video_state,
@@ -345,6 +350,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             video_cross_attention_mask=relay_mask(F, H_half, W_half, video_state.latent.shape[1]),
             on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
             seed=seed,
+            ancestral=self._is_25,
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -435,6 +441,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
             on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
             seed=seed,
+            # Deterministic on every pack, 2.5 included (see _run_denoise_loop).
+            ancestral=False,
         )
         if self.low_memory:
             aggressive_cleanup()

@@ -164,20 +164,37 @@ def _run(pipe, **overrides):
     return pipe.generate_two_stage(**kwargs)
 
 
-def test_25_pack_routes_stage1_and_stage2_through_ancestral_loop(tmp_path, monkeypatch):
+def test_25_pack_routes_stage1_through_ancestral_loop(tmp_path, monkeypatch):
     pipe, euler, ancestral, _ = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
 
     _run(pipe)
 
-    assert euler.calls == []
-    assert len(ancestral.calls) == 2
-    assert ancestral.calls[0]["sigmas"] == LTX_2_5_DISTILLED_SIGMAS
-    assert ancestral.calls[1]["sigmas"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS
-    for call in ancestral.calls:
-        assert call["noise_seed"] == 7 + ANCESTRAL_NOISE_SEED_OFFSET
-        stepper = call["stepper"]
-        assert stepper.eta == ANCESTRAL_ETA
-        assert stepper.s_noise == ANCESTRAL_S_NOISE
+    assert len(ancestral.calls) == 1
+    stage_1 = ancestral.calls[0]
+    assert stage_1["sigmas"] == LTX_2_5_DISTILLED_SIGMAS
+    assert stage_1["noise_seed"] == 7 + ANCESTRAL_NOISE_SEED_OFFSET
+    assert stage_1["stepper"].eta == ANCESTRAL_ETA
+    assert stage_1["stepper"].s_noise == ANCESTRAL_S_NOISE
+    assert len(euler.calls) == 1
+
+
+def test_25_pack_stage2_stays_deterministic(tmp_path, monkeypatch):
+    """Upstream: "Stage 2 is always deterministic -- its 3-step refinement
+    schedule is too short to remove freshly injected noise." The ancestral
+    override is scoped to stage 1 (``_stage_1_sampler_kwargs``), so a 2.5 pack
+    must run its stage 2 on the plain Euler loop with the 2.5 stage-2 table.
+    """
+    pipe, euler, ancestral, _ = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
+
+    _run(pipe)
+
+    assert len(euler.calls) == 1
+    stage_2 = euler.calls[0]
+    assert stage_2["sigmas"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS
+    # The load-bearing assertion: no ancestral machinery reaches stage 2.
+    assert "stepper" not in stage_2
+    assert "noise_seed" not in stage_2
+    assert all(call["sigmas"] != LTX_2_5_STAGE_2_DISTILLED_SIGMAS for call in ancestral.calls)
 
 
 def test_25_pack_stage2_renoises_at_first_stage2_sigma(tmp_path, monkeypatch):
@@ -209,12 +226,12 @@ def test_23_pack_keeps_the_deterministic_euler_loop(tmp_path, monkeypatch):
 
 
 def test_stage_step_truncation_applies_to_the_25_tables(tmp_path, monkeypatch):
-    pipe, _, ancestral, _ = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
+    pipe, euler, ancestral, _ = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
 
     _run(pipe, stage1_steps=3, stage2_steps=2)
 
     assert ancestral.calls[0]["sigmas"] == LTX_2_5_DISTILLED_SIGMAS[:4]
-    assert ancestral.calls[1]["sigmas"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS[:3]
+    assert euler.calls[0]["sigmas"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS[:3]
 
 
 def test_teacache_rejected_on_25_pack(tmp_path, monkeypatch):
