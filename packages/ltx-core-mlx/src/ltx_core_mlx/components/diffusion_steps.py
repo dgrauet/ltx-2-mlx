@@ -74,6 +74,57 @@ class EulerDiffusionStep:
         return (sample.astype(mx.float32) + velocity.astype(mx.float32) * dt).astype(out_dtype)
 
 
+class EulerAncestralDiffusionStep:
+    """Ancestral (SDE) Euler step for rectified-flow models.
+
+    Each step advances deterministically to an intermediate noise level
+    ``sigma_down <= sigma_next`` and then renoises back up to ``sigma_next``,
+    rescaling the signal component by ``alpha_next / alpha_down`` so the
+    transition stays variance-preserving. ``eta`` interpolates between a plain
+    Euler step (``eta=0``) and a fully ancestral step (``eta=1``).
+
+    This is the rectified-flow parameterization (``alpha = 1 - sigma``). It
+    deliberately does **not** reuse :func:`_get_ancestral_step`: that helper
+    implements the DDIM/variance-exploding coefficients, which agree with
+    this step only at ``eta=0``. Mirror of upstream diffusion_steps.py.
+    """
+
+    def __init__(self, eta: float = 1.0, s_noise: float = 1.0) -> None:
+        self.eta = eta
+        self.s_noise = s_noise
+
+    def step(
+        self,
+        sample: mx.array,
+        denoised_sample: mx.array,
+        sigmas: mx.array,
+        step_index: int,
+        noise: mx.array | None = None,
+    ) -> mx.array:
+        sigma = float(sigmas[step_index])
+        sigma_next = float(sigmas[step_index + 1])
+        if sigma_next == 0:
+            return denoised_sample.astype(sample.dtype)
+        if self.eta > 0 and noise is None:
+            raise ValueError("EulerAncestralDiffusionStep requires a noise tensor when eta > 0")
+
+        x = sample.astype(mx.float32)
+        denoised = denoised_sample.astype(mx.float32)
+
+        downstep_ratio = 1.0 + (sigma_next / sigma - 1.0) * self.eta
+        sigma_down = sigma_next * downstep_ratio
+
+        sigma_down_ratio = sigma_down / sigma
+        x_next = sigma_down_ratio * x + (1.0 - sigma_down_ratio) * denoised
+
+        if self.eta > 0:
+            alpha_next = 1.0 - sigma_next
+            alpha_down = 1.0 - sigma_down
+            renoise_coeff = max(sigma_next**2 - sigma_down**2 * alpha_next**2 / alpha_down**2, 0.0) ** 0.5
+            x_next = (alpha_next / alpha_down) * x_next + noise.astype(mx.float32) * self.s_noise * renoise_coeff
+        return x_next.astype(sample.dtype)
+
+
 class Res2sDiffusionStep:
     """Second-order res_2s step with SDE noise injection.
 
@@ -204,6 +255,7 @@ class EulerCfgPpDiffusionStep:
 
 __all__ = [
     "DiffusionStepProtocol",
+    "EulerAncestralDiffusionStep",
     "EulerCfgPpDiffusionStep",
     "EulerDiffusionStep",
     "Res2sDiffusionStep",
