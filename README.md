@@ -4,6 +4,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 
 ## Features
 
+- **LTX-2.5 (early support)** — `generate --distilled --model <2.5-pack-dir>`; auto-detected from the pack, no new flag. See [LTX-2.5 section](#ltx-25-early-support) for what's supported in v1.
 - **Text-to-Video** — generate video + stereo 48kHz audio from a text prompt
 - **Image-to-Video** — animate a reference image
 - **Audio-to-Video** — generate video conditioned on an audio track
@@ -114,6 +115,37 @@ ltx-2-mlx generate -p "1080p scene" --two-stages-hq --low-ram \
 # Model info
 ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q8
 ```
+
+## LTX-2.5 (early support)
+
+```bash
+ltx-2-mlx generate --distilled --model /path/to/ltx-2.5-mlx-q8 \
+    --prompt "a heavy wooden door creaks slowly open" -o out.mp4
+```
+
+The 2.5 generation is **auto-detected from the model pack** (no new CLI
+flag) — a local directory is required, since the pack bundles its own
+Gemma-4 text encoder (`text_encoder.safetensors`); no `mlx-community`
+Gemma download happens on this path. `--image` (I2V) works the same as on
+2.3.
+
+Sampling: stage 1 runs euler-ancestral (8 steps, SDE noise injection);
+stage 2 stays deterministic euler (3 steps) — upstream's rationale is that
+stage 2's short 3-step refinement schedule is too short to remove freshly
+injected noise.
+
+**v1 limits on 2.5 packs** (`generate --distilled` only):
+
+| Feature | Status |
+|---|---|
+| `--two-stage` / `--two-stages-hq` (dev + CFG) | not yet supported |
+| `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora`, `retake`, `extend`, `lipdub` | not yet supported |
+| `enhance` / `--enhance-prompt` | raises a clear error (Gemma 3-only) |
+| `--enable-teacache` | raises a clear error (not calibrated for 2.5) |
+| Modality tiling, Prompt Relay | validated on 2.3 only |
+| Diffusion (`DiffVAEMode`) VAE decoder | not loaded — conv decoder used |
+
+Further 2.5 pipelines land in subsequent releases.
 
 ### Python API
 

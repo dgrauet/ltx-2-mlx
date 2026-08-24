@@ -926,6 +926,48 @@ End-to-end run on M2 Pro 32 GB, dev model + HDR LoRA fused, q8:
 
 ---
 
+## LTX-2.5 (Early Support)
+
+`generate --distilled --model <2.5-pack-dir>` runs end-to-end on a local
+LTX-2.5 pack. No new CLI flag — generation is auto-detected from the pack's
+`embedded_config.json` (`ff_bias is False` ⇔ 2.5) via
+`is_ltx25_pack()`/`LTXModelConfig.from_checkpoint_dir()`, resolved once in
+`DistilledPipeline.__init__` as `self._is_25`. The pack carries its own
+Gemma-4 text encoder (`text_encoder.safetensors` + `text_encoder_config.json`,
+selected by `select_text_encoder()`) — no `mlx-community` Gemma 3 download on
+that path. 2.3 packs are byte-identical to before.
+
+### Sampler
+
+- Stage 1: `euler_ancestral_denoising_loop` (`EulerAncestralDiffusionStep(eta=ANCESTRAL_ETA, s_noise=ANCESTRAL_S_NOISE)`, 8 steps) on `LTX_2_5_DISTILLED_SIGMAS`.
+- Stage 2: stays the deterministic Euler loop (`STAGE_2` renoise) on `LTX_2_5_STAGE_2_DISTILLED_SIGMAS`, matching upstream: *"Stage 2 is always deterministic — its 3-step refinement schedule is too short to remove freshly injected noise."*
+- Ancestral noise is seeded from `seed + ANCESTRAL_NOISE_SEED_OFFSET` (10000) to decorrelate from the initial-latent draw.
+- Stage 2 upscaler resolves to `spatial_upscaler_x2_v1_0.safetensors` (vs `x1_1` on 2.3), hard error if absent (#42 style).
+
+### v1 limits (2.5 packs, `generate --distilled` only)
+
+| Feature | Status |
+|---|---|
+| `--two-stage` / `--two-stages-hq` (dev model + CFG) | not yet supported |
+| `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora`, `retake`, `extend`, `lipdub` | not yet supported |
+| `enhance` / `--enhance-prompt` | raises `NotImplementedError` (`_guard_enhance_not_gemma4`) — Gemma 3 only |
+| `--enable-teacache` | raises `ValueError` — 2.3 polynomial isn't calibrated for 2.5 |
+| Modality tiling, Prompt Relay | validated on 2.3 only |
+| Diffusion (`DiffVAEMode`) VAE decoder | not loaded — conv `vae_decoder_conv` used (see Weight Format) |
+
+Further 2.5 pipelines (two-stage, a2v, keyframe, ic-lora, ...) land in
+subsequent releases behind the same pack-evidence detection.
+
+### Key Files
+
+- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/distilled.py` — `DistilledPipeline` (2.3/2.5 dispatch), `ANCESTRAL_*` constants.
+- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/utils/generation.py` — `is_ltx25_pack()`.
+- `packages/ltx-core-mlx/src/ltx_core_mlx/text_encoders/gemma/encoders/encoder_configurator.py` — `select_text_encoder()`, `check_gemma_version()`.
+- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/ti2vid_two_stages.py` — `_resolve_upsampler_path()` (`_is_25` class attribute, default `False`).
+- `tests/test_ltx25_distilled.py` — routing, sigma-table, TeaCache-guard, upsampler-resolution tests.
+
+---
+
 ## Metal Watchdog Mitigation
 
 The macOS GPU watchdog (`kIOGPUCommandBufferCallbackErrorImpactingInteractivity`, ~10 s per Metal command buffer) trips when:
