@@ -320,7 +320,8 @@ def euler_ancestral_denoising_loop(
         if on_step is not None:
             on_step(step_idx, len(steps), video_x0, sigma)
 
-        if sigma_next == 0:
+        terminal_step = sigma_next == 0
+        if terminal_step:
             # Terminal step: short-circuit to the (already mask-blended) x0 prediction.
             video_x = video_x0.astype(video_dtype)
             audio_x = audio_x0.astype(audio_dtype)
@@ -355,6 +356,9 @@ def euler_ancestral_denoising_loop(
 
         # Force computation for memory efficiency
         mx.async_eval(video_x, audio_x)
+
+        if terminal_step:
+            break
 
     aggressive_cleanup()
 

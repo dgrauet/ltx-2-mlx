@@ -210,22 +210,40 @@ def test_loop_determinism_and_seed_sensitivity():
 
 
 def test_preserved_tokens_stay_clean_after_renoise():
-    # denoise_mask=0 on a block of tokens: after the full loop (eta=1), those
+    # denoise_mask=0 on a block of tokens: after the loop (eta=1), those
     # tokens must equal clean_latent exactly — the mask is re-applied AFTER
     # the noise injection. This is the exact point that breaks I2V if forgotten.
+    #
+    # The primary schedule deliberately does NOT end at sigma=0: with a
+    # terminal sigma, the loop's last iteration takes the short-circuit
+    # branch (latent = already-mask-blended x0), which passes even if the
+    # post-noise apply_denoise_mask block is deleted — making the assertion
+    # vacuous. A non-terminal schedule forces the final state through the
+    # renoise + re-mask path, so the assertion can only pass through that
+    # block (verified by neutering it locally: the assertion then fails).
     video_state, audio_state, transformer = _stub_transformer_and_states(denoise_mask_prefix_zero=3)
-    sigmas = [1.0, 0.6, 0.3, 0.0]
+    expected = video_state.clean_latent[:, :3, :]
 
+    non_terminal_sigmas = [1.0, 0.6, 0.3]
     out = euler_ancestral_denoising_loop(
-        sigmas,
+        non_terminal_sigmas,
         stepper=EulerAncestralDiffusionStep(eta=1.0),
         noise_seed=123,
         **_common_loop_kwargs(video_state, audio_state, transformer),
     )
-
     preserved = out.video_latent[:, :3, :]
-    expected = video_state.clean_latent[:, :3, :]
     assert mx.array_equal(preserved, expected).item()
+
+    # Terminal schedule covers the short-circuit path separately.
+    terminal_sigmas = [1.0, 0.6, 0.3, 0.0]
+    out_terminal = euler_ancestral_denoising_loop(
+        terminal_sigmas,
+        stepper=EulerAncestralDiffusionStep(eta=1.0),
+        noise_seed=123,
+        **_common_loop_kwargs(video_state, audio_state, transformer),
+    )
+    preserved_terminal = out_terminal.video_latent[:, :3, :]
+    assert mx.array_equal(preserved_terminal, expected).item()
 
 
 def test_25_sigma_tables():
