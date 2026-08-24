@@ -92,11 +92,13 @@ class PromptEncoder:
         self.gemma_model_id = gemma_model_id
         self._text_encoder: GemmaLanguageModel | Gemma4TextEncoder | None = None
         self._feature_extractor: GemmaFeaturesExtractorV2 | None = None
+        self._encoder_kind: str | None = None
 
     def load(self) -> None:
         """Load Gemma + connector if not already loaded."""
         if self._text_encoder is None:
-            if select_text_encoder(self.model_dir) == "gemma4":
+            self._encoder_kind = select_text_encoder(self.model_dir)
+            if self._encoder_kind == "gemma4":
                 # LTX-2.5 pack: Gemma 4 unified tower ships in the DiT pack
                 # itself -- pack-local load, no mlx-community download.
                 from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
@@ -117,6 +119,20 @@ class PromptEncoder:
             double_precision_rope = LTXModelConfig.from_checkpoint_dir(self.model_dir).double_precision_rope
             self._feature_extractor = GemmaFeaturesExtractorV2(double_precision_rope=double_precision_rope)
             connector_weights = load_split_safetensors(self.model_dir / "connector.safetensors", prefix="connector.")
+            if self._encoder_kind == "gemma4":
+                # The 2.5 pack's connector.safetensors carries only the two
+                # Embeddings1DConnector transformer stacks
+                # (video/audio_embeddings_connector); the
+                # text_embedding_projection.{video,audio}_aggregate_embed
+                # tensors that TextEncoderConnector also needs ship inside
+                # text_encoder.safetensors instead (see the allowlist note
+                # in gemma4.py). Pull them in here and merge under the same
+                # key GemmaFeaturesExtractorV2.connector expects.
+                projection_weights = load_split_safetensors(
+                    self.model_dir / "text_encoder.safetensors",
+                    prefix="text_encoder.text_embedding_projection.",
+                )
+                connector_weights.update({f"text_embedding_projection.{k}": v for k, v in projection_weights.items()})
             self._feature_extractor.connector.load_weights(list(connector_weights.items()))
             aggressive_cleanup()
 
