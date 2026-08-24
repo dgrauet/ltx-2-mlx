@@ -29,11 +29,19 @@ forward pass, and dumps:
   row 0 left-padded by 3 tokens, exercising the ``padding_mask`` path
   through ``build_attention_mask`` (unexercised by the all-ones batch=1
   case above).
+* ``tokenizer.control_ids`` -- token ids for ``CONTROL_SENTENCE``,
+  produced by ``transformers.AutoTokenizer`` loaded from the real
+  LTX-2.5 pack's ``tokenizer.json`` (not the tiny reference model above --
+  this exercises the *real* Gemma tokenizer, independent of the tiny
+  attention/rotary config). Only written when ``PACK_DIR`` exists locally;
+  ``tests/test_ltx25_gemma4.py`` skips the tokenizer parity test when this
+  key is absent from the npz.
 """
 
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -41,6 +49,12 @@ from transformers.models.gemma4_unified.configuration_gemma4_unified import Gemm
 from transformers.models.gemma4_unified.modeling_gemma4_unified import Gemma4UnifiedTextModel
 
 SEED = 1234
+
+# Local (non-hub) pack, same convention as tests/conftest.py::_local_pack.
+# Only used for the tokenizer control-sentence dump below -- unrelated to
+# the tiny reference model's config/weights.
+PACK_DIR = Path.home() / "Work/mlx/models/ltx-2.5-mlx-q8"
+CONTROL_SENTENCE = "A lone lighthouse keeper watches the storm roll in over the grey harbor."
 
 # Fixed tiny config, mirroring the real pack's *shape* (two attention
 # flavors, k_eq_v on the full layers, proportional partial rope on the
@@ -213,6 +227,21 @@ def main() -> None:
 
     out["input_ids"] = input_ids.numpy()
     out["attention_mask"] = attention_mask.numpy()
+
+    # Real-pack tokenizer control sentence (independent of the tiny
+    # reference model above): proves our Gemma4TextEncoder.tokenize()
+    # produces identical ids to transformers.AutoTokenizer loaded from the
+    # same pack. Skipped when the pack is not present on this machine --
+    # the pytest side skips the comparison when this key is absent.
+    if PACK_DIR.exists():
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(str(PACK_DIR))
+        control_ids = tokenizer.encode(CONTROL_SENTENCE.strip())
+        out["tokenizer.control_ids"] = np.array(control_ids, dtype=np.int64)
+        print(f"tokenizer control ids: {len(control_ids)} tokens (pack at {PACK_DIR})")
+    else:
+        print(f"pack dir {PACK_DIR} not found -- skipping tokenizer control-sentence dump")
 
     np.savez(args.out, **out)
     print(f"wrote {args.out} with {len(out)} arrays")

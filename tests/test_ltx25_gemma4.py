@@ -7,7 +7,10 @@ parses the real pack when available (``LTX25_Q8_DIR``).
 
 from pathlib import Path
 
+import mlx.core as mx
+import numpy as np
 import pytest
+from mlx.utils import tree_flatten, tree_unflatten
 
 from tests.conftest import LTX25_Q8_DIR
 
@@ -627,3 +630,182 @@ def test_25_gemma4_config_covers_every_pack_tensor():
     assert not missing_in_model, f"pack tensors nobody would load: {missing_in_model[:10]}"
     assert not unfed_params, f"model params the pack does not feed: {unfed_params[:10]}"
     assert len(pack_normalized) == 666
+
+
+# ---------------------------------------------------------------------------
+# Gemma4TextEncoder: system prompts, the post-final-norm stacking contract,
+# and tokenizer LEFT-pad + real-tokenizer parity.
+# ---------------------------------------------------------------------------
+
+_PROMPTS_DIR = (
+    Path(__file__).resolve().parents[1] / "packages/ltx-core-mlx/src/ltx_core_mlx/text_encoders/gemma/encoders/prompts"
+)
+
+# Pinned at port time (2026-08-24) against upstream Lightricks/LTX-2 @ main:
+#   packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_{t2v,i2v}_system_prompt.txt
+_PROMPT_INTEGRITY = {
+    "gemma4_t2v_system_prompt.txt": {
+        "length": 3769,
+        "sha256": "0cddf69456bcd51e65430f848386295d9ac4d17d5df3ea65d5f3d8a9ad842f3c",
+    },
+    "gemma4_i2v_system_prompt.txt": {
+        "length": 4708,
+        "sha256": "15992bfb757d3bbd83f2d27ad86e450fc4caffa0f7cb7523772a60e346ef3fee",
+    },
+}
+
+
+@pytest.mark.parametrize("prompt_name", sorted(_PROMPT_INTEGRITY))
+def test_gemma4_system_prompt_matches_upstream_verbatim(prompt_name):
+    """The prompt files must be byte-identical to what was fetched from upstream.
+
+    Any future edit (deliberate or accidental) changes the sha and must
+    update this pin explicitly -- these prompts are consumed verbatim as
+    the Gemma-4 system message and are not meant to drift silently.
+    """
+    import hashlib
+
+    path = _PROMPTS_DIR / prompt_name
+    data = path.read_bytes()
+
+    assert len(data) == _PROMPT_INTEGRITY[prompt_name]["length"]
+    assert hashlib.sha256(data).hexdigest() == _PROMPT_INTEGRITY[prompt_name]["sha256"]
+
+
+def test_gemma4_text_encoder_loads_default_system_prompts():
+    from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
+
+    encoder = Gemma4TextEncoder()
+    t2v = encoder.default_gemma4_t2v_system_prompt
+    i2v = encoder.default_gemma4_i2v_system_prompt
+    assert len(t2v.encode("utf-8")) == _PROMPT_INTEGRITY["gemma4_t2v_system_prompt.txt"]["length"]
+    assert len(i2v.encode("utf-8")) == _PROMPT_INTEGRITY["gemma4_i2v_system_prompt.txt"]["length"]
+
+
+@pytest.mark.slow
+def test_gemma4_get_all_hidden_states_last_entry_is_post_final_norm():
+    """HARD REQUIREMENT (Task 3 ledger): entry -1 of the 49-stack must be
+    ``tower.norm(raw[-1])``, not the raw tower output -- HF's
+    ``output_hidden_states=True`` tuple ties its last entry to the
+    post-final-norm ``last_hidden_state``
+    (``transformers/output_capturing.py:261-263``), and the upstream
+    encoder consumes that tuple as-is (see
+    ``upstream_gemma_base_encoder.py:68-71``).
+
+    Uses the tiny 2-layer config (no real pack needed) with randomly
+    initialized weights, so the norm's effect is guaranteed non-trivial:
+    a bug that forgets to apply ``tower.norm`` would make this test fail,
+    not silently pass.
+    """
+    import numpy as np
+
+    from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import Gemma4TextModel
+    from ltx_core_mlx.text_encoders.gemma.gemma4_config import Gemma4TextConfig
+
+    config = Gemma4TextConfig.from_text_encoder_config(_TINY_PACK_CONFIG)
+    tower = Gemma4TextModel(config)
+
+    # Randomize weights: default init leaves norm weights at zero (Gemma
+    # RMSNorm has no "+1" -- see Task 2 report), which would make
+    # norm(x) == x * rsqrt(mean(x^2)+eps) still differ from raw x, but
+    # randomizing everything makes the mismatch unmistakably large rather
+    # than relying on that one coincidence.
+    mx.random.seed(0)
+    flat = dict(tree_flatten(tower.parameters()))
+    randomized = {k: mx.random.normal(v.shape) * 0.1 for k, v in flat.items()}
+    tower.update(tree_unflatten(list(randomized.items())))
+
+    encoder = Gemma4TextEncoder(tower=tower)
+    input_ids = mx.random.randint(0, config.vocab_size, (1, 6))
+
+    raw_states = tower(input_ids, attention_mask=None)
+    got_states = encoder.get_all_hidden_states(input_ids, attention_mask=None)
+
+    assert len(got_states) == len(raw_states) == config.num_hidden_layers + 1
+
+    # Entries 0..-2: identical to the raw tower output.
+    for i in range(len(raw_states) - 1):
+        diff = float(np.abs(np.array(got_states[i]) - np.array(raw_states[i])).max())
+        assert diff == 0.0, f"entry {i} must be byte-identical to the raw tower output, got diff={diff}"
+
+    # Entry -1: must equal tower.norm(raw[-1]) ...
+    want_final = tower.norm(raw_states[-1])
+    diff = float(np.abs(np.array(got_states[-1]) - np.array(want_final)).max())
+    assert diff == 0.0
+
+    # ... and must NOT equal the raw (pre-norm) last entry -- catches the
+    # #37-class bug of silently forgetting to apply the final norm.
+    raw_vs_got = float(np.abs(np.array(got_states[-1]) - np.array(raw_states[-1])).max())
+    assert raw_vs_got > 1e-3, "entry -1 must differ from the raw pre-norm tower output"
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(LTX25_Q8_DIR is None, reason="local ltx-2.5-mlx-q8 pack not found")
+def test_gemma4_tokenize_left_pads_with_binary_mask():
+    """Our convention: LEFT padding + binary attention mask (divergence
+    from upstream's right-pad-before-connector, documented at the top of
+    ``base_encoder.py`` / the module docstring of ``gemma4_encoder.py``).
+    """
+    from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
+
+    encoder = Gemma4TextEncoder()
+    encoder.load_tokenizer(LTX25_Q8_DIR)
+
+    max_length = 32
+    token_ids, attention_mask = encoder.tokenize("hello world", max_length=max_length)
+
+    assert token_ids.shape == (1, max_length)
+    assert attention_mask.shape == (1, max_length)
+
+    mask_np = np.array(attention_mask)[0]
+    ids_np = np.array(token_ids)[0]
+
+    # Real tokens are a contiguous suffix (left padding).
+    num_real = int(mask_np.sum())
+    assert num_real > 0
+    assert (mask_np[: max_length - num_real] == 0).all()
+    assert (mask_np[max_length - num_real :] == 1).all()
+
+    # Padding uses the tokenizer's native pad id.
+    pad_id = encoder.tokenizer.pad_token_id
+    assert (ids_np[: max_length - num_real] == pad_id).all()
+
+
+@pytest.mark.slow
+@_needs_parity_npz
+def test_gemma4_tokenizer_matches_pack_reference_ids(ref):
+    """Our tokenize() must produce the same ids as transformers.AutoTokenizer
+    loaded straight from the pack, for the same control sentence -- this is
+    the "tokenizer parity" leg of the harness (Task 4 brief), independent of
+    the tiny-config attention/rotary parity above.
+    """
+    if "tokenizer.control_ids" not in ref:
+        pytest.skip("npz was regenerated without the real pack available (see parity_gemma4_reference.PACK_DIR)")
+    if LTX25_Q8_DIR is None:
+        pytest.skip("local ltx-2.5-mlx-q8 pack not found")
+
+    from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
+
+    # Must stay byte-identical to parity_gemma4_reference.CONTROL_SENTENCE.
+    # Not imported directly: that module imports torch at module scope
+    # (a --no-project-only dependency), which would break collection of
+    # this test file in the normal project env.
+    CONTROL_SENTENCE = "A lone lighthouse keeper watches the storm roll in over the grey harbor."
+
+    encoder = Gemma4TextEncoder()
+    encoder.load_tokenizer(LTX25_Q8_DIR)
+
+    want_ids = ref["tokenizer.control_ids"].tolist()
+    # Pad wide enough that the control sentence is never truncated, then
+    # strip the left padding back off using the mask -- exercises the real
+    # tokenize() codepath end-to-end rather than calling the raw tokenizer.
+    max_length = len(want_ids) + 64
+    token_ids, attention_mask = encoder.tokenize(CONTROL_SENTENCE, max_length=max_length)
+
+    mask_np = np.array(attention_mask)[0]
+    ids_np = np.array(token_ids)[0]
+    num_real = int(mask_np.sum())
+    got_ids = ids_np[max_length - num_real :].tolist()
+
+    assert got_ids == want_ids
