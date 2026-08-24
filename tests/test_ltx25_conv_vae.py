@@ -29,41 +29,76 @@ import pytest
 
 from tests.conftest import LTX25_Q8_DIR
 
-_slow_pack_gated = [
-    pytest.mark.slow,
-    pytest.mark.skipif(LTX25_Q8_DIR is None, reason="local ltx-2.5-mlx-q8 pack not found"),
-]
 
-
-def _header_keys(path: Path) -> set[str]:
-    """Read a safetensors header without materializing any tensor data."""
+def _header_shapes(path: Path) -> dict[str, tuple[int, ...]]:
+    """Read a safetensors header's key -> shape map without materializing any tensor data."""
     with open(path, "rb") as f:
         n = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(n))
-    return {k for k in header if k != "__metadata__"}
+    return {k: tuple(v["shape"]) for k, v in header.items() if k != "__metadata__"}
 
 
-def _strip_prefix(keys: set[str], prefix: str) -> set[str]:
-    return {k[len(prefix) :] for k in keys if k.startswith(prefix)}
+def _strip_prefix(shapes: dict[str, tuple[int, ...]], prefix: str) -> dict[str, tuple[int, ...]]:
+    return {k[len(prefix) :]: v for k, v in shapes.items() if k.startswith(prefix)}
 
 
-def _normalize_quant(keys: set[str]) -> set[str]:
-    """Fold q8 ``.scales``/``.biases`` tensors onto the ``.weight`` param they quantize."""
+def _normalize_quant(shapes: dict[str, tuple[int, ...]]) -> tuple[dict[str, tuple[int, ...]], set[str]]:
+    """Fold q8 ``.scales``/``.biases`` tensors onto the ``.weight`` param they quantize.
+
+    Returns the folded ``key -> shape`` map plus the set of folded keys whose
+    *packed* shape (from ``.scales``/``.biases``) does not equal the logical
+    dequantized ``.weight`` shape the model exposes -- callers should skip
+    the shape check for these keys (the key-set check still covers them).
+    Verifying the true dequantized shape would require materializing the
+    tensor, which these tests deliberately avoid.
+    """
+    normalized: dict[str, tuple[int, ...]] = {}
+    quantized_keys: set[str] = set()
+    for k, shape in shapes.items():
+        if k.endswith((".scales", ".biases")):
+            folded = k.removesuffix(".scales").removesuffix(".biases") + ".weight"
+            normalized[folded] = shape
+            quantized_keys.add(folded)
+        else:
+            normalized[k] = shape
+    return normalized, quantized_keys
+
+
+def _remap_mean_std_stats(shapes: dict[str, tuple[int, ...]]) -> dict[str, tuple[int, ...]]:
+    """Undo the ``_mean_of_means``/``_std_of_means`` underscore-prefix remap.
+
+    Applied by both the audio VAE blocks and the video VAE encoder block
+    (video's per-channel stats use the same underscore-prefixed naming).
+    """
     return {
-        k.removesuffix(".scales").removesuffix(".biases") + ".weight" if k.endswith((".scales", ".biases")) else k
-        for k in keys
+        k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
+        for k, v in shapes.items()
     }
 
 
-def _remap_audio_stats(keys: set[str]) -> set[str]:
-    return {k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means") for k in keys}
+def _assert_load_contract(
+    model: object,
+    pack_shapes: dict[str, tuple[int, ...]],
+    quantized_keys: set[str] = frozenset(),
+) -> None:
+    """Bidirectional key-set check, plus a shape check for non-quantized keys."""
+    from mlx.utils import tree_flatten
 
+    model_shapes = {k: tuple(v.shape) for k, v in tree_flatten(model.parameters())}
+    model_keys = set(model_shapes)
+    pack_keys = set(pack_shapes)
 
-def _assert_bidirectional(model_keys: set[str], pack_keys: set[str]) -> None:
     missing_in_model = sorted(pack_keys - model_keys)
     unfed_params = sorted(model_keys - pack_keys)
     assert not missing_in_model, f"pack tensors nobody would load: {missing_in_model[:10]}"
     assert not unfed_params, f"model params the pack does not feed: {unfed_params[:10]}"
+
+    mismatched_shapes = sorted(
+        (k, model_shapes[k], pack_shapes[k])
+        for k in model_keys
+        if k not in quantized_keys and model_shapes[k] != pack_shapes[k]
+    )
+    assert not mismatched_shapes, f"shape mismatches (key, model_shape, pack_shape): {mismatched_shapes[:10]}"
 
 
 def test_both_names_present_selects_conv_names(tmp_path):
@@ -186,19 +221,16 @@ class TestVideoDecoderConvLoadContract:
     """``VideoDecoder`` block against ``vae_decoder_conv.safetensors``."""
 
     def test_decoder_conv_pack_and_model_fully_consume_each_other(self):
-        from mlx.utils import tree_flatten
-
         from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder as _VideoVAEDecoder
 
         model = _VideoVAEDecoder()
-        model_keys = {k for k, _ in tree_flatten(model.parameters())}
 
         pack_path = LTX25_Q8_DIR / "vae_decoder_conv.safetensors"
         assert pack_path.exists()
-        pack = _strip_prefix(_header_keys(pack_path), "vae_decoder_conv.")
-        pack = _normalize_quant(pack)
+        pack = _strip_prefix(_header_shapes(pack_path), "vae_decoder_conv.")
+        pack, quantized_keys = _normalize_quant(pack)
 
-        _assert_bidirectional(model_keys, pack)
+        _assert_load_contract(model, pack, quantized_keys)
 
 
 @pytest.mark.slow
@@ -212,20 +244,17 @@ class TestVideoEncoderConvLoadContract:
     """
 
     def test_encoder_conv_pack_and_model_fully_consume_each_other(self):
-        from mlx.utils import tree_flatten
-
         from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder as _VideoVAEEncoder
 
         model = _VideoVAEEncoder()
-        model_keys = {k for k, _ in tree_flatten(model.parameters())}
 
         pack_path = LTX25_Q8_DIR / "vae_encoder_conv.safetensors"
         assert pack_path.exists()
-        pack = _strip_prefix(_header_keys(pack_path), "vae_encoder_conv.")
-        pack = _remap_audio_stats(pack)  # same replace() the block applies (video's mean/std keys too)
-        pack = _normalize_quant(pack)
+        pack = _strip_prefix(_header_shapes(pack_path), "vae_encoder_conv.")
+        pack = _remap_mean_std_stats(pack)  # same replace() the block applies
+        pack, quantized_keys = _normalize_quant(pack)
 
-        _assert_bidirectional(model_keys, pack)
+        _assert_load_contract(model, pack, quantized_keys)
 
 
 @pytest.mark.slow
@@ -246,45 +275,39 @@ class TestAudioVaeLoadContract:
     def test_top_level_groups_are_exactly_decoder_encoder_stats(self):
         pack_path = LTX25_Q8_DIR / "audio_vae.safetensors"
         assert pack_path.exists()
-        pack = _strip_prefix(_header_keys(pack_path), "audio_vae.")
+        pack = _strip_prefix(_header_shapes(pack_path), "audio_vae.")
         top_groups = {k.split(".", 1)[0] for k in pack}
         assert top_groups == {"decoder", "encoder", "per_channel_statistics"}
 
     def test_decoder_pack_and_model_fully_consume_each_other(self):
-        from mlx.utils import tree_flatten
-
         from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 
         model = AudioVAEDecoder()
-        model_keys = {k for k, _ in tree_flatten(model.parameters())}
 
         pack_path = LTX25_Q8_DIR / "audio_vae.safetensors"
-        pack = _strip_prefix(_header_keys(pack_path), "audio_vae.")
-        decoder_keys = _strip_prefix(pack, "decoder.")
-        stats_keys = _strip_prefix(pack, "per_channel_statistics.")
-        pack_for_decoder = decoder_keys | {f"per_channel_statistics.{k}" for k in stats_keys}
-        pack_for_decoder = _remap_audio_stats(pack_for_decoder)
-        pack_for_decoder = _normalize_quant(pack_for_decoder)
+        pack = _strip_prefix(_header_shapes(pack_path), "audio_vae.")
+        decoder_shapes = _strip_prefix(pack, "decoder.")
+        stats_shapes = _strip_prefix(pack, "per_channel_statistics.")
+        pack_for_decoder = decoder_shapes | {f"per_channel_statistics.{k}": v for k, v in stats_shapes.items()}
+        pack_for_decoder = _remap_mean_std_stats(pack_for_decoder)
+        pack_for_decoder, quantized_keys = _normalize_quant(pack_for_decoder)
 
-        _assert_bidirectional(model_keys, pack_for_decoder)
+        _assert_load_contract(model, pack_for_decoder, quantized_keys)
 
     def test_encoder_pack_and_model_fully_consume_each_other(self):
-        from mlx.utils import tree_flatten
-
         from ltx_core_mlx.model.audio_vae.encoder import AudioVAEEncoder
 
         model = AudioVAEEncoder()
-        model_keys = {k for k, _ in tree_flatten(model.parameters())}
 
         pack_path = LTX25_Q8_DIR / "audio_vae.safetensors"
-        pack = _strip_prefix(_header_keys(pack_path), "audio_vae.")
-        encoder_keys = _strip_prefix(pack, "encoder.")
-        stats_keys = _strip_prefix(pack, "per_channel_statistics.")
-        pack_for_encoder = encoder_keys | {f"per_channel_statistics.{k}" for k in stats_keys}
-        pack_for_encoder = _remap_audio_stats(pack_for_encoder)
-        pack_for_encoder = _normalize_quant(pack_for_encoder)
+        pack = _strip_prefix(_header_shapes(pack_path), "audio_vae.")
+        encoder_shapes = _strip_prefix(pack, "encoder.")
+        stats_shapes = _strip_prefix(pack, "per_channel_statistics.")
+        pack_for_encoder = encoder_shapes | {f"per_channel_statistics.{k}": v for k, v in stats_shapes.items()}
+        pack_for_encoder = _remap_mean_std_stats(pack_for_encoder)
+        pack_for_encoder, quantized_keys = _normalize_quant(pack_for_encoder)
 
-        _assert_bidirectional(model_keys, pack_for_encoder)
+        _assert_load_contract(model, pack_for_encoder, quantized_keys)
 
 
 @pytest.mark.slow
@@ -296,16 +319,13 @@ class TestVocoderLoadContract:
     """
 
     def test_vocoder_pack_and_model_fully_consume_each_other(self):
-        from mlx.utils import tree_flatten
-
         from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
 
         model = VocoderWithBWE()
-        model_keys = {k for k, _ in tree_flatten(model.parameters())}
 
         pack_path = LTX25_Q8_DIR / "vocoder.safetensors"
         assert pack_path.exists()
-        pack = _strip_prefix(_header_keys(pack_path), "vocoder.")
-        pack = _normalize_quant(pack)
+        pack = _strip_prefix(_header_shapes(pack_path), "vocoder.")
+        pack, quantized_keys = _normalize_quant(pack)
 
-        _assert_bidirectional(model_keys, pack)
+        _assert_load_contract(model, pack, quantized_keys)
