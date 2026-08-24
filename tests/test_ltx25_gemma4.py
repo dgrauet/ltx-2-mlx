@@ -809,3 +809,230 @@ def test_gemma4_tokenizer_matches_pack_reference_ids(ref):
     got_ids = ids_np[max_length - num_real :].tolist()
 
     assert got_ids == want_ids
+
+
+# --- select_text_encoder / check_gemma_version (Task 5: evidence-based configurator) ---
+
+
+def _write_json(path: Path, data: dict) -> None:
+    import json
+
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+
+class TestSelectTextEncoder:
+    """``select_text_encoder`` keys purely off file presence in ``model_dir``."""
+
+    def test_both_files_present_selects_gemma4(self, tmp_path):
+        from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
+
+        (tmp_path / "text_encoder.safetensors").touch()
+        _write_json(tmp_path / "text_encoder_config.json", {"gemma_version": "gemma4-12b-ltx-v1"})
+
+        assert select_text_encoder(tmp_path) == "gemma4"
+
+    def test_only_weights_present_selects_gemma3(self, tmp_path):
+        from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
+
+        (tmp_path / "text_encoder.safetensors").touch()
+
+        assert select_text_encoder(tmp_path) == "gemma3"
+
+    def test_only_config_present_selects_gemma3(self, tmp_path):
+        from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
+
+        _write_json(tmp_path / "text_encoder_config.json", {"gemma_version": "gemma4-12b-ltx-v1"})
+
+        assert select_text_encoder(tmp_path) == "gemma3"
+
+    def test_neither_present_selects_gemma3(self, tmp_path):
+        from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
+
+        assert select_text_encoder(tmp_path) == "gemma3"
+
+    @pytest.mark.skipif(LTX25_Q8_DIR is None, reason="local ltx-2.5-mlx-q8 pack not found")
+    def test_real_pack_selects_gemma4_without_raising(self):
+        """The real pack has no ``gemma_source_checkpoint`` in embedded_config.json,
+        so selection must succeed without the version guard raising."""
+        from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
+
+        assert select_text_encoder(LTX25_Q8_DIR) == "gemma4"
+
+
+class TestCheckGemmaVersion:
+    """Mirrors upstream ``_check_gemma_version``, scoped to the mismatch case only."""
+
+    def _make_pack(self, tmp_path: Path, *, embedded_config: dict | None, tower_gemma_version: str | None) -> Path:
+        (tmp_path / "text_encoder.safetensors").touch()
+        _write_json(tmp_path / "text_encoder_config.json", {"gemma_version": tower_gemma_version})
+        if embedded_config is not None:
+            _write_json(tmp_path / "embedded_config.json", embedded_config)
+        return tmp_path
+
+    def test_mismatched_version_raises(self, tmp_path):
+        from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
+
+        pack = self._make_pack(
+            tmp_path,
+            embedded_config={"gemma_source_checkpoint": {"gemma_version": "gemma4-12b-ltx-v1"}},
+            tower_gemma_version="some-other-version",
+        )
+
+        with pytest.raises(ValueError, match="Gemma version mismatch"):
+            select_text_encoder(pack)
+
+    def test_matching_version_passes(self, tmp_path):
+        from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
+
+        pack = self._make_pack(
+            tmp_path,
+            embedded_config={"gemma_source_checkpoint": {"gemma_version": "gemma4-12b-ltx-v1"}},
+            tower_gemma_version="gemma4-12b-ltx-v1",
+        )
+
+        assert select_text_encoder(pack) == "gemma4"
+
+    def test_no_declaration_passes_unchecked(self, tmp_path):
+        """embedded_config.json present but with no gemma_source_checkpoint key at all
+        (the real LTX-2.5 pack's shape) -- no check performed, no raise."""
+        from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
+
+        pack = self._make_pack(
+            tmp_path,
+            embedded_config={"transformer": {}, "scheduler": {}},
+            tower_gemma_version="gemma4-12b-ltx-v1",
+        )
+
+        assert select_text_encoder(pack) == "gemma4"
+
+    def test_no_embedded_config_file_passes_unchecked(self, tmp_path):
+        """No embedded_config.json at all -- no check performed, no raise."""
+        from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
+
+        pack = self._make_pack(tmp_path, embedded_config=None, tower_gemma_version="gemma4-12b-ltx-v1")
+
+        assert select_text_encoder(pack) == "gemma4"
+
+
+class TestPromptEncoderWiring:
+    """Proves the 2.3 (gemma3) construction site is untouched and the selection is real."""
+
+    def _stub_feature_extractor_deps(self, monkeypatch):
+        """Neutralize the connector-loading half of PromptEncoder.load() so these
+        tests exercise only the text-encoder selection/construction branch."""
+        import types
+
+        from ltx_pipelines_mlx.utils import blocks as blocks_mod
+
+        monkeypatch.setattr(
+            blocks_mod.LTXModelConfig,
+            "from_checkpoint_dir",
+            classmethod(lambda cls, model_dir: types.SimpleNamespace(double_precision_rope=False)),
+        )
+        monkeypatch.setattr(blocks_mod, "load_split_safetensors", lambda path, prefix="": {})
+
+        class _DummyConnector:
+            def load_weights(self, weights):
+                pass
+
+        class _DummyFeatureExtractor:
+            def __init__(self, double_precision_rope: bool) -> None:
+                self.double_precision_rope = double_precision_rope
+                self.connector = _DummyConnector()
+
+        monkeypatch.setattr(blocks_mod, "GemmaFeaturesExtractorV2", _DummyFeatureExtractor)
+        return blocks_mod
+
+    def test_gemma3_path_never_constructs_gemma4_text_encoder(self, tmp_path, monkeypatch):
+        from ltx_core_mlx.text_encoders.gemma.encoders import gemma4_encoder as gemma4_encoder_mod
+        from ltx_pipelines_mlx.utils.blocks import PromptEncoder
+
+        blocks_mod = self._stub_feature_extractor_deps(monkeypatch)
+
+        # tmp_path has neither text_encoder.safetensors nor text_encoder_config.json
+        # -> select_text_encoder(tmp_path) == "gemma3".
+        select_calls = []
+        real_select = blocks_mod.select_text_encoder
+
+        def _spy_select(model_dir):
+            select_calls.append(model_dir)
+            return real_select(model_dir)
+
+        monkeypatch.setattr(blocks_mod, "select_text_encoder", _spy_select)
+
+        class _BlowUpIfConstructed:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("Gemma4TextEncoder must not be constructed on the gemma3 path")
+
+        monkeypatch.setattr(gemma4_encoder_mod, "Gemma4TextEncoder", _BlowUpIfConstructed)
+
+        class _DummyGemma3:
+            load_called_with = None
+
+            def load(self, gemma_model_id):
+                type(self).load_called_with = gemma_model_id
+
+        monkeypatch.setattr(blocks_mod, "GemmaLanguageModel", _DummyGemma3)
+
+        encoder = PromptEncoder(model_dir=tmp_path, gemma_model_id="mlx-community/gemma-3-12b-it-4bit")
+        encoder.load()
+
+        # (d) select_text_encoder is actually called by the construction site.
+        assert select_calls == [encoder.model_dir]
+        # (c) the gemma3 branch ran -- existing GemmaLanguageModel path used.
+        assert isinstance(encoder._text_encoder, _DummyGemma3)
+        assert _DummyGemma3.load_called_with == "mlx-community/gemma-3-12b-it-4bit"
+
+    def test_gemma4_path_constructs_gemma4_text_encoder(self, tmp_path, monkeypatch):
+        from ltx_pipelines_mlx.utils.blocks import PromptEncoder
+
+        blocks_mod = self._stub_feature_extractor_deps(monkeypatch)
+
+        (tmp_path / "text_encoder.safetensors").touch()
+        _write_json(tmp_path / "text_encoder_config.json", {"gemma_version": "gemma4-12b-ltx-v1"})
+
+        class _DummyGemma4:
+            load_called_with = None
+
+            def load(self, model_dir):
+                type(self).load_called_with = model_dir
+
+        import ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder as gemma4_encoder_mod
+
+        monkeypatch.setattr(gemma4_encoder_mod, "Gemma4TextEncoder", _DummyGemma4)
+
+        class _BlowUpIfConstructed:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("GemmaLanguageModel must not be constructed on the gemma4 path")
+
+        monkeypatch.setattr(blocks_mod, "GemmaLanguageModel", _BlowUpIfConstructed)
+
+        encoder = PromptEncoder(model_dir=tmp_path, gemma_model_id="mlx-community/gemma-3-12b-it-4bit")
+        encoder.load()
+
+        assert isinstance(encoder._text_encoder, _DummyGemma4)
+        assert _DummyGemma4.load_called_with == encoder.model_dir
+
+
+class TestEnhanceGemma4Guard:
+    """``enhance`` must fail clearly, not obscurely, when pointed at a Gemma 4 pack."""
+
+    def test_guard_raises_on_local_gemma4_pack(self, tmp_path):
+        from ltx_pipelines_mlx.cli import _guard_enhance_not_gemma4
+
+        (tmp_path / "text_encoder.safetensors").touch()
+        _write_json(tmp_path / "text_encoder_config.json", {"gemma_version": "gemma4-12b-ltx-v1"})
+
+        with pytest.raises(NotImplementedError, match=r"not supported for LTX-2\.5"):
+            _guard_enhance_not_gemma4(str(tmp_path))
+
+    def test_guard_passes_on_local_gemma3_pack(self, tmp_path):
+        from ltx_pipelines_mlx.cli import _guard_enhance_not_gemma4
+
+        _guard_enhance_not_gemma4(str(tmp_path))  # no raise
+
+    def test_guard_passes_on_nonexistent_path_hf_id(self):
+        from ltx_pipelines_mlx.cli import _guard_enhance_not_gemma4
+
+        _guard_enhance_not_gemma4("mlx-community/gemma-3-12b-it-4bit")  # no raise, path doesn't exist locally

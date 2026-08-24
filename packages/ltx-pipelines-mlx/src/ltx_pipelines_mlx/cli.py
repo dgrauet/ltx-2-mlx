@@ -1311,6 +1311,29 @@ def _decode_and_save(
     pipe._decode_and_save_video(video_latent, audio_latent, args.output)
 
 
+def _guard_enhance_not_gemma4(gemma_path: str) -> None:
+    """Raise a clear error if ``gemma_path`` is a local LTX-2.5 (Gemma 4) pack.
+
+    ``enhance`` / ``--enhance-prompt`` load via ``GemmaLanguageModel`` (mlx-lm,
+    Gemma 3 only). A Gemma 4 pack path would otherwise reach ``mlx_lm.load()``
+    and fail with an obscure architecture-mismatch error deep in mlx-lm.
+    HuggingFace repo IDs (the common case, e.g. the default
+    ``mlx-community/gemma-3-12b-it-4bit``) never resolve as an existing local
+    path, so this is a no-op for them.
+    """
+    from pathlib import Path
+
+    from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
+
+    path = Path(gemma_path)
+    if path.exists() and select_text_encoder(path) == "gemma4":
+        raise NotImplementedError(
+            f"enhance is not supported for LTX-2.5 (Gemma 4) packs yet: {gemma_path!r}. "
+            "Pass a Gemma 3 checkpoint for --gemma (e.g. the default "
+            "mlx-community/gemma-3-12b-it-4bit)."
+        )
+
+
 def _maybe_enhance_prompt(args: argparse.Namespace) -> str:
     """Enhance prompt if --enhance-prompt is set."""
     prompt = args.prompt
@@ -1319,6 +1342,8 @@ def _maybe_enhance_prompt(args: argparse.Namespace) -> str:
 
     from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
     from ltx_core_mlx.utils.memory import aggressive_cleanup
+
+    _guard_enhance_not_gemma4(args.gemma)
 
     if not args.quiet:
         print("Enhancing prompt...")
@@ -1440,6 +1465,8 @@ def _cmd_slice(args: argparse.Namespace) -> None:
 def _cmd_enhance(args: argparse.Namespace) -> None:
     """Enhance a prompt using Gemma."""
     from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+
+    _guard_enhance_not_gemma4(args.gemma)
 
     print("Loading Gemma...")
     gemma = GemmaLanguageModel()

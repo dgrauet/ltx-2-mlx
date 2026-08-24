@@ -42,6 +42,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import mlx.core as mx
 
@@ -53,9 +54,13 @@ from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder as _VideoVAEDeco
 from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder as _VideoVAEEncoder
 from ltx_core_mlx.model.video_vae.video_vae import _compute_decode_tiling
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
+from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.weights import load_split_safetensors, remap_audio_vae_keys
+
+if TYPE_CHECKING:
+    from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
 
 _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags the literal mx.eval pattern
 
@@ -85,14 +90,22 @@ class PromptEncoder:
     ) -> None:
         self.model_dir = _resolve_model_dir(model_dir)
         self.gemma_model_id = gemma_model_id
-        self._text_encoder: GemmaLanguageModel | None = None
+        self._text_encoder: GemmaLanguageModel | Gemma4TextEncoder | None = None
         self._feature_extractor: GemmaFeaturesExtractorV2 | None = None
 
     def load(self) -> None:
         """Load Gemma + connector if not already loaded."""
         if self._text_encoder is None:
-            self._text_encoder = GemmaLanguageModel()
-            self._text_encoder.load(self.gemma_model_id)
+            if select_text_encoder(self.model_dir) == "gemma4":
+                # LTX-2.5 pack: Gemma 4 unified tower ships in the DiT pack
+                # itself -- pack-local load, no mlx-community download.
+                from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
+
+                self._text_encoder = Gemma4TextEncoder()
+                self._text_encoder.load(self.model_dir)
+            else:
+                self._text_encoder = GemmaLanguageModel()
+                self._text_encoder.load(self.gemma_model_id)
             aggressive_cleanup()
 
         if self._feature_extractor is None:
