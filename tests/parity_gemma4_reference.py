@@ -1,0 +1,185 @@
+"""Torch reference harness for the Gemma-4 attention/rotary/norm/MLP parity test.
+
+This is a standalone script, NOT a pytest module: it needs torch +
+transformers, which are not dependencies of this project. Run it in a
+disposable environment to produce the reference npz that
+``tests/test_ltx25_gemma4.py`` compares the MLX blocks against::
+
+    uv run --no-project --with "transformers>=5.10,<6" --with torch --with numpy \
+        python tests/parity_gemma4_reference.py --out /tmp/gemma4_parity.npz
+
+The npz is deliberately NOT committed (it is regenerable and version
+dependent); the parity tests skip when it is absent.
+
+It builds a tiny fixed-seed ``Gemma4UnifiedTextModel`` (2 layers:
+``[sliding_attention, full_attention]``) on CPU in float32, runs one
+forward pass, and dumps:
+
+* ``w.<state_dict key>`` -- every model weight;
+* ``input_ids`` / ``attention_mask`` -- the inputs used;
+* ``hs.<i>`` -- hidden states entering layer ``i`` (``hs.0`` are the
+  scaled token embeddings), ``hs.<n_layers>`` the last layer's output and
+  ``hs.final`` the output of the trailing RMSNorm;
+* ``rope.<layer_type>.{cos,sin}`` -- the per-layer-type rotary tables;
+* ``mask.<layer_type>`` -- the additive attention masks;
+* ``L<i>.{attn_in,attn_out,mlp_in,mlp_out}`` -- per-layer submodule
+  boundaries, so the MLX blocks can be checked in isolation.
+"""
+
+from __future__ import annotations
+
+import argparse
+
+import numpy as np
+import torch
+from transformers.models.gemma4_unified.configuration_gemma4_unified import Gemma4UnifiedTextConfig
+from transformers.models.gemma4_unified.modeling_gemma4_unified import Gemma4UnifiedTextModel
+
+SEED = 1234
+
+# Fixed tiny config, mirroring the real pack's *shape* (two attention
+# flavors, k_eq_v on the full layers, proportional partial rope on the
+# global layers) at a size that runs in a second on CPU.
+TINY_CONFIG = {
+    "vocab_size": 128,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "global_head_dim": 32,
+    "num_global_key_value_heads": 1,
+    "sliding_window": 8,
+    "layer_types": ["sliding_attention", "full_attention"],
+    "attention_k_eq_v": True,
+    "num_kv_shared_layers": 0,
+    "use_double_wide_mlp": False,
+    "rms_norm_eps": 1e-6,
+    "max_position_embeddings": 512,
+    "pad_token_id": 0,
+    "rope_parameters": {
+        "sliding_attention": {"rope_type": "default", "rope_theta": 10_000.0},
+        "full_attention": {
+            "rope_type": "proportional",
+            "rope_theta": 1_000_000.0,
+            "partial_rotary_factor": 0.25,
+        },
+    },
+}
+
+SEQ_LEN = 12
+BATCH = 1
+
+
+def build_config() -> Gemma4UnifiedTextConfig:
+    """Instantiate the fixed tiny reference config."""
+    return Gemma4UnifiedTextConfig(attn_implementation="eager", **TINY_CONFIG)
+
+
+def main() -> None:
+    """Run the reference forward pass and save the npz."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", required=True, help="Destination .npz path")
+    args = parser.parse_args()
+
+    torch.manual_seed(SEED)
+    config = build_config()
+    model = Gemma4UnifiedTextModel(config).to(torch.float32).eval()
+
+    # Randomize every parameter: the default init leaves norms at ones and
+    # would hide scale bugs.
+    generator = torch.Generator().manual_seed(SEED)
+    with torch.no_grad():
+        for param in model.parameters():
+            param.copy_(torch.randn(param.shape, generator=generator, dtype=torch.float32) * 0.1)
+
+    input_ids = torch.randint(0, TINY_CONFIG["vocab_size"], (BATCH, SEQ_LEN), generator=generator)
+    attention_mask = torch.ones((BATCH, SEQ_LEN), dtype=torch.long)
+
+    out: dict[str, np.ndarray] = {}
+
+    def store(name: str, tensor: torch.Tensor) -> None:
+        out[name] = tensor.detach().to(torch.float32).cpu().numpy()
+
+    handles = []
+
+    for idx, layer in enumerate(model.layers):
+        handles.append(
+            layer.register_forward_pre_hook(
+                lambda _m, inputs, i=idx: store(f"hs.{i}", inputs[0]),
+            )
+        )
+        handles.append(
+            layer.register_forward_hook(
+                lambda _m, _inputs, output, i=idx: store(
+                    f"hs.{i + 1}", output[0] if isinstance(output, tuple) else output
+                ),
+            )
+        )
+        handles.append(
+            layer.self_attn.register_forward_pre_hook(
+                lambda _m, _inputs, kwargs, i=idx: store(f"L{i}.attn_in", kwargs["hidden_states"]),
+                with_kwargs=True,
+            )
+        )
+        handles.append(
+            layer.self_attn.register_forward_hook(
+                lambda _m, _inputs, output, i=idx: store(f"L{i}.attn_out", output[0]),
+            )
+        )
+        handles.append(
+            layer.mlp.register_forward_pre_hook(
+                lambda _m, inputs, i=idx: store(f"L{i}.mlp_in", inputs[0]),
+            )
+        )
+        handles.append(
+            layer.mlp.register_forward_hook(
+                lambda _m, _inputs, output, i=idx: store(f"L{i}.mlp_out", output),
+            )
+        )
+
+    with torch.no_grad():
+        result = model(input_ids=input_ids, attention_mask=attention_mask)
+
+    for handle in handles:
+        handle.remove()
+
+    store("hs.final", result.last_hidden_state)
+
+    # Rotary tables + masks, recomputed the same way the model does.
+    position_ids = torch.arange(SEQ_LEN).unsqueeze(0)
+    embeds = model.embed_tokens(input_ids)
+    for layer_type in sorted(set(TINY_CONFIG["layer_types"])):
+        cos, sin = model.rotary_emb(embeds, position_ids, layer_type)
+        store(f"rope.{layer_type}.cos", cos)
+        store(f"rope.{layer_type}.sin", sin)
+        store(f"rope.{layer_type}.inv_freq", getattr(model.rotary_emb, f"{layer_type}_inv_freq"))
+
+    from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
+
+    mask_kwargs = {
+        "config": config,
+        "inputs_embeds": embeds,
+        "attention_mask": attention_mask,
+        "past_key_values": None,
+        "position_ids": position_ids,
+    }
+    store("mask.full_attention", create_causal_mask(**mask_kwargs))
+    store("mask.sliding_attention", create_sliding_window_causal_mask(**mask_kwargs))
+
+    for key, value in model.state_dict().items():
+        store(f"w.{key}", value)
+
+    out["input_ids"] = input_ids.numpy()
+    out["attention_mask"] = attention_mask.numpy()
+
+    np.savez(args.out, **out)
+    print(f"wrote {args.out} with {len(out)} arrays")
+    print(
+        f"last_hidden_state: shape={tuple(result.last_hidden_state.shape)} mean={result.last_hidden_state.mean():.6f}"
+    )
+
+
+if __name__ == "__main__":
+    main()

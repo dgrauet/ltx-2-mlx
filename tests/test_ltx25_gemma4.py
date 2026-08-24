@@ -5,6 +5,8 @@ the real ``text_encoder_config.json`` pack file, plus a slow test that
 parses the real pack when available (``LTX25_Q8_DIR``).
 """
 
+from pathlib import Path
+
 import pytest
 
 from tests.conftest import LTX25_Q8_DIR
@@ -256,3 +258,198 @@ def test_parses_real_pack_text_encoder_config():
     assert config.rope_global_theta == 1000000.0
     assert config.partial_rotary_factor == 0.25
     assert config.attention_k_eq_v is True
+
+
+# ---------------------------------------------------------------------------
+# Parity against the torch reference (tests/parity_gemma4_reference.py).
+#
+# Generate the npz first (disposable env, torch + transformers):
+#
+#   uv run --no-project --with "transformers>=5.10,<6" --with torch --with numpy \
+#       python tests/parity_gemma4_reference.py --out /tmp/gemma4_parity.npz
+#
+# These tests skip when the npz is absent.
+# ---------------------------------------------------------------------------
+
+PARITY_NPZ = Path("/tmp/gemma4_parity.npz")
+
+_needs_parity_npz = pytest.mark.skipif(
+    not PARITY_NPZ.exists(),
+    reason=f"reference npz not generated at {PARITY_NPZ} (see tests/parity_gemma4_reference.py)",
+)
+
+# Mirrors tests/parity_gemma4_reference.py::TINY_CONFIG, in the pack's
+# JSON shape so Gemma4TextConfig parses it.
+_TINY_PACK_CONFIG = {
+    "gemma_version": "tiny-parity",
+    "text_config": {
+        "model_type": "gemma4_unified_text",
+        "vocab_size": 128,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "num_global_key_value_heads": 1,
+        "head_dim": 16,
+        "global_head_dim": 32,
+        "sliding_window": 8,
+        "layer_types": ["sliding_attention", "full_attention"],
+        "attention_k_eq_v": True,
+        "num_kv_shared_layers": 0,
+        "rms_norm_eps": 1e-6,
+        "pad_token_id": 0,
+        "use_bidirectional_attention": "vision",
+        "rope_parameters": {
+            "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+            "full_attention": {
+                "rope_type": "proportional",
+                "rope_theta": 1000000.0,
+                "partial_rotary_factor": 0.25,
+            },
+        },
+    },
+}
+
+PARITY_ATOL = 2e-5
+
+
+@pytest.fixture(scope="module")
+def ref():
+    """The torch reference arrays."""
+    import numpy as np
+
+    return dict(np.load(PARITY_NPZ))
+
+
+@pytest.fixture(scope="module")
+def tiny_config():
+    from ltx_core_mlx.text_encoders.gemma.gemma4_config import Gemma4TextConfig
+
+    return Gemma4TextConfig.from_text_encoder_config(_TINY_PACK_CONFIG)
+
+
+def _max_abs_diff(a, b):
+    import mlx.core as mx
+    import numpy as np
+
+    return float(np.abs(np.array(mx.array(a).astype(mx.float32)) - np.asarray(b)).max())
+
+
+@pytest.mark.slow
+@_needs_parity_npz
+def test_rmsnorm_matches_reference(ref):
+    """Gemma4RMSNorm reproduces the reference input_layernorm exactly."""
+    import mlx.core as mx
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import Gemma4RMSNorm
+
+    norm = Gemma4RMSNorm(64, eps=1e-6)
+    norm.update({"weight": mx.array(ref["w.layers.0.input_layernorm.weight"])})
+
+    got = norm(mx.array(ref["hs.0"]))
+
+    assert _max_abs_diff(got, ref["L0.attn_in"]) < PARITY_ATOL
+
+
+@pytest.mark.slow
+@_needs_parity_npz
+def test_rmsnorm_without_scale_is_scale_free():
+    """with_scale=False registers no weight and skips the multiply."""
+    import mlx.core as mx
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import Gemma4RMSNorm
+
+    norm = Gemma4RMSNorm(4, eps=1e-6, with_scale=False)
+    assert "weight" not in norm.parameters()
+
+    x = mx.array([[3.0, 0.0, 0.0, 0.0]])
+    got = norm(x)
+    assert abs(float(got[0, 0]) - 2.0) < 1e-5
+
+
+@pytest.mark.slow
+@_needs_parity_npz
+@pytest.mark.parametrize("layer_type,layer_idx", [("sliding_attention", 0), ("full_attention", 1)])
+def test_rotary_matches_reference(ref, tiny_config, layer_type, layer_idx):
+    """Both rope parametrizations (default / proportional+partial) match."""
+    import mlx.core as mx
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import Gemma4RotaryEmbedding
+
+    rope = Gemma4RotaryEmbedding.from_config(tiny_config, layer_idx)
+
+    # 1 float32 ULP apart from torch: same formula, different rounding order.
+    assert _max_abs_diff(rope.inv_freq, ref[f"rope.{layer_type}.inv_freq"]) < 1e-7
+
+    positions = mx.arange(ref["input_ids"].shape[1])[None]
+    cos, sin = rope(positions)
+
+    assert _max_abs_diff(cos, ref[f"rope.{layer_type}.cos"]) < PARITY_ATOL
+    assert _max_abs_diff(sin, ref[f"rope.{layer_type}.sin"]) < PARITY_ATOL
+
+
+@pytest.mark.slow
+@_needs_parity_npz
+@pytest.mark.parametrize("layer_type,window", [("full_attention", None), ("sliding_attention", 8)])
+def test_attention_mask_matches_reference(ref, layer_type, window):
+    """Causal (and causal+window) masks match the reference mask pattern."""
+    import mlx.core as mx
+    import numpy as np
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import build_attention_mask
+
+    seq_len = ref["input_ids"].shape[1]
+    got = np.array(build_attention_mask(seq_len, sliding_window=window))
+    want = ref[f"mask.{layer_type}"]
+
+    assert (got > -1).squeeze().tolist() == (want > -1).squeeze().tolist()
+    assert mx.array(got).dtype == mx.float32
+
+
+@pytest.mark.slow
+@_needs_parity_npz
+@pytest.mark.parametrize("layer_idx", [0, 1])
+def test_attention_matches_reference(ref, tiny_config, layer_idx):
+    """Both attention flavors match the reference block output."""
+    import mlx.core as mx
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import (
+        Gemma4Attention,
+        Gemma4RotaryEmbedding,
+        build_attention_mask,
+    )
+
+    attn = Gemma4Attention(tiny_config, layer_idx)
+    prefix = f"w.layers.{layer_idx}.self_attn."
+    weights = {key[len(prefix) :]: mx.array(value) for key, value in ref.items() if key.startswith(prefix)}
+    assert ("v_proj.weight" in weights) is (layer_idx == 0)
+    attn.load_weights(list(weights.items()))
+
+    seq_len = ref["input_ids"].shape[1]
+    rope = Gemma4RotaryEmbedding.from_config(tiny_config, layer_idx)
+    cos, sin = rope(mx.arange(seq_len)[None])
+    window = tiny_config.sliding_window if tiny_config.layer_is_sliding(layer_idx) else None
+    mask = build_attention_mask(seq_len, sliding_window=window)
+
+    got = attn(mx.array(ref[f"L{layer_idx}.attn_in"]), cos, sin, mask)
+
+    assert _max_abs_diff(got, ref[f"L{layer_idx}.attn_out"]) < PARITY_ATOL
+
+
+@pytest.mark.slow
+@_needs_parity_npz
+@pytest.mark.parametrize("layer_idx", [0, 1])
+def test_mlp_matches_reference(ref, tiny_config, layer_idx):
+    """The gated gelu_pytorch_tanh MLP matches the reference block output."""
+    import mlx.core as mx
+
+    from ltx_core_mlx.text_encoders.gemma.gemma4 import Gemma4MLP
+
+    mlp = Gemma4MLP(tiny_config)
+    prefix = f"w.layers.{layer_idx}.mlp."
+    mlp.load_weights([(key[len(prefix) :], mx.array(value)) for key, value in ref.items() if key.startswith(prefix)])
+
+    got = mlp(mx.array(ref[f"L{layer_idx}.mlp_in"]))
+
+    assert _max_abs_diff(got, ref[f"L{layer_idx}.mlp_out"]) < PARITY_ATOL
