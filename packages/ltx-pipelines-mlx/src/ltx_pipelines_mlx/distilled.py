@@ -43,6 +43,18 @@ from .utils.samplers import denoise_loop
 
 _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags mx.eval pattern
 
+# Ancestral-sampler defaults for LTX-2.5 distilled packs (upstream
+# distilled.py). eta=1.0 / s_noise=1.0 reproduce upstream's default
+# EulerAncestralDiffusionStep configuration verbatim.
+ANCESTRAL_ETA = 1.0
+ANCESTRAL_S_NOISE = 1.0
+# The loop's noise generator is seeded from the pipeline seed plus this
+# offset. Without it the loop's first draw would be bit-identical to the
+# initial latent noise: GaussianNoiser and the loop's plain-noise draw both
+# pull mx.random.normal at the same shape/dtype from a freshly seeded
+# generator, so reusing the raw seed would correlate the two draws.
+ANCESTRAL_NOISE_SEED_OFFSET = 10000
+
 
 class DistilledPipeline(TI2VidTwoStagesPipeline):
     """Distilled two-stage T2V/I2V pipeline (half-res → upscale → full-res refine).
