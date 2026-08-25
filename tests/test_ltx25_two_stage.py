@@ -7,6 +7,8 @@ shaped like 2.5 configs, 2.3 configs, and missing configs.
 
 import json
 
+import pytest
+
 from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
 
 
@@ -121,3 +123,32 @@ def test_23_pack_keeps_v1_1_upsampler(tmp_path, monkeypatch):
     """Verify that an LTX-2.3 pack keeps the v1_1 upsampler."""
     pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=False, with_upscaler="spatial_upscaler_x2_v1_1.safetensors")
     assert pipe._resolve_upsampler_path().name == "spatial_upscaler_x2_v1_1.safetensors"
+
+
+def test_teacache_raises_on_25_pack(tmp_path, monkeypatch):
+    """Verify that enable_teacache=True raises ValueError on an LTX-2.5 pack."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=True)
+    with pytest.raises(ValueError, match="TeaCache"):
+        pipe.generate_two_stage(prompt="a fox", frame_rate=24.0, enable_teacache=True)
+
+
+class _AbortError(Exception):
+    """Sentinel exception for testing that guard allows 2.3 path to proceed."""
+
+    pass
+
+
+def test_teacache_still_allowed_on_23_pack(tmp_path, monkeypatch):
+    """Verify that the TeaCache guard does not raise on an LTX-2.3 pack.
+
+    We plant a probe (_AbortError) right after the guard (in text encoding) and
+    verify that it gets raised, not a ValueError from the guard.
+    """
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=False)
+
+    def boom(*a, **k):
+        raise _AbortError
+
+    monkeypatch.setattr(pipe, "_encode_text_with_negative", boom, raising=False)
+    with pytest.raises(_AbortError):
+        pipe.generate_two_stage(prompt="a fox", frame_rate=24.0, enable_teacache=True)

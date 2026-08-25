@@ -408,6 +408,12 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
         """
+        if enable_teacache and self._is_25:
+            raise ValueError(
+                "TeaCache is calibrated for LTX-2.3 only; its polynomial does not "
+                "transfer to 2.5 packs. Drop --enable-teacache for this model."
+            )
+
         # --- Text encoding (Prompt Relay: encode the combined prompt; the negative
         # prompt is a fixed default, so it is unaffected by the local prompts) ---
         encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
