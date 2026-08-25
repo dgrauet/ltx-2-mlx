@@ -10,6 +10,7 @@ import json
 import pytest
 
 from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
+from ltx_pipelines_mlx.ti2vid_two_stages_hq import TI2VidTwoStagesHQPipeline
 
 
 def _write_pack_config(tmp_path, *, ltx25: bool) -> None:
@@ -72,6 +73,50 @@ def _make_two_stage(
     )
 
     return TI2VidTwoStagesPipeline(
+        model_dir=str(tmp_path),
+        distilled_lora=distilled_lora,
+    )
+
+
+def _make_two_stage_hq(
+    tmp_path,
+    monkeypatch,
+    *,
+    ltx25: bool,
+    distilled_lora: str | None = None,
+    with_upscaler: str | None = None,
+) -> TI2VidTwoStagesHQPipeline:
+    """Build a TI2VidTwoStagesHQPipeline over a synthetic pack.
+
+    Same as _make_two_stage but constructs TI2VidTwoStagesHQPipeline instead.
+    """
+    _write_pack_config(tmp_path, ltx25=ltx25)
+
+    if with_upscaler:
+        (tmp_path / with_upscaler).touch()
+
+    # Stub out network-dependent methods
+    def stub_load_text_encoder():
+        pass
+
+    def stub_encode_text(prompt):
+        import mlx.core as mx
+
+        return (
+            mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
+            mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
+        )
+
+    monkeypatch.setattr(
+        "ltx_pipelines_mlx._base.BasePipeline._load_text_encoder",
+        stub_load_text_encoder,
+    )
+    monkeypatch.setattr(
+        "ltx_pipelines_mlx._base.BasePipeline._encode_text",
+        stub_encode_text,
+    )
+
+    return TI2VidTwoStagesHQPipeline(
         model_dir=str(tmp_path),
         distilled_lora=distilled_lora,
     )
@@ -145,6 +190,29 @@ def test_teacache_still_allowed_on_23_pack(tmp_path, monkeypatch):
     verify that it gets raised, not a ValueError from the guard.
     """
     pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=False)
+
+    def boom(*a, **k):
+        raise _AbortError
+
+    monkeypatch.setattr(pipe, "_encode_text_with_negative", boom, raising=False)
+    with pytest.raises(_AbortError):
+        pipe.generate_two_stage(prompt="a fox", frame_rate=24.0, enable_teacache=True)
+
+
+def test_teacache_raises_on_25_pack_hq(tmp_path, monkeypatch):
+    """Verify that enable_teacache=True raises ValueError on an LTX-2.5 pack (HQ pipeline)."""
+    pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=True)
+    with pytest.raises(ValueError, match="TeaCache"):
+        pipe.generate_two_stage(prompt="a fox", frame_rate=24.0, enable_teacache=True)
+
+
+def test_teacache_still_allowed_on_23_pack_hq(tmp_path, monkeypatch):
+    """Verify that the TeaCache guard does not raise on an LTX-2.3 pack (HQ pipeline).
+
+    We plant a probe (_AbortError) right after the guard (in text encoding) and
+    verify that it gets raised, not a ValueError from the guard.
+    """
+    pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=False)
 
     def boom(*a, **k):
         raise _AbortError

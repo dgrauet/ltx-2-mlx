@@ -214,6 +214,25 @@ class BasePipeline:
     # Shared component loading methods (used by subclass pipelines)
     # ------------------------------------------------------------------
 
+    def _check_teacache_supported(self, enable_teacache: bool) -> None:
+        """Raise ValueError if TeaCache is requested on an LTX-2.5 pack.
+
+        TeaCache coefficients are calibrated for LTX-2.3 only and do not
+        transfer to 2.5 packs, which use different sampler dynamics (ancestral
+        vs deterministic Euler, different per-step input/output correlations).
+
+        Args:
+            enable_teacache: Whether TeaCache was requested.
+
+        Raises:
+            ValueError: When both enable_teacache is True and the pack is LTX-2.5.
+        """
+        if enable_teacache and self._is_25:
+            raise ValueError(
+                "TeaCache is calibrated for LTX-2.3 only; its polynomial does not "
+                "transfer to 2.5 packs. Drop --enable-teacache for this model."
+            )
+
     def _load_text_encoder(self) -> None:
         """Load Gemma + connector via the :class:`PromptEncoder` block."""
         with phase("Loading text encoder (Gemma)", verbose=self.verbose):
