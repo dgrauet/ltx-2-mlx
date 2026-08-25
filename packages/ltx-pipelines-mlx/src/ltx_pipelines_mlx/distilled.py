@@ -43,7 +43,6 @@ from .scheduler import (
     STAGE_2_SIGMAS,
 )
 from .ti2vid_two_stages import TI2VidTwoStagesPipeline
-from .utils.generation import is_ltx25_pack
 from .utils.helpers import create_noised_state
 from .utils.progress import phase
 from .utils.samplers import denoise_loop, euler_ancestral_denoising_loop
@@ -105,12 +104,6 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             low_ram_streaming=low_ram_streaming,
             tile_count=tile_count,
         )
-        # Resolved once, here, because ``super().__init__`` has just turned
-        # ``model_dir`` into a concrete local path (downloading the HF repo if
-        # needed) — the same point where every other model-dir-derived fact
-        # (prompt encoder, conditioners, decoder blocks) is bound. Reading the
-        # checkpoint config later, per stage, would re-open it on every call.
-        self._is_25 = is_ltx25_pack(self.model_dir)
 
     def load(self) -> None:
         """Load distilled DiT + VAE encoder + upsampler (skip decoders).
