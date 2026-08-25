@@ -171,7 +171,9 @@ def test_25_pack_routes_stage1_through_ancestral_loop(tmp_path, monkeypatch):
 
     assert len(ancestral.calls) == 1
     stage_1 = ancestral.calls[0]
-    assert stage_1["sigmas"] == LTX_2_5_DISTILLED_SIGMAS
+    assert stage_1["sigmas"] is LTX_2_5_DISTILLED_SIGMAS, (
+        "2.3/2.5 tables are value-identical; identity proves the 2.5 selection ran"
+    )
     assert stage_1["noise_seed"] == 7 + ANCESTRAL_NOISE_SEED_OFFSET
     assert stage_1["stepper"].eta == ANCESTRAL_ETA
     assert stage_1["stepper"].s_noise == ANCESTRAL_S_NOISE
@@ -190,11 +192,13 @@ def test_25_pack_stage2_stays_deterministic(tmp_path, monkeypatch):
 
     assert len(euler.calls) == 1
     stage_2 = euler.calls[0]
-    assert stage_2["sigmas"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS
+    assert stage_2["sigmas"] is LTX_2_5_STAGE_2_DISTILLED_SIGMAS, (
+        "identity, not equality: the 2.3 table is value-identical"
+    )
     # The load-bearing assertion: no ancestral machinery reaches stage 2.
     assert "stepper" not in stage_2
     assert "noise_seed" not in stage_2
-    assert all(call["sigmas"] != LTX_2_5_STAGE_2_DISTILLED_SIGMAS for call in ancestral.calls)
+    assert all(call["sigmas"] is not LTX_2_5_STAGE_2_DISTILLED_SIGMAS for call in ancestral.calls)
 
 
 def test_25_pack_stage2_renoises_at_first_stage2_sigma(tmp_path, monkeypatch):
