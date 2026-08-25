@@ -942,7 +942,7 @@ that path. 2.3 packs are byte-identical to before.
 - Stage 1: `euler_ancestral_denoising_loop` (`EulerAncestralDiffusionStep(eta=ANCESTRAL_ETA, s_noise=ANCESTRAL_S_NOISE)`, 8 steps) on `LTX_2_5_DISTILLED_SIGMAS`.
 - Stage 2: stays the deterministic Euler loop (`STAGE_2` renoise) on `LTX_2_5_STAGE_2_DISTILLED_SIGMAS`, matching upstream: *"Stage 2 is always deterministic — its 3-step refinement schedule is too short to remove freshly injected noise."*
 - Ancestral noise is seeded from `seed + ANCESTRAL_NOISE_SEED_OFFSET` (10000) to decorrelate from the initial-latent draw.
-- Stage 2 upscaler resolves to `spatial_upscaler_x2_v1_0.safetensors` (vs `x1_1` on 2.3), hard error if absent (#42 style).
+- Stage 2 upscaler resolves to `spatial_upscaler_x2_v1_0.safetensors` (vs `v1_1` on 2.3), falling back to the 2.3 stems; hard error only when none exists (#42 style).
 
 ### v1 limits (2.5 packs, `generate --distilled` only)
 
