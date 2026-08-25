@@ -99,8 +99,9 @@ class TI2VidTwoStagesPipeline(BasePipeline):
     Stage 1: Dev model + CFG guidance at half resolution (Euler sampler).
     Stage 2: Dev + distilled LoRA fused, simple denoising at full resolution.
 
-    Requires ``dev_transformer`` and ``distilled_lora`` — the two-stage pipeline
-    needs the dev model for quality generation at half resolution with CFG.
+    Needs the dev model for quality generation at half resolution with CFG;
+    the distilled LoRA is auto-resolved from the pack when not given
+    explicitly (see ``distilled_lora`` below).
 
     Args:
         model_dir: Path to model weights or HuggingFace repo ID.
@@ -113,13 +114,6 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             ``ltx-2.3-22b-distilled-lora-384.safetensors`` for LTX-2.3 packs.
         distilled_lora_strength: LoRA fusion strength (default 1.0).
     """
-
-    #: Whether the checkpoint is an LTX-2.5 weight pack. Resolved once per
-    #: pipeline instance. The class default keeps instances without explicit
-    #: detection on the 2.3 behaviour; subclasses like
-    #: :class:`~ltx_pipelines_mlx.distilled.DistilledPipeline` set this
-    #: dynamically via :func:`is_ltx25_pack`.
-    _is_25: bool = False
 
     def __init__(
         self,
@@ -140,8 +134,11 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             low_memory: Aggressive memory management.
             low_ram_streaming: Stream transformer blocks from disk.
             dev_transformer: Dev transformer filename.
-            distilled_lora: Distilled LoRA filename. When ``None``, resolved based
-                on pack version via :func:`is_ltx25_pack`.
+            distilled_lora: Distilled LoRA filename for Stage 2. When ``None``
+                (default), auto-resolved based on pack version:
+                ``ltx-2.5-22b-distilled-lora-450-bf16.safetensors`` for LTX-2.5
+                packs, ``ltx-2.3-22b-distilled-lora-384.safetensors`` for
+                LTX-2.3 packs.
             distilled_lora_strength: LoRA fusion strength (default 1.0).
             tile_count: Optional tiling configuration.
         """

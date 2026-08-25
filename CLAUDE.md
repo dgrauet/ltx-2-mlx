@@ -932,7 +932,8 @@ End-to-end run on M2 Pro 32 GB, dev model + HDR LoRA fused, q8:
 LTX-2.5 pack. No new CLI flag — generation is auto-detected from the pack's
 `embedded_config.json` (`ff_bias is False` ⇔ 2.5) via
 `is_ltx25_pack()`/`LTXModelConfig.from_checkpoint_dir()`, resolved once in
-`DistilledPipeline.__init__` as `self._is_25`. The pack carries its own
+`TI2VidTwoStagesPipeline.__init__` (declared as `_is_25: bool = False` on
+`BasePipeline`, inherited by `DistilledPipeline`) as `self._is_25`. The pack carries its own
 Gemma-4 text encoder (`text_encoder.safetensors` + `text_encoder_config.json`,
 selected by `select_text_encoder()`) — no `mlx-community` Gemma 3 download on
 that path. 2.3 packs are byte-identical to before.
@@ -979,7 +980,7 @@ subsequent releases behind the same pack-evidence detection.
 - `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/distilled.py` — `DistilledPipeline` (2.3/2.5 dispatch), `ANCESTRAL_*` constants.
 - `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/utils/generation.py` — `is_ltx25_pack()`.
 - `packages/ltx-core-mlx/src/ltx_core_mlx/text_encoders/gemma/encoders/encoder_configurator.py` — `select_text_encoder()`, `check_gemma_version()`.
-- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/ti2vid_two_stages.py` — `_resolve_upsampler_path()` (`_is_25` class attribute, default `False`).
+- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/ti2vid_two_stages.py` — `_resolve_upsampler_path()` (`_is_25` resolved in `__init__` via `is_ltx25_pack`; the `_is_25: bool = False` class attribute lives on `BasePipeline`).
 - `tests/test_ltx25_distilled.py` — routing, sigma-table, TeaCache-guard, upsampler-resolution tests.
 
 ---

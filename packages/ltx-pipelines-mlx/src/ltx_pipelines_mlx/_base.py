@@ -65,6 +65,11 @@ class BasePipeline:
             decoder load, video decode). CLI maps this from ``--quiet``.
     """
 
+    #: Whether the checkpoint is an LTX-2.5 weight pack. Declared here (not just
+    #: on subclasses) so shared helpers like ``_check_teacache_supported`` can
+    #: read it safely regardless of which pipeline family sets it.
+    _is_25: bool = False
+
     def __init__(
         self,
         model_dir: str,
