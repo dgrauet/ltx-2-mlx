@@ -334,8 +334,11 @@ examples:
     )
     gen.add_argument(
         "--distilled-lora",
-        default="ltx-2.3-22b-distilled-lora-384.safetensors",
-        help="Distilled LoRA filename for stage 2 (default: ltx-2.3-22b-distilled-lora-384.safetensors)",
+        default=None,
+        help=(
+            "Distilled LoRA filename for stage 2 (default: resolved from the pack "
+            "— 2.3 -> ltx-2.3-22b-distilled-lora-384, 2.5 -> ltx-2.5-22b-distilled-lora-450-bf16)"
+        ),
     )
     gen.add_argument(
         "--distilled-lora-strength", type=float, default=1.0, help="Distilled LoRA strength for stage 2 (default: 1.0)"

@@ -51,27 +51,6 @@ def _make_two_stage(
     if with_upscaler:
         (tmp_path / with_upscaler).touch()
 
-    # Stub out network-dependent methods
-    def stub_load_text_encoder():
-        pass
-
-    def stub_encode_text(prompt):
-        import mlx.core as mx
-
-        return (
-            mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
-            mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
-        )
-
-    monkeypatch.setattr(
-        "ltx_pipelines_mlx._base.BasePipeline._load_text_encoder",
-        stub_load_text_encoder,
-    )
-    monkeypatch.setattr(
-        "ltx_pipelines_mlx._base.BasePipeline._encode_text",
-        stub_encode_text,
-    )
-
     return TI2VidTwoStagesPipeline(
         model_dir=str(tmp_path),
         distilled_lora=distilled_lora,
@@ -94,27 +73,6 @@ def _make_two_stage_hq(
 
     if with_upscaler:
         (tmp_path / with_upscaler).touch()
-
-    # Stub out network-dependent methods
-    def stub_load_text_encoder():
-        pass
-
-    def stub_encode_text(prompt):
-        import mlx.core as mx
-
-        return (
-            mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
-            mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
-        )
-
-    monkeypatch.setattr(
-        "ltx_pipelines_mlx._base.BasePipeline._load_text_encoder",
-        stub_load_text_encoder,
-    )
-    monkeypatch.setattr(
-        "ltx_pipelines_mlx._base.BasePipeline._encode_text",
-        stub_encode_text,
-    )
 
     return TI2VidTwoStagesHQPipeline(
         model_dir=str(tmp_path),
@@ -220,3 +178,39 @@ def test_teacache_still_allowed_on_23_pack_hq(tmp_path, monkeypatch):
     monkeypatch.setattr(pipe, "_encode_text_with_negative", boom, raising=False)
     with pytest.raises(_AbortError):
         pipe.generate_two_stage(prompt="a fox", frame_rate=24.0, enable_teacache=True)
+
+
+def test_cli_generate_distilled_lora_defaults_to_none(monkeypatch):
+    """Regression for the C1 review finding: the CLI must not reintroduce a
+    literal ``--distilled-lora`` default, or the pack-evidence resolution in
+    ``TI2VidTwoStagesPipeline.__init__`` (2.5 -> ...-450-bf16, 2.3 -> ...-384)
+    is unreachable from ``generate --two-stage``. This test parses real argv
+    through the real CLI parser (not a hand-built parser) so it fails the
+    same way #C1 did if the default is ever reintroduced.
+    """
+    import ltx_pipelines_mlx.cli as cli
+
+    captured: dict = {}
+
+    def _capture(args):
+        captured["distilled_lora"] = args.distilled_lora
+
+    monkeypatch.setattr(cli, "_cmd_generate", _capture)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "ltx-2-mlx",
+            "generate",
+            "--two-stage",
+            "--prompt",
+            "a fox",
+            "--frame-rate",
+            "24",
+            "-o",
+            "out.mp4",
+        ],
+    )
+
+    cli.main()
+
+    assert captured["distilled_lora"] is None
