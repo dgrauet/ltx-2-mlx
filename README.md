@@ -134,18 +134,27 @@ stage 2 stays deterministic euler (3 steps) — upstream's rationale is that
 stage 2's short 3-step refinement schedule is too short to remove freshly
 injected noise.
 
-**v1 limits on 2.5 packs** (`generate --distilled` only):
+The dev model + CFG two-stage pipeline also works on 2.5 packs:
+
+```bash
+ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
+    --prompt "a heavy wooden door creaks slowly open" -o out.mp4
+```
+
+**v1 limits on 2.5 packs**:
 
 | Feature | Status |
 |---|---|
-| `--two-stage` / `--two-stages-hq` (dev + CFG) | not yet supported |
+| `--two-stage` (dev + CFG) | supported (see above) |
+| `--two-stages-hq` (res_2s + CFG) | not yet supported |
 | `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora`, `retake`, `extend`, `lipdub` | not yet supported |
 | `enhance` / `--enhance-prompt` | raises a clear error (Gemma 3-only) |
 | `--enable-teacache` | raises a clear error (not calibrated for 2.5) |
 | Modality tiling, Prompt Relay | validated on 2.3 only |
 | Diffusion (`DiffVAEMode`) VAE decoder | not loaded — conv decoder used |
 
-Further 2.5 pipelines land in subsequent releases.
+Further 2.5 pipelines (`--two-stages-hq`, a2v, keyframe, ic-lora, ...) land in
+subsequent releases.
 
 ### Python API
 
