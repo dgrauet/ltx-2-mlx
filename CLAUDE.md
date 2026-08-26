@@ -352,7 +352,7 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 
 | Command | Pipeline | Tier | Description |
 |---------|----------|------|-------------|
-| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. |
+| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. `-f/--frames` defaults to auto-predicted duration on 2.5 packs (via `DurationHead`) and is **required** on 2.3 packs (immediate `ValueError` before any Gemma load if omitted). `--auto-duration MIN:MAX` overrides the predictor's clamp range on 2.5 packs. |
 | `keyframe` | Keyframe interpolation | Stable | Two-stage interpolation between start/end frames |
 | `ic-lora` | IC-LoRA | Stable | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
 | `hdr-ic-lora` | HDR IC-LoRA | Stable | Two-stage HDR generation via IC-LoRA + LogC3 inverse (saves SDR mp4 + linear-HDR `.npz`) |
@@ -377,11 +377,11 @@ ltx-2-mlx generate \
   --low-ram \
   -H 480 -W 704 -f 33 -o fox.mp4
 
-# q8 inference fits 16 GB Macs
+# q8 inference fits 16 GB Macs (2.3 packs require -f explicitly — no DurationHead)
 ltx-2-mlx generate \
   --model dgrauet/ltx-2.3-mlx-q8 \
   --prompt "a fox in the forest" \
-  --low-ram -o fox.mp4
+  --low-ram -f 97 -o fox.mp4
 ```
 
 `--low-ram` is supported on `generate` (one-stage / `--two-stage` / `--two-stages-hq`), `a2v`, `keyframe`, and `ic-lora`. Bind-time LoRA fusion handles ic-lora's control LoRAs, custom `--distilled-lora-strength`, and `generate --lora` (community LoRAs). See `## Block Streaming` below for details.
@@ -459,23 +459,30 @@ Outputs both `out.mp4` (SDR preview, tonemapped) and `out.hdr.npz` (float32 `(F,
 ### Two-Stage Example
 
 ```bash
-# Two-stage with Euler sampler (auto-selects q8 model)
+# Two-stage with Euler sampler (auto-selects q8 model; -f required on 2.3 packs)
 ltx-2-mlx generate \
   --prompt "a scene description" \
-  --two-stage -o output.mp4
+  --two-stage -f 97 -o output.mp4
 
 # HQ with res_2s second-order sampler (higher quality, ~2x slower)
 ltx-2-mlx generate \
   --prompt "a scene description" \
-  --two-stages-hq -o output.mp4
+  --two-stages-hq -f 97 -o output.mp4
 
 # With I2V conditioning
 ltx-2-mlx generate \
   --prompt "animate this" \
-  --two-stage --image photo.jpg -o output.mp4
+  --two-stage --image photo.jpg -f 97 -o output.mp4
+
+# On a 2.5 pack, -f can be omitted — duration is auto-predicted from the prompt/image
+# via the DurationHead (see "LTX-2.5" section below), or clamped with --auto-duration MIN:MAX
+ltx-2-mlx generate \
+  --model /path/to/ltx-2.5-mlx-q8 \
+  --prompt "a scene description" \
+  --distilled --auto-duration 2:6 -o output.mp4
 ```
 
-Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3), `--image`.
+Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3), `--image`, `-f/--frames` (required on 2.3 packs; optional on 2.5 packs — auto-predicted when omitted), `--auto-duration MIN:MAX` (2.5 packs only — overrides the predictor's clamp range; explicit `-f` wins over `--auto-duration` if both are given, with a warning).
 
 ### Prompt Relay (`--segment`)
 
@@ -663,8 +670,8 @@ pipeline.generate_and_save(
 Equivalent CLI flag (works on both `--two-stage` and `--two-stages-hq`):
 
 ```bash
-ltx-2-mlx generate --prompt "..." --two-stage --enable-teacache -o out.mp4
-ltx-2-mlx generate --prompt "..." --two-stages-hq --enable-teacache --teacache-thresh 1.0 -o out.mp4
+ltx-2-mlx generate --prompt "..." --two-stage -f 97 --enable-teacache -o out.mp4
+ltx-2-mlx generate --prompt "..." --two-stages-hq -f 97 --enable-teacache --teacache-thresh 1.0 -o out.mp4
 ```
 
 The HQ path uses the res_2s sampler, which does two model evaluations per outer step (stage 1 at `sigma`, stage 2 at the substep after SDE noise injection). The TeaCache decision is made **once per outer step** on stage 1's gate signal; on skip both stages reuse cached residuals via `block_stack_override`. Cache payload shape: `{"stage1": {cond: (v,a), uncond: (v,a), ...}, "stage2": {...}}`.
@@ -945,6 +952,56 @@ that path. 2.3 packs are byte-identical to before.
 - Ancestral noise is seeded from `seed + ANCESTRAL_NOISE_SEED_OFFSET` (10000) to decorrelate from the initial-latent draw.
 - Stage 2 upscaler resolves to `spatial_upscaler_x2_v1_0.safetensors` (vs `v1_1` on 2.3), falling back to the 2.3 stems; hard error only when none exists (#42 style).
 
+### Auto-Duration (`DurationHead`, `-f` optional on 2.5)
+
+2.5 packs ship a `duration_head.safetensors` (`packages/ltx-core-mlx/src/ltx_core_mlx/duration_head/`)
+that predicts a clip length in seconds from the encoded prompt (+ image,
+when present). `generate`'s `-f/--frames` default changed from a hardcoded
+`97` to `AutoDuration()` (`DEFAULT_AUTO_DURATION`, clamp `[1.0, 20.0]`
+seconds) across the four `generate` modes (`--one-stage`, `--distilled`,
+`--two-stage`, `--two-stages-hq`) — **only** those; `keyframe`, `a2v`,
+`ic-lora`, `retake`, `extend` keep their existing explicit `-f 97` default
+untouched.
+
+- **On 2.5 packs**: omitting `-f` predicts the duration right after prompt
+  encoding (`DurationPredictor.from_checkpoint(self.model_dir)`, built once
+  in `BasePipeline.__init__`) and snaps it to the model's frame grid
+  (`(num_frames - 1) % 8 == 0`). A `[auto-duration] predicted N frames
+  (S.SSs @ FPS fps)` line prints to stderr when a prediction actually runs.
+  `--auto-duration MIN:MAX` overrides the clamp range (seconds); explicit
+  `-f` always wins over `--auto-duration` if both are given, with a stderr
+  warning.
+- **On 2.3 packs** (no `DurationHead` weights): omitting `-f` raises
+  `ValueError: ... Pass num_frames explicitly.` **immediately** —
+  `require_num_frames_source()` runs before any Gemma load or other work,
+  so there's no wasted encode/download on the failure path. `-f` is
+  effectively mandatory on 2.3.
+
+```bash
+# 2.5: let the DurationHead pick the length from the prompt
+ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --distilled \
+  -p "a heavy wooden door creaks slowly open" -H 512 -W 512 --frame-rate 24 -o out.mp4
+
+# 2.5: clamp the predicted duration to 2-4 seconds
+ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --distilled \
+  -p "a heavy wooden door creaks slowly open" -H 512 -W 512 --frame-rate 24 \
+  --auto-duration 2:4 -o out.mp4
+
+# 2.3: -f is required — this fails fast with no Gemma/network activity
+ltx-2-mlx generate --model dgrauet/ltx-2.3-mlx-q8 --distilled \
+  -p "a heavy wooden door creaks slowly open" -H 512 -W 512 --frame-rate 24 -o out.mp4
+# ValueError: num_frames was AutoDuration but this checkpoint has no DurationHead
+# weights to auto-predict duration from (DurationHead ships from LTX 2.5 / gemma4
+# onward). Pass num_frames explicitly.
+```
+
+Key files: `packages/ltx-core-mlx/src/ltx_core_mlx/duration_head/duration_head.py`
+(`DurationHead`, `load_duration_head`); `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/utils/types.py`
+(`AutoDuration`, `DEFAULT_AUTO_DURATION`); `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/utils/blocks.py`
+(`DurationPredictor`, `require_num_frames_source`, `resolve_num_frames`,
+`seconds_to_clamped_num_frames`); `_base.py::BasePipeline._require_num_frames_source`
+/ `_resolve_num_frames`; `cli.py::_parse_auto_duration` / `_resolve_num_frames_arg`.
+
 ### Two-Stage on LTX-2.5
 
 `generate --two-stage --model <2.5-pack-dir>` runs the dev model + CFG
@@ -966,6 +1023,7 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
 |---|---|
 | `--two-stage` (dev model + CFG) | supported (see above) |
 | `--two-stages-hq` (res_2s + CFG) | supported — validated e2e on 2.5 (deterministic, audio at healthy 2.3-level loudness) |
+| `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to `AutoDuration()` on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`; `--auto-duration MIN:MAX` overrides the clamp. Absent on 2.3 packs, where omitting `-f` now raises immediately (see "Auto-Duration" above) |
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
 | `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB) |
 | `ic-lora`, `hdr-ic-lora`, `retake`, `extend`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |

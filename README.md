@@ -51,19 +51,22 @@ uv sync --all-extras
 ```bash
 # Text-to-Video — pick a pipeline mode (one of `--two-stage`, `--two-stages-hq`, `--one-stage`, `--distilled`).
 # Two-stage is the upstream-recommended production default.
-ltx-2-mlx generate --prompt "A sunset over the ocean" --two-stage -o sunset.mp4
+# NOTE: -f/--frames is required on 2.3 packs (the default model below) — it
+# only defaults to an auto-predicted duration on LTX-2.5 packs. See "LTX-2.5"
+# and "CLI Reference" below.
+ltx-2-mlx generate --prompt "A sunset over the ocean" --two-stage -f 97 -o sunset.mp4
 
 # Image-to-Video (any mode supports --image)
-ltx-2-mlx generate --prompt "Animate this" --image photo.jpg --two-stage -o animated.mp4
+ltx-2-mlx generate --prompt "Animate this" --image photo.jpg --two-stage -f 97 -o animated.mp4
 
 # HQ (res_2s sampler, highest quality)
-ltx-2-mlx generate --prompt "A scene" --two-stages-hq --stage1-steps 20 -o hq.mp4
+ltx-2-mlx generate --prompt "A scene" --two-stages-hq --stage1-steps 20 -f 97 -o hq.mp4
 
 # Distilled two-stage (fastest, mirrors upstream DistilledPipeline)
-ltx-2-mlx generate --prompt "A scene" --distilled -H 720 -W 1280 -o distilled.mp4
+ltx-2-mlx generate --prompt "A scene" --distilled -H 720 -W 1280 -f 97 -o distilled.mp4
 
 # One-stage dev + CFG (full target res, mirrors upstream TI2VidOneStagePipeline)
-ltx-2-mlx generate --prompt "A scene" --one-stage -o one_stage.mp4
+ltx-2-mlx generate --prompt "A scene" --one-stage -f 97 -o one_stage.mp4
 
 # Audio-to-Video
 ltx-2-mlx a2v --prompt "Music video" --audio music.wav -o a2v.mp4
@@ -81,17 +84,17 @@ ltx-2-mlx keyframe --prompt "Smooth transition" --start frame1.png --end frame2.
 ltx-2-mlx enhance --prompt "a cat" --mode t2v
 
 # Use int4 model (fits 16GB)
-ltx-2-mlx generate -p "A cat" --distilled -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q4
+ltx-2-mlx generate -p "A cat" --distilled -f 97 -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q4
 
 # Block streaming: bf16 model on 32 GB Mac
-ltx-2-mlx generate -p "A cat" --two-stage -o cat.mp4 --model dgrauet/ltx-2.3-mlx --low-ram
+ltx-2-mlx generate -p "A cat" --two-stage -f 97 -o cat.mp4 --model dgrauet/ltx-2.3-mlx --low-ram
 
 # Block streaming: q8 model on 16 GB Mac
-ltx-2-mlx generate -p "A cat" --distilled -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q8 --low-ram
+ltx-2-mlx generate -p "A cat" --distilled -f 97 -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q8 --low-ram
 
 # Block streaming works on every generate mode + a2v / keyframe / ic-lora
-ltx-2-mlx generate -p "A cat" -o cat.mp4 --two-stage --low-ram
-ltx-2-mlx generate -p "A cat" -o cat.mp4 --two-stages-hq --low-ram
+ltx-2-mlx generate -p "A cat" -f 97 -o cat.mp4 --two-stage --low-ram
+ltx-2-mlx generate -p "A cat" -f 97 -o cat.mp4 --two-stages-hq --low-ram
 ltx-2-mlx a2v -p "music video" --audio music.wav -o a2v.mp4 --low-ram
 ltx-2-mlx keyframe -p "transition" --start a.png --end b.png -o kf.mp4 --low-ram
 ltx-2-mlx ic-lora -p "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 --low-ram -o out.mp4
@@ -107,9 +110,9 @@ ltx-2-mlx hdr-ic-lora -p "a sunset over the ocean, vivid HDR" \
 
 # Modality tiling: split video tokens for long/HD scenarios that exceed attention memory.
 # Stack with --low-ram for max memory savings on big targets.
-ltx-2-mlx generate -p "long scene" --two-stage --low-ram \
+ltx-2-mlx generate -p "long scene" --two-stage --low-ram -f 97 \
     --tile-frames 2 --tile-overlap 4 -o long.mp4
-ltx-2-mlx generate -p "1080p scene" --two-stages-hq --low-ram \
+ltx-2-mlx generate -p "1080p scene" --two-stages-hq --low-ram -f 97 \
     --tile-spatial 2 --tile-overlap 4 -H 1080 -W 1920 -o hd.mp4
 
 # Model info
@@ -121,6 +124,10 @@ ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q8
 ```bash
 ltx-2-mlx generate --distilled --model /path/to/ltx-2.5-mlx-q8 \
     --prompt "a heavy wooden door creaks slowly open" -o out.mp4
+
+# Clamp the auto-predicted duration to 2-4 seconds instead of the default [1, 20]s
+ltx-2-mlx generate --distilled --model /path/to/ltx-2.5-mlx-q8 \
+    --prompt "a heavy wooden door creaks slowly open" --auto-duration 2:4 -o out.mp4
 ```
 
 The 2.5 generation is **auto-detected from the model pack** (no new CLI
@@ -128,6 +135,15 @@ flag) — a local directory is required, since the pack bundles its own
 Gemma-4 text encoder (`text_encoder.safetensors`); no `mlx-community`
 Gemma download happens on this path. `--image` (I2V) works the same as on
 2.3.
+
+**`-f/--frames` is optional on 2.5 packs**: omit it and the pack's
+`DurationHead` predicts a clip length (seconds) from the encoded prompt
+right after text encoding, snapped to the model's frame grid. Pass
+`--auto-duration MIN:MAX` (seconds) to override the predictor's clamp
+range, or pass `-f` explicitly to bypass prediction entirely (explicit
+`-f` always wins). **On 2.3 packs, `-f` stays required** — there is no
+`DurationHead` to predict from, and omitting it now raises immediately
+(`ValueError: ... Pass num_frames explicitly.`) before any Gemma load.
 
 Sampling: stage 1 runs euler-ancestral (8 steps, SDE noise injection);
 stage 2 stays deterministic euler (3 steps) — upstream's rationale is that
@@ -147,6 +163,7 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 |---|---|
 | `--two-stage` (dev + CFG) | supported (see above) |
 | `--two-stages-hq` (res_2s + CFG) | supported — validated e2e on 2.5 (deterministic, audio at healthy 2.3-level loudness) |
+| `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to an auto-predicted duration on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`; `--auto-duration MIN:MAX` overrides the clamp. Not available on 2.3 packs (no `DurationHead` weights); `-f` stays required there |
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
 | `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB) |
 | `ic-lora`, `hdr-ic-lora`, `retake`, `extend`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
@@ -234,7 +251,13 @@ ltx-2-mlx generate   T2V / I2V / two-stage / HQ generation
   --model, -m         Model weights (default: dgrauet/ltx-2.3-mlx-q8)
   --height, -H        Video height (default: 480)
   --width, -W         Video width (default: 704)
-  --frames, -f        Number of frames (default: 97)
+  --frames, -f        Number of frames. Required on 2.3 packs (no default —
+                      omitting it raises immediately). Optional on LTX-2.5
+                      packs: defaults to an auto-predicted duration via the
+                      pack's DurationHead when omitted.
+  --auto-duration MIN:MAX  Override the DurationHead's clamp range in seconds
+                      (LTX-2.5 packs only; default clamp [1.0, 20.0]s).
+                      Ignored if -f is also given (explicit -f wins, warns).
   --seed, -s          Random seed (-1 = random)
   --image, -i         Reference image for I2V
   --steps             Denoising steps for one-stage (default: 8)
@@ -324,7 +347,7 @@ step 4 instead of minute 15. Available on every generating subcommand (`generate
 ```
 
 ```bash
-ltx-2-mlx generate -p "a cat walking" -o out.mp4 --frame-rate 24 \
+ltx-2-mlx generate -p "a cat walking" -o out.mp4 -f 97 --frame-rate 24 \
   --stepwise-image-output-dir ./previews
 ```
 
