@@ -146,14 +146,14 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 | Feature | Status |
 |---|---|
 | `--two-stage` (dev + CFG) | supported (see above) |
-| `--two-stages-hq` (res_2s + CFG) | not yet supported |
+| `--two-stages-hq` (res_2s + CFG) | supported — validated e2e on 2.5 (deterministic, audio at healthy 2.3-level loudness) |
 | `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora`, `retake`, `extend`, `lipdub` | not yet supported |
 | `enhance` / `--enhance-prompt` | raises a clear error (Gemma 3-only) |
 | `--enable-teacache` | raises a clear error (not calibrated for 2.5) |
 | Modality tiling, Prompt Relay | validated on 2.3 only |
 | Diffusion (`DiffVAEMode`) VAE decoder | not loaded — conv decoder used |
 
-Further 2.5 pipelines (`--two-stages-hq`, a2v, keyframe, ic-lora, ...) land in
+Further 2.5 pipelines (a2v, keyframe, ic-lora, ...) land in
 subsequent releases.
 
 ### Python API
