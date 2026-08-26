@@ -21,8 +21,12 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from typing import TYPE_CHECKING
 
 from ltx_pipelines_mlx.utils.stepwise import DEFAULT_PREVIEW_FRAMES
+
+if TYPE_CHECKING:
+    from ltx_pipelines_mlx.utils.types import AutoDuration
 
 DEFAULT_MODEL = "dgrauet/ltx-2.3-mlx-q8"
 DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
@@ -157,12 +161,33 @@ def _build_tile_count_config(args: argparse.Namespace):
     )
 
 
-def _add_generation_args(parser: argparse.ArgumentParser) -> None:
-    """Add generation-specific arguments (dimensions, steps) on top of base args."""
+def _add_generation_args(parser: argparse.ArgumentParser, *, frames_default: int | None = 97) -> None:
+    """Add generation-specific arguments (dimensions, steps) on top of base args.
+
+    ``frames_default=None`` (used by the ``generate`` subparser only) leaves
+    ``--frames`` unset so the auto-duration collapse logic in
+    ``_resolve_num_frames_arg`` can distinguish "not given" from an explicit
+    value. Other subcommands (``a2v``, ``keyframe``, ``ic-lora``, ...) keep
+    their historical ``97`` default.
+    """
     _add_base_args(parser)
     parser.add_argument("--height", "-H", type=int, default=480, help="Video height (default: 480)")
     parser.add_argument("--width", "-W", type=int, default=704, help="Video width (default: 704)")
-    parser.add_argument("--frames", "-f", type=int, default=97, help="Number of frames (default: 97)")
+    if frames_default is None:
+        parser.add_argument(
+            "--frames",
+            "-f",
+            type=int,
+            default=None,
+            help=(
+                "Number of frames. Default: auto-predicted from the prompt on packs with "
+                "a DurationHead (LTX-2.5+); required explicitly otherwise. See --auto-duration."
+            ),
+        )
+    else:
+        parser.add_argument(
+            "--frames", "-f", type=int, default=frames_default, help=f"Number of frames (default: {frames_default})"
+        )
     parser.add_argument(
         "--frame-rate",
         type=float,
@@ -220,8 +245,52 @@ def _add_generation_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def main() -> None:
-    """Entry point for the ltx-2-mlx CLI."""
+def _parse_auto_duration(value: str) -> AutoDuration:
+    """Parse a ``MIN:MAX`` string (seconds) into an :class:`AutoDuration`."""
+    from ltx_pipelines_mlx.utils.types import AutoDuration
+
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(f"--auto-duration expects MIN:MAX (e.g. 2:10), got {value!r}")
+    try:
+        min_seconds, max_seconds = float(parts[0]), float(parts[1])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--auto-duration expects MIN:MAX as numbers, got {value!r}") from exc
+    return AutoDuration(min_seconds=min_seconds, max_seconds=max_seconds)
+
+
+def _resolve_num_frames_arg(args: argparse.Namespace) -> int | AutoDuration:
+    """Collapse ``--frames``/``--auto-duration`` into the value a pipeline's ``num_frames`` expects.
+
+    Mirrors upstream ``ltx_pipelines.utils.args._resolve_num_frames``: an explicit
+    ``--frames`` wins (with a warning if ``--auto-duration`` was also given);
+    otherwise ``--auto-duration`` if given, else the ``AutoDuration()`` default.
+    Only the ``generate`` subparser sets ``--frames`` default to ``None`` and
+    exposes ``--auto-duration``, so this is only meaningfully called there.
+    """
+    from ltx_pipelines_mlx.utils.types import DEFAULT_AUTO_DURATION
+
+    frames = getattr(args, "frames", None)
+    auto_duration = getattr(args, "auto_duration", None)
+    if frames is not None and auto_duration is not None:
+        print(
+            f"warning: both --frames and --auto-duration were given; using --frames={frames} "
+            "and ignoring --auto-duration.",
+            file=sys.stderr,
+        )
+    if frames is not None:
+        return frames
+    if auto_duration is not None:
+        return auto_duration
+    return DEFAULT_AUTO_DURATION
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the top-level argument parser (all subcommands).
+
+    Factored out of :func:`main` so tests can parse args without invoking
+    the CLI's dispatch/side-effect machinery.
+    """
     parser = argparse.ArgumentParser(
         prog="ltx-2-mlx",
         description="LTX-2.3 video generation on Apple Silicon (MLX)",
@@ -244,7 +313,19 @@ examples:
 
     # --- generate (T2V / I2V / two-stage / HQ) ---
     gen = sub.add_parser("generate", help="Generate video from text (T2V) or image (I2V)")
-    _add_generation_args(gen)
+    _add_generation_args(gen, frames_default=None)
+    gen.add_argument(
+        "--auto-duration",
+        type=_parse_auto_duration,
+        default=None,
+        metavar="MIN:MAX",
+        help=(
+            "Bounds (seconds) for auto-predicted duration, e.g. '2:10'. Only takes effect "
+            "when --frames is not given and the checkpoint has DurationHead weights "
+            "(LTX-2.5+); default bounds are 1:20. Ignored (with a warning) if --frames "
+            "is also given."
+        ),
+    )
     from ltx_pipelines_mlx.utils.args import ImageAction as _ImageAction
 
     gen.add_argument(
@@ -715,6 +796,12 @@ examples:
     )
     slc.add_argument("--crf", type=int, default=18, help="x264 quality, lower = better (default: 18)")
 
+    return parser
+
+
+def main() -> None:
+    """Entry point for the ltx-2-mlx CLI."""
+    parser = _build_parser()
     args = parser.parse_args()
 
     if args.command is None:
@@ -818,7 +905,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             output_path=args.output,
             height=args.height,
             width=args.width,
-            num_frames=args.frames,
+            num_frames=_resolve_num_frames_arg(args),
             frame_rate=args.frame_rate,
             seed=args.seed,
             images=args.images,
@@ -859,7 +946,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             output_path=args.output,
             height=args.height,
             width=args.width,
-            num_frames=args.frames,
+            num_frames=_resolve_num_frames_arg(args),
             frame_rate=args.frame_rate,
             seed=args.seed,
             images=args.images,
@@ -908,7 +995,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             output_path=args.output,
             height=args.height,
             width=args.width,
-            num_frames=args.frames,
+            num_frames=_resolve_num_frames_arg(args),
             frame_rate=args.frame_rate,
             seed=args.seed,
             images=args.images,

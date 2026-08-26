@@ -11,6 +11,7 @@ Lightricks/LTX-2 design where each pipeline file owns its API.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,8 +31,14 @@ from ltx_core_mlx.utils.weights import (
     load_split_safetensors,
     validate_config_matches_weights,
 )
+from ltx_pipelines_mlx.utils.blocks import (
+    DurationPredictor,
+    require_num_frames_source,
+    resolve_num_frames,
+)
 from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
 from ltx_pipelines_mlx.utils.progress import phase
+from ltx_pipelines_mlx.utils.types import AutoDuration
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -127,6 +134,11 @@ class BasePipeline:
         # Stepwise previews. Set by the CLI after construction (like ``verbose``);
         # None means no previews and zero cost in the denoising loops.
         self.stepwise: StepwisePreview | None = None
+
+        # Auto-duration: built once, lazily degrading to None on packs without
+        # DurationHead weights (anything predating 2.5 / gemma4). A few MB when
+        # present, so no memory-pressure motivation to defer construction.
+        self._duration_predictor: DurationPredictor | None = DurationPredictor.from_checkpoint(self.model_dir)
 
     # -------------------- proxy properties to blocks --------------------
     # Subclasses still read/write these as direct attributes; the property
@@ -237,6 +249,52 @@ class BasePipeline:
                 "TeaCache is calibrated for LTX-2.3 only; its polynomial does not "
                 "transfer to 2.5 packs. Drop --enable-teacache for this model."
             )
+
+    def _require_num_frames_source(self, num_frames: int | AutoDuration) -> None:
+        """Guard against ``AutoDuration`` on a checkpoint with no DurationHead weights.
+
+        Call at the very top of a ``generate_*`` method -- before prompt encoding
+        or any other work -- so a pack without DurationHead weights (anything
+        predating 2.5) fails fast instead of after paying for discarded work.
+
+        Raises:
+            ValueError: If ``num_frames`` is ``AutoDuration`` but this pipeline
+                has no duration predictor.
+        """
+        require_num_frames_source(num_frames, self._duration_predictor)
+
+    def _resolve_num_frames(
+        self,
+        num_frames: int | AutoDuration,
+        *,
+        video_encoding: mx.array | None,
+        audio_encoding: mx.array | None,
+        frame_rate: float,
+    ) -> int:
+        """Resolve ``num_frames`` to a concrete frame count, predicting it if ``AutoDuration``.
+
+        Call right after prompt encoding (once ``video_encoding``/``audio_encoding``
+        exist) and before any shape/position computation that consumes ``num_frames``.
+        Prints a ``[auto-duration]`` phase-style line to stderr when a prediction
+        actually ran, for observability.
+
+        Returns:
+            Concrete frame count, either passed through or predicted.
+        """
+        resolved = resolve_num_frames(
+            num_frames,
+            self._duration_predictor,
+            video_encoding=video_encoding,
+            audio_encoding=audio_encoding,
+            frame_rate=frame_rate,
+        )
+        if isinstance(num_frames, AutoDuration) and self.verbose:
+            print(
+                f"[auto-duration] predicted {resolved} frames ({resolved / frame_rate:.2f}s @ {frame_rate:.2f} fps)",
+                file=sys.stderr,
+                flush=True,
+            )
+        return resolved
 
     def _load_text_encoder(self) -> None:
         """Load Gemma + connector via the :class:`PromptEncoder` block."""

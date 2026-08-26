@@ -27,6 +27,7 @@ from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TI2VidTwoStagesPipeline
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, res2s_denoise_loop
+from ltx_pipelines_mlx.utils.types import DEFAULT_AUTO_DURATION, AutoDuration
 
 # TeaCache calibration constants for the HQ res_2s path (LTX-2 stage 1, 30
 # steps, 384x576x65 reference shape, MLX bf16 q8). Calibrated 2026-04-27 from
@@ -89,7 +90,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         prompt: str,
         height: int = 480,
         width: int = 704,
-        num_frames: int = 97,
+        num_frames: int | AutoDuration = DEFAULT_AUTO_DURATION,
         *,
         frame_rate: float,
         seed: int = 42,
@@ -111,13 +112,18 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         Same as TI2VidTwoStagesPipeline.generate_two_stage but uses res_2s sampler
         for Stage 1 instead of Euler. ``enable_teacache`` / ``teacache_thresh``
         / ``tap`` are forwarded to ``res2s_denoise_loop`` exactly as in the
-        Euler path.
+        Euler path. ``num_frames`` may be an :class:`AutoDuration` request,
+        resolved after prompt encoding (see :meth:`TI2VidTwoStagesPipeline.generate_two_stage`).
         """
+        self._require_num_frames_source(num_frames)
         self._check_teacache_supported(enable_teacache)
 
         # --- Text encoding (Prompt Relay: encode the combined prompt) ---
         encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
         video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(encode_prompt)
+        num_frames = self._resolve_num_frames(
+            num_frames, video_encoding=video_embeds, audio_encoding=audio_embeds, frame_rate=frame_rate
+        )
         num_text_tokens = video_embeds.shape[1]
         relay_mask = self._prompt_relay_mask_builder(prompt_relay, relay_token_ranges, num_text_tokens)
 

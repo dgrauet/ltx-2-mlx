@@ -286,3 +286,73 @@ def test_upsampler_missing_raises_file_not_found(tmp_path):
     pipe = _upsampler_pipeline(tmp_path, ltx25=True, files=[])
     with pytest.raises(FileNotFoundError, match="Spatial upsampler weights not found"):
         pipe._resolve_upsampler_path()
+
+
+# --------------------------------------------------------------------------
+# Task 3: auto-duration wiring inside DistilledPipeline.generate_two_stage
+# --------------------------------------------------------------------------
+
+from ltx_pipelines_mlx.utils.types import DEFAULT_AUTO_DURATION, AutoDuration  # noqa: E402
+
+
+class _FakeDurationPredictor:
+    """Records its call args and always predicts a fixed frame count."""
+
+    def __init__(self, frames: int):
+        self._frames = frames
+        self.call_args: dict | None = None
+
+    def __call__(self, video_encoding, audio_encoding, *, frame_rate, min_seconds=1.0, max_seconds=20.0):
+        self.call_args = {
+            "video_encoding": video_encoding,
+            "audio_encoding": audio_encoding,
+            "frame_rate": frame_rate,
+            "min_seconds": min_seconds,
+            "max_seconds": max_seconds,
+        }
+        return self._frames
+
+
+def test_auto_duration_resolves_after_encode_on_25(tmp_path, monkeypatch):
+    """A 2.5 pack with a predictor resolves AutoDuration from the (stubbed) encodings.
+
+    18 -> latent F = (18 + 7) // 8 = 3 on the 2.5 pack's stub predictor
+    (prompt encoding stub returns zeros regardless, so any int works here;
+    17 is used to also pin the 8k+1-grid convention documented on DurationPredictor).
+    """
+    pipe, _, ancestral, noised_calls = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
+    fake_predictor = _FakeDurationPredictor(17)
+    pipe._duration_predictor = fake_predictor  # type: ignore[assignment]
+
+    _run(pipe, num_frames=DEFAULT_AUTO_DURATION)
+
+    # Predictor was called with the (stubbed) positive encodings, not negatives —
+    # DistilledPipeline has no CFG / negative prompt.
+    assert fake_predictor.call_args is not None
+    assert fake_predictor.call_args["frame_rate"] == 24.0
+    assert fake_predictor.call_args["min_seconds"] == DEFAULT_AUTO_DURATION.min_seconds
+    assert fake_predictor.call_args["max_seconds"] == DEFAULT_AUTO_DURATION.max_seconds
+
+    expected_f = (17 + 7) // 8
+    assert expected_f == 3
+    # Stage 1 video/audio noised-state calls carry the resolved latent F.
+    assert noised_calls[0]["spatial_dims"][0] == expected_f
+    assert noised_calls[1]["spatial_dims"][0] == expected_f
+    assert len(ancestral.calls) == 1
+
+
+def test_auto_duration_raises_early_on_23(tmp_path, monkeypatch):
+    """A pack without a DurationHead (predictor None) must fail before any encode work."""
+    pipe, euler, ancestral, _ = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=False)
+    assert pipe._duration_predictor is None
+
+    def _unreachable_encode(prompt):
+        raise AssertionError("_encode_text must not be reached when the guard should fire first")
+
+    pipe._encode_text = _unreachable_encode  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="Pass num_frames explicitly"):
+        _run(pipe, num_frames=AutoDuration())
+
+    assert euler.calls == []
+    assert ancestral.calls == []

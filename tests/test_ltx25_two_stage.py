@@ -132,7 +132,7 @@ def test_teacache_raises_on_25_pack(tmp_path, monkeypatch):
     """Verify that enable_teacache=True raises ValueError on an LTX-2.5 pack."""
     pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=True)
     with pytest.raises(ValueError, match="TeaCache"):
-        pipe.generate_two_stage(prompt="a fox", frame_rate=24.0, enable_teacache=True)
+        pipe.generate_two_stage(prompt="a fox", num_frames=9, frame_rate=24.0, enable_teacache=True)
 
 
 class _AbortError(Exception):
@@ -154,14 +154,14 @@ def test_teacache_still_allowed_on_23_pack(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pipe, "_encode_text_with_negative", boom, raising=False)
     with pytest.raises(_AbortError):
-        pipe.generate_two_stage(prompt="a fox", frame_rate=24.0, enable_teacache=True)
+        pipe.generate_two_stage(prompt="a fox", num_frames=9, frame_rate=24.0, enable_teacache=True)
 
 
 def test_teacache_raises_on_25_pack_hq(tmp_path, monkeypatch):
     """Verify that enable_teacache=True raises ValueError on an LTX-2.5 pack (HQ pipeline)."""
     pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=True)
     with pytest.raises(ValueError, match="TeaCache"):
-        pipe.generate_two_stage(prompt="a fox", frame_rate=24.0, enable_teacache=True)
+        pipe.generate_two_stage(prompt="a fox", num_frames=9, frame_rate=24.0, enable_teacache=True)
 
 
 def test_teacache_still_allowed_on_23_pack_hq(tmp_path, monkeypatch):
@@ -177,7 +177,7 @@ def test_teacache_still_allowed_on_23_pack_hq(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pipe, "_encode_text_with_negative", boom, raising=False)
     with pytest.raises(_AbortError):
-        pipe.generate_two_stage(prompt="a fox", frame_rate=24.0, enable_teacache=True)
+        pipe.generate_two_stage(prompt="a fox", num_frames=9, frame_rate=24.0, enable_teacache=True)
 
 
 def test_cli_generate_distilled_lora_defaults_to_none(monkeypatch):

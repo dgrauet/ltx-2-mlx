@@ -251,6 +251,91 @@ def test_duration_predictor_from_checkpoint_loads(tmp_path):
     assert num_frames <= 1017  # Snapped down from 480
 
 
+# ============================================================================
+# Task 3: CLI --frames/--auto-duration collapse
+# ============================================================================
+
+
+def _parse_generate_args(*extra: str):
+    from ltx_pipelines_mlx.cli import _build_parser
+
+    parser = _build_parser()
+    return parser.parse_args(["generate", "-p", "a fox", "-o", "out.mp4", "--frame-rate", "24", "--distilled", *extra])
+
+
+def test_cli_frames_default_is_none_and_resolves_to_auto_duration():
+    """No -f => parsed default is None => resolves to AutoDuration()."""
+    from ltx_pipelines_mlx.cli import _resolve_num_frames_arg
+
+    args = _parse_generate_args()
+    assert args.frames is None
+    assert args.auto_duration is None
+
+    resolved = _resolve_num_frames_arg(args)
+    assert resolved == AutoDuration()
+
+
+def test_cli_explicit_frames_wins():
+    from ltx_pipelines_mlx.cli import _resolve_num_frames_arg
+
+    args = _parse_generate_args("-f", "25")
+    assert args.frames == 25
+    assert _resolve_num_frames_arg(args) == 25
+
+
+def test_cli_auto_duration_flag_parses_and_resolves():
+    from ltx_pipelines_mlx.cli import _resolve_num_frames_arg
+
+    args = _parse_generate_args("--auto-duration", "2:10")
+    assert args.auto_duration == AutoDuration(min_seconds=2.0, max_seconds=10.0)
+    assert args.frames is None
+    assert _resolve_num_frames_arg(args) == AutoDuration(min_seconds=2.0, max_seconds=10.0)
+
+
+def test_cli_explicit_frames_and_auto_duration_warns_and_frames_wins(capsys):
+    from ltx_pipelines_mlx.cli import _resolve_num_frames_arg
+
+    args = _parse_generate_args("-f", "25", "--auto-duration", "2:10")
+    resolved = _resolve_num_frames_arg(args)
+
+    assert resolved == 25
+    err = capsys.readouterr().err
+    assert "--frames" in err and "--auto-duration" in err
+
+
+def test_cli_auto_duration_rejects_malformed_value():
+    from ltx_pipelines_mlx.cli import _build_parser
+
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "generate",
+                "-p",
+                "x",
+                "-o",
+                "out.mp4",
+                "--frame-rate",
+                "24",
+                "--distilled",
+                "--auto-duration",
+                "not-a-range",
+            ]
+        )
+
+
+def test_cli_other_subcommands_keep_97_default():
+    """keyframe/a2v/ic-lora keep their historical -f default untouched."""
+    from ltx_pipelines_mlx.cli import _build_parser
+
+    parser = _build_parser()
+    kf_args = parser.parse_args(
+        ["keyframe", "-p", "x", "-o", "out.mp4", "--frame-rate", "24", "--start", "a.png", "--end", "b.png"]
+    )
+    assert kf_args.frames == 97
+    assert not hasattr(kf_args, "auto_duration")
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(LTX25_Q8_DIR is None, reason="local ltx-2.5-mlx-q8 pack not found")
 def test_duration_predictor_with_custom_bounds(tmp_path):

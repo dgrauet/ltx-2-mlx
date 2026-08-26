@@ -46,6 +46,7 @@ from .ti2vid_two_stages import TI2VidTwoStagesPipeline
 from .utils.helpers import create_noised_state
 from .utils.progress import phase
 from .utils.samplers import denoise_loop, euler_ancestral_denoising_loop
+from .utils.types import DEFAULT_AUTO_DURATION, AutoDuration
 
 _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags mx.eval pattern
 
@@ -197,7 +198,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         prompt: str,
         height: int = 480,
         width: int = 704,
-        num_frames: int = 97,
+        num_frames: int | AutoDuration = DEFAULT_AUTO_DURATION,
         *,
         frame_rate: float,
         seed: int = 42,
@@ -215,7 +216,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             prompt: Text prompt.
             height: Final video height.
             width: Final video width.
-            num_frames: Number of frames.
+            num_frames: Number of frames, or an :class:`AutoDuration` request to
+                predict it from the prompt (requires a DurationHead-equipped
+                checkpoint).
             seed: Random seed.
             stage1_steps: Stage 1 steps (default: full DISTILLED_SIGMAS = 8).
             stage2_steps: Stage 2 steps (default: full STAGE_2_SIGMAS = 3).
@@ -234,6 +237,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         Raises:
             ValueError: when ``enable_teacache`` is requested on an LTX-2.5 pack.
         """
+        self._require_num_frames_source(num_frames)
         if enable_teacache and self._is_25:
             raise ValueError(
                 "TeaCache is not calibrated for LTX-2.5 packs: the polynomial "
@@ -251,6 +255,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         with phase("Encoding prompt", verbose=self.verbose):
             video_embeds, audio_embeds = self._encode_text(encode_prompt)
             _materialize(video_embeds, audio_embeds)
+        num_frames = self._resolve_num_frames(
+            num_frames, video_encoding=video_embeds, audio_encoding=audio_embeds, frame_rate=frame_rate
+        )
         if self.low_memory:
             self.prompt_encoder.free()
             aggressive_cleanup()
