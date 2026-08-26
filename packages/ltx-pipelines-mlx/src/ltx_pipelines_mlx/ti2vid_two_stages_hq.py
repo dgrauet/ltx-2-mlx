@@ -332,6 +332,10 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         # Strip appended keyframe tokens before unpatchify (see stage 1).
         gen_tokens_2 = output_2.video_latent[:, : F * H_full * W_full, :]
         video_latent = self.video_patchifier.unpatchify(gen_tokens_2, (F, H_full, W_full))
-        audio_latent = self.audio_patchifier.unpatchify(output_2.audio_latent)
+        # Stage 2 refines video only; discard its audio and keep stage 1's
+        # (upstream ti2vid_two_stages.py: ``video_state, _ = self.stage_2(...)``
+        # then decodes the stage-1 ``audio_state``). Stage 2 still runs the
+        # audio modality as model context for the joint forward.
+        audio_latent = self.audio_patchifier.unpatchify(audio_tokens_1)
 
         return video_latent, audio_latent

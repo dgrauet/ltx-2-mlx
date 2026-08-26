@@ -214,3 +214,85 @@ def test_cli_generate_distilled_lora_defaults_to_none(monkeypatch):
     cli.main()
 
     assert captured["distilled_lora"] is None
+
+
+# --------------------------------------------------------------------------
+# Upstream sync: stage 2 refines video only — the returned audio is stage 1's
+# --------------------------------------------------------------------------
+#
+# Mirrors upstream ``ti2vid_two_stages.py`` (``video_state, _ = self.stage_2``,
+# then the stage-1 ``audio_state`` is decoded). The spies below echo their
+# input latents, so stage 1's audio output is its initial noise while stage 2's
+# input is the *renoised* stage-1 audio — numerically distinct. Returning
+# stage 2's audio therefore fails these tests (mutation-verified).
+
+import mlx.core as mx  # noqa: E402
+
+from ltx_pipelines_mlx import ti2vid_two_stages as _ts_mod  # noqa: E402
+from ltx_pipelines_mlx import ti2vid_two_stages_hq as _hq_mod  # noqa: E402
+from ltx_pipelines_mlx.utils.samplers import DenoiseOutput  # noqa: E402
+
+
+class _EchoLoop:
+    """Denoising-loop stand-in: records kwargs, echoes the input latents."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def __call__(self, **kwargs) -> DenoiseOutput:
+        self.calls.append(kwargs)
+        return DenoiseOutput(
+            video_latent=kwargs["video_state"].latent,
+            audio_latent=kwargs["audio_state"].latent,
+        )
+
+
+class _IdentityVae:
+    def denormalize_latent(self, x):
+        return x
+
+    def normalize_latent(self, x):
+        return x
+
+
+def _stub_generate(pipe, monkeypatch, mod, stage1_name: str) -> tuple[_EchoLoop, _EchoLoop]:
+    """Stub the heavyweight collaborators; the real generate_two_stage runs."""
+    pipe.load = lambda: None
+    pipe.dit = object()
+    pipe.vae_encoder = _IdentityVae()
+    pipe.upsampler = lambda x: mx.repeat(mx.repeat(x, 2, axis=3), 2, axis=4)
+    pipe._fuse_distilled_lora = lambda dit: None
+    pipe._encode_text_with_negative = lambda encode_prompt: (
+        mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
+        mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
+        mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
+        mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
+    )
+    monkeypatch.setattr(mod, "X0Model", lambda dit: dit)
+    stage1 = _EchoLoop()
+    stage2 = _EchoLoop()
+    monkeypatch.setattr(mod, stage1_name, stage1)
+    monkeypatch.setattr(mod, "denoise_loop", stage2)
+    return stage1, stage2
+
+
+def _assert_audio_is_stage1(pipe, stage1: _EchoLoop, stage2: _EchoLoop) -> None:
+    _video, audio = pipe.generate_two_stage(
+        prompt="a fox", height=128, width=128, num_frames=9, frame_rate=24.0, seed=7
+    )
+    stage1_audio = pipe.audio_patchifier.unpatchify(stage1.calls[0]["audio_state"].latent)
+    stage2_audio = pipe.audio_patchifier.unpatchify(stage2.calls[0]["audio_state"].latent)
+    assert mx.array_equal(audio, stage1_audio), "returned audio must be stage 1's"
+    assert not mx.array_equal(audio, stage2_audio), "stage-2 renoised audio must differ (guards the mutation)"
+
+
+def test_two_stage_returns_stage1_audio(tmp_path, monkeypatch):
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=False)
+    stage1, stage2 = _stub_generate(pipe, monkeypatch, _ts_mod, "guided_denoise_loop")
+    _assert_audio_is_stage1(pipe, stage1, stage2)
+
+
+def test_two_stage_hq_returns_stage1_audio(tmp_path, monkeypatch):
+    pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=False)
+    stage1, stage2 = _stub_generate(pipe, monkeypatch, _hq_mod, "res2s_denoise_loop")
+    _assert_audio_is_stage1(pipe, stage1, stage2)
