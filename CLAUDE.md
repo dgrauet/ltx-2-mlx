@@ -967,7 +967,8 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
 | `--two-stage` (dev model + CFG) | supported (see above) |
 | `--two-stages-hq` (res_2s + CFG) | supported — validated e2e on 2.5 (deterministic, audio at healthy 2.3-level loudness) |
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
-| `a2v`, `ic-lora`, `hdr-ic-lora`, `retake`, `extend`, `lipdub` | not yet supported |
+| `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB) |
+| `ic-lora`, `hdr-ic-lora`, `retake`, `extend`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
 | `enhance` / `--enhance-prompt` | raises `NotImplementedError` (`_guard_enhance_not_gemma4`) — Gemma 3 only |
 | `--enable-teacache` | raises `ValueError` — 2.3 polynomial isn't calibrated for 2.5 |
 | Modality tiling, Prompt Relay | validated on 2.3 only |
