@@ -36,6 +36,7 @@ from ltx_pipelines_mlx.ti2vid_two_stages_hq import TI2VidTwoStagesHQPipeline
 from ltx_pipelines_mlx.utils.blocks import (
     AudioConditioner,
     AudioDecoder,
+    DurationPredictor,
     ImageConditioner,
     PromptEncoder,
     VideoDecoder,
@@ -49,6 +50,7 @@ __all__ = [
     "AudioDecoder",
     "BasePipeline",
     "DistilledPipeline",
+    "DurationPredictor",
     "HDRICLoraPipeline",
     "ICLoraPipeline",
     "ImageConditioner",

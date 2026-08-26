@@ -6,21 +6,6 @@ from dataclasses import dataclass, field
 
 from ltx_core_mlx.components.guiders import MultiModalGuiderParams
 
-
-@dataclass(frozen=True)
-class AutoDuration:
-    """Request auto-predicted duration, clamped to ``[min_seconds, max_seconds]``.
-
-    The predicted duration is converted to a frame count snapped to the VAE's causal
-    temporal grid (``8k + 1``). Defaults: 1s and 20s.
-    """
-
-    min_seconds: float = 1.0
-    max_seconds: float = 20.0
-
-
-DEFAULT_AUTO_DURATION = AutoDuration()
-
 DEFAULT_IMAGE_CRF = 33
 VIDEO_LATENT_CHANNELS = 128
 

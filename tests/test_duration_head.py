@@ -23,7 +23,7 @@ from ltx_pipelines_mlx.utils.blocks import (
     resolve_num_frames,
     seconds_to_clamped_num_frames,
 )
-from ltx_pipelines_mlx.utils.constants import AutoDuration
+from ltx_pipelines_mlx.utils.types import AutoDuration
 from tests.conftest import LTX25_Q8_DIR
 
 
@@ -182,7 +182,47 @@ def test_resolve_passthrough_and_predict():
     """Explicit int is passed through; AutoDuration delegates to predictor."""
     # Passthrough for explicit int
     assert resolve_num_frames(97, None, video_encoding=None, audio_encoding=None, frame_rate=24.0) == 97
-    # AutoDuration with None predictor would raise, but we test with mock
+
+    # Fake predictor that records its arguments
+    class FakePredictor:
+        def __init__(self):
+            self.call_args = None
+
+        def __call__(self, video_encoding, audio_encoding, *, frame_rate, min_seconds=1.0, max_seconds=20.0):
+            self.call_args = {
+                "video_encoding": video_encoding,
+                "audio_encoding": audio_encoding,
+                "frame_rate": frame_rate,
+                "min_seconds": min_seconds,
+                "max_seconds": max_seconds,
+            }
+            return 41  # Dummy return value on the 8k+1 grid
+
+    # Test AutoDuration delegation with fake predictor
+    fake_predictor = FakePredictor()
+    video_enc = mx.random.normal((1, 16, 4096))
+    audio_enc = mx.random.normal((1, 16, 2048))
+    auto_dur = AutoDuration(min_seconds=0.5, max_seconds=10.0)
+
+    result = resolve_num_frames(
+        auto_dur,
+        fake_predictor,
+        video_encoding=video_enc,
+        audio_encoding=audio_enc,
+        frame_rate=24.0,
+    )
+
+    # Verify result is passed through
+    assert result == 41
+
+    # Verify predictor was called with correct arguments
+    assert fake_predictor.call_args is not None
+    assert fake_predictor.call_args["video_encoding"] is video_enc
+    assert fake_predictor.call_args["audio_encoding"] is audio_enc
+    assert fake_predictor.call_args["frame_rate"] == 24.0
+    # Verify min/max_seconds come from AutoDuration instance
+    assert fake_predictor.call_args["min_seconds"] == 0.5
+    assert fake_predictor.call_args["max_seconds"] == 10.0
 
 
 def test_duration_predictor_from_checkpoint_missing_file(tmp_path):

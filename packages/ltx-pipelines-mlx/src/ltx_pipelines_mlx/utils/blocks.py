@@ -60,7 +60,7 @@ from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import selec
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.weights import load_split_safetensors, remap_audio_vae_keys
-from ltx_pipelines_mlx.utils.constants import AutoDuration
+from ltx_pipelines_mlx.utils.types import AutoDuration
 
 if TYPE_CHECKING:
     from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
@@ -602,13 +602,6 @@ class DurationPredictor:
         """
         model_path = Path(model_dir) if isinstance(model_dir, str) else model_dir
         head_path = model_path / "duration_head.safetensors"
-
-        if not head_path.exists():
-            logger.info(
-                "No DurationHead weights found in %s; auto-duration prediction unavailable.",
-                model_path,
-            )
-            return None
 
         try:
             head = load_duration_head(head_path)
