@@ -324,6 +324,20 @@ def test_cli_auto_duration_rejects_malformed_value():
         )
 
 
+def test_cli_auto_duration_rejects_inverted_bounds(capsys):
+    """Mirrors upstream AutoDurationAction: MIN must be <= MAX, checked at parse time.
+
+    Without this guard, --auto-duration 10:2 would silently flow through
+    (AutoDuration doesn't validate its own fields) and produce a
+    wrong-duration render instead of a clear CLI error.
+    """
+    with pytest.raises(SystemExit):
+        _parse_generate_args("--auto-duration", "10:2")
+
+    err = capsys.readouterr().err
+    assert "MIN_SECONDS (10.0) must be <= MAX_SECONDS (2.0)" in err
+
+
 def test_cli_other_subcommands_keep_97_default():
     """keyframe/a2v/ic-lora keep their historical -f default untouched."""
     from ltx_pipelines_mlx.cli import _build_parser

@@ -246,7 +246,13 @@ def _add_generation_args(parser: argparse.ArgumentParser, *, frames_default: int
 
 
 def _parse_auto_duration(value: str) -> AutoDuration:
-    """Parse a ``MIN:MAX`` string (seconds) into an :class:`AutoDuration`."""
+    """Parse a ``MIN:MAX`` string (seconds) into an :class:`AutoDuration`.
+
+    Mirrors upstream ``ltx_pipelines.utils.args.AutoDurationAction``'s
+    ``min_seconds <= max_seconds`` guard (and its exact message wording) so an
+    inverted range (e.g. ``10:2``) is rejected at parse time instead of
+    silently flowing through into a wrong-duration render.
+    """
     from ltx_pipelines_mlx.utils.types import AutoDuration
 
     parts = value.split(":")
@@ -256,6 +262,10 @@ def _parse_auto_duration(value: str) -> AutoDuration:
         min_seconds, max_seconds = float(parts[0]), float(parts[1])
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"--auto-duration expects MIN:MAX as numbers, got {value!r}") from exc
+    if min_seconds > max_seconds:
+        raise argparse.ArgumentTypeError(
+            f"--auto-duration MIN_SECONDS ({min_seconds}) must be <= MAX_SECONDS ({max_seconds})"
+        )
     return AutoDuration(min_seconds=min_seconds, max_seconds=max_seconds)
 
 
