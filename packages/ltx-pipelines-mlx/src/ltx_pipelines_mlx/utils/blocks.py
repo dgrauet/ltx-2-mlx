@@ -39,6 +39,7 @@ Differences vs upstream:
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -46,6 +47,7 @@ from typing import TYPE_CHECKING
 
 import mlx.core as mx
 
+from ltx_core_mlx.duration_head import DurationHead, load_duration_head
 from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
 from ltx_core_mlx.model.transformer.model import LTXModelConfig
@@ -58,9 +60,12 @@ from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import selec
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.weights import load_split_safetensors, remap_audio_vae_keys
+from ltx_pipelines_mlx.utils.constants import AutoDuration
 
 if TYPE_CHECKING:
     from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
+
+logger = logging.getLogger(__name__)
 
 _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags the literal mx.eval pattern
 
@@ -444,11 +449,248 @@ class VideoUpsampler:
         return upsampler(latent)
 
 
+# ============================================================================
+# Duration Head Helpers
+# ============================================================================
+
+
+def snap_frames_to_grid(frames: int, time_scale: int = 8) -> int:
+    """Round ``frames`` down to the nearest ``k * time_scale + 1``.
+
+    The model's frame count must satisfy ``(frames - 1) % time_scale == 0``
+    (causal VAE temporal grid). The default ``time_scale=8`` corresponds to
+    the VAE's 8x temporal compression.
+
+    Args:
+        frames: Number of frames to snap.
+        time_scale: Temporal grid scale factor (default 8 for LTX-2).
+
+    Returns:
+        Snapped frame count on the 8k+1 grid.
+    """
+    if frames < 1:
+        raise ValueError(f"frames must be >= 1, got {frames}")
+    return ((frames - 1) // time_scale) * time_scale + 1
+
+
+def seconds_to_clamped_num_frames(
+    seconds: float,
+    *,
+    frame_rate: float,
+    min_frames: int = 1,
+    max_frames: int = 1024,
+    time_scale: int = 8,
+) -> int:
+    """Convert a duration in seconds to a frame count snapped to the VAE's temporal grid.
+
+    Outlier durations are clamped to ``[min_frames, max_frames]`` (before snapping) so a
+    misbehaving prediction can't request an OOM-sized generation. Snapping floors to the
+    grid, which can undershoot ``min_frames``; when that happens the result is snapped up
+    to the next grid point instead, so the ``[min_frames, max_frames]`` contract always holds.
+
+    Args:
+        seconds: Duration in seconds.
+        frame_rate: Video frame rate in frames per second.
+        min_frames: Minimum frame count (default 1). Result >= min_frames.
+        max_frames: Maximum frame count (default 1024). Result <= max_frames.
+        time_scale: Temporal grid scale factor (default 8 for LTX-2).
+
+    Returns:
+        Frame count clamped to [min_frames, max_frames] and snapped to 8k+1 grid.
+    """
+    raw_frames = round(seconds * frame_rate)
+    raw_frames = max(min_frames, min(raw_frames, max_frames))
+    frames = snap_frames_to_grid(raw_frames, time_scale)
+    if frames < min_frames:
+        # Round up to next grid point: ceiling division on the grid
+        # Formula: -(-((min_frames - 1) // time_scale)) * time_scale + 1
+        frames = min(-(-(min_frames - 1) // time_scale) * time_scale + 1, max_frames)
+    return frames
+
+
+def require_num_frames_source(
+    num_frames: int | AutoDuration,
+    duration_predictor: DurationPredictor | None,
+) -> None:
+    """Guard against an unsatisfiable auto-duration request.
+
+    Call at the very top of a pipeline's ``__call__`` -- before prompt encoding or any other
+    work -- so a checkpoint without DurationHead weights (anything predating 2.5) fails fast
+    with a clear message instead of after paying for work whose result would be discarded.
+
+    Args:
+        num_frames: Either an explicit frame count or AutoDuration request.
+        duration_predictor: Optional DurationPredictor (required if num_frames is AutoDuration).
+
+    Raises:
+        ValueError: If num_frames is AutoDuration but duration_predictor is None.
+    """
+    if isinstance(num_frames, AutoDuration) and duration_predictor is None:
+        raise ValueError(
+            "num_frames was AutoDuration but this checkpoint has no DurationHead weights to "
+            "auto-predict duration from (DurationHead ships from LTX 2.5 / gemma4 onward). "
+            "Pass num_frames explicitly."
+        )
+
+
+def resolve_num_frames(
+    num_frames: int | AutoDuration,
+    duration_predictor: DurationPredictor | None,
+    *,
+    video_encoding: mx.array | None,
+    audio_encoding: mx.array | None,
+    frame_rate: float,
+) -> int:
+    """Resolve ``num_frames`` to a concrete frame count, predicting it if ``AutoDuration``.
+
+    Call after prompt encoding (once ``video_encoding``/``audio_encoding`` exist) and after
+    ``require_num_frames_source`` has already validated a predictor is available when needed.
+
+    Args:
+        num_frames: Either an explicit frame count or AutoDuration request.
+        duration_predictor: Optional DurationPredictor (must be provided if AutoDuration).
+        video_encoding: Video embedding tokens from prompt encoder (shape B, N, 4096).
+        audio_encoding: Audio embedding tokens from prompt encoder (shape B, N, 2048).
+        frame_rate: Video frame rate in frames per second.
+
+    Returns:
+        Concrete frame count, either passed through or predicted.
+    """
+    if not isinstance(num_frames, AutoDuration):
+        return num_frames
+    return duration_predictor(
+        video_encoding,
+        audio_encoding,
+        frame_rate=frame_rate,
+        min_seconds=num_frames.min_seconds,
+        max_seconds=num_frames.max_seconds,
+    )
+
+
+class DurationPredictor:
+    """Predicts shot duration (in frames) from prompt encoder output.
+
+    Unlike most blocks, the model is held directly rather than rebuilt on every call:
+    DurationHead is a few MB, so there's no memory pressure motivating the
+    build-on-call / free-on-exit pattern used for the large transformer/VAE blocks.
+
+    Attributes:
+        _head: The loaded DurationHead model.
+    """
+
+    def __init__(self, head: DurationHead) -> None:
+        """Construct from an already-built, already-loaded head.
+
+        Args:
+            head: A DurationHead instance.
+        """
+        self._head = head
+
+    @classmethod
+    def from_checkpoint(cls, model_dir: str | Path) -> DurationPredictor | None:
+        """Build a predictor from a checkpoint path, or ``None`` if unavailable.
+
+        Returns ``None`` when the duration-head file is absent, so a checkpoint without
+        DurationHead weights (anything predating 2.5 / gemma3 monoliths) gracefully
+        skips prediction rather than crashing later.
+
+        Args:
+            model_dir: Path to the model directory (local or HuggingFace repo ID).
+
+        Returns:
+            DurationPredictor if duration_head.safetensors exists and loads; None otherwise.
+        """
+        model_path = Path(model_dir) if isinstance(model_dir, str) else model_dir
+        head_path = model_path / "duration_head.safetensors"
+
+        if not head_path.exists():
+            logger.info(
+                "No DurationHead weights found in %s; auto-duration prediction unavailable.",
+                model_path,
+            )
+            return None
+
+        try:
+            head = load_duration_head(head_path)
+            return cls(head)
+        except FileNotFoundError:
+            logger.info(
+                "No DurationHead weights found in %s; auto-duration prediction unavailable.",
+                head_path,
+            )
+            return None
+
+    def __call__(
+        self,
+        video_encoding: mx.array | None,
+        audio_encoding: mx.array | None,
+        *,
+        frame_rate: float,
+        min_seconds: float = 1.0,
+        max_seconds: float = 20.0,
+    ) -> int:
+        """Predict a frame count from prompt encoder tokens, snapped to the VAE's grid.
+
+        ``min_seconds``/``max_seconds`` clamp the prediction so a misbehaving prediction can't
+        request a degenerate or OOM-sized generation; the defaults are 1s and 20s. The result is
+        a frame count snapped to the VAE's ``8k + 1`` causal temporal grid.
+
+        Args:
+            video_encoding: Video embedding tokens (shape 1, N, 4096) or None.
+            audio_encoding: Audio embedding tokens (shape 1, N, 2048) or None.
+            frame_rate: Video frame rate in frames per second.
+            min_seconds: Minimum predicted duration in seconds (default 1.0).
+            max_seconds: Maximum predicted duration in seconds (default 20.0).
+
+        Returns:
+            Predicted frame count, clamped to [min_seconds, max_seconds] and snapped to grid.
+
+        Raises:
+            ValueError: If both video_encoding and audio_encoding are None.
+            ValueError: If prediction has batch size != 1.
+        """
+        if video_encoding is None and audio_encoding is None:
+            raise ValueError("DurationPredictor requires at least one of video_encoding / audio_encoding")
+
+        seconds_pred = self._head(video_tokens=video_encoding, audio_tokens=audio_encoding)
+        if seconds_pred.shape != (1,):
+            raise ValueError(
+                f"DurationPredictor only supports a single-item batch, got prediction shape {tuple(seconds_pred.shape)}"
+            )
+
+        seconds = float(seconds_pred.item())
+        min_frames = round(min_seconds * frame_rate)
+        max_frames = round(max_seconds * frame_rate)
+        num_frames = seconds_to_clamped_num_frames(
+            seconds, frame_rate=frame_rate, min_frames=min_frames, max_frames=max_frames
+        )
+
+        if seconds > max_seconds or seconds < min_seconds:
+            logger.warning(
+                "DurationHead prediction clamped: raw %.2fs outside [%.2fs, %.2fs], using %.2fs (%d frames) @ %.2f fps",
+                seconds,
+                min_seconds,
+                max_seconds,
+                num_frames / frame_rate,
+                num_frames,
+                frame_rate,
+            )
+        else:
+            logger.info("DurationHead predicted %.2fs (%d frames @ %.2f fps)", seconds, num_frames, frame_rate)
+
+        return num_frames
+
+
 __all__ = [
     "AudioConditioner",
     "AudioDecoder",
+    "DurationPredictor",
     "ImageConditioner",
     "PromptEncoder",
     "VideoDecoder",
     "VideoUpsampler",
+    "require_num_frames_source",
+    "resolve_num_frames",
+    "seconds_to_clamped_num_frames",
+    "snap_frames_to_grid",
 ]

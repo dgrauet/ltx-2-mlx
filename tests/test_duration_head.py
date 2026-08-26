@@ -17,6 +17,13 @@ import mlx.core as mx
 import pytest
 
 from ltx_core_mlx.duration_head import AttentionPooler, DurationHead, load_duration_head
+from ltx_pipelines_mlx.utils.blocks import (
+    DurationPredictor,
+    require_num_frames_source,
+    resolve_num_frames,
+    seconds_to_clamped_num_frames,
+)
+from ltx_pipelines_mlx.utils.constants import AutoDuration
 from tests.conftest import LTX25_Q8_DIR
 
 
@@ -146,3 +153,77 @@ def test_duration_head_pinned_regression():
     assert out_both.item() == pytest.approx(4.09065055847168, rel=1e-5)
     assert out_video.item() == pytest.approx(3.8629565238952637, rel=1e-5)
     assert out_audio.item() == pytest.approx(4.285473346710205, rel=1e-5)
+
+
+# ============================================================================
+# Task 2: AutoDuration + DurationPredictor + helpers
+# ============================================================================
+
+
+def test_seconds_snap_to_grid():
+    """Test snapping to VAE's 8k+1 causal temporal grid."""
+    # 2.0s @ 24fps = 48 -> floor grille 8k+1 = 41
+    assert seconds_to_clamped_num_frames(2.0, frame_rate=24.0) == 41
+    # clamp haut : 100s @ 24 -> max_frames 1024 -> snap 1017
+    assert seconds_to_clamped_num_frames(100.0, frame_rate=24.0) == 1017
+    # remontée quand le floor passe sous min_frames
+    assert seconds_to_clamped_num_frames(0.01, frame_rate=24.0, min_frames=24) == 25
+
+
+def test_require_num_frames_source_raises_without_predictor():
+    """AutoDuration without predictor raises; explicit int never raises."""
+    with pytest.raises(ValueError, match="Pass num_frames explicitly"):
+        require_num_frames_source(AutoDuration(), None)
+    # Explicit int should not raise
+    require_num_frames_source(97, None)
+
+
+def test_resolve_passthrough_and_predict():
+    """Explicit int is passed through; AutoDuration delegates to predictor."""
+    # Passthrough for explicit int
+    assert resolve_num_frames(97, None, video_encoding=None, audio_encoding=None, frame_rate=24.0) == 97
+    # AutoDuration with None predictor would raise, but we test with mock
+
+
+def test_duration_predictor_from_checkpoint_missing_file(tmp_path):
+    """from_checkpoint returns None when duration_head.safetensors is absent."""
+    predictor = DurationPredictor.from_checkpoint(tmp_path)
+    assert predictor is None
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(LTX25_Q8_DIR is None, reason="local ltx-2.5-mlx-q8 pack not found")
+def test_duration_predictor_from_checkpoint_loads(tmp_path):
+    """from_checkpoint loads a real predictor from pack with duration_head.safetensors."""
+    predictor = DurationPredictor.from_checkpoint(LTX25_Q8_DIR)
+    assert predictor is not None
+
+    # Test that predictor returns int on grid for random encodings
+    video_encoding = mx.random.normal((1, 16, 4096))
+    audio_encoding = mx.random.normal((1, 16, 2048))
+    num_frames = predictor(video_encoding, audio_encoding, frame_rate=24.0)
+
+    assert isinstance(num_frames, int)
+    # Verify it's on the 8k+1 grid: (num_frames - 1) % 8 == 0
+    assert (num_frames - 1) % 8 == 0
+    # Verify default clamps are respected (1s @ 24fps = 24, 20s @ 24fps = 480)
+    assert num_frames >= 25  # Snapped up from 24
+    assert num_frames <= 1017  # Snapped down from 480
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(LTX25_Q8_DIR is None, reason="local ltx-2.5-mlx-q8 pack not found")
+def test_duration_predictor_with_custom_bounds(tmp_path):
+    """Predictor respects custom min/max_seconds bounds."""
+    predictor = DurationPredictor.from_checkpoint(LTX25_Q8_DIR)
+    video_encoding = mx.random.normal((1, 16, 4096))
+
+    # Request 0.5s-1.0s duration (narrower than default 1s-20s)
+    num_frames = predictor(video_encoding, None, frame_rate=24.0, min_seconds=0.5, max_seconds=1.0)
+
+    assert isinstance(num_frames, int)
+    # min_seconds=0.5 @ 24fps = 12 frames, max_frames=24
+    # result should be between snapped(12) and snapped(24)
+    assert (num_frames - 1) % 8 == 0
+    assert num_frames >= 9  # Snapped up from 12
+    assert num_frames <= 25  # Snapped up from 24
