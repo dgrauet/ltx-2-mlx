@@ -48,3 +48,32 @@ def test_decode_and_save_requires_recorded_frame_rate(tmp_path):
 
     with pytest.raises(RuntimeError, match="source_frame_rate"):
         _decode_and_save(pipe, object(), object(), args)
+
+
+def test_retake_cli_forwards_low_ram(monkeypatch):
+    """The retake/extend subcommands construct RetakePipeline with low_ram_streaming.
+
+    Upstream's RetakePipeline threads ``offload_mode`` into its stages; our
+    ``--low-ram`` is the MLX equivalent, so dropping the pass-through would
+    silently regress to full-weight loading (the 32 GB OOM class).
+    """
+    from ltx_pipelines_mlx.cli import _build_parser
+
+    parser = _build_parser()
+    for argv in (
+        ["retake", "-p", "x", "-o", "o.mp4", "--video", "v.mp4", "--start", "1", "--end", "2", "--low-ram"],
+        ["extend", "-p", "x", "-o", "o.mp4", "--video", "v.mp4", "--extend-frames", "4", "--low-ram"],
+    ):
+        args = parser.parse_args(argv)
+        assert args.low_ram is True
+
+    args = parser.parse_args(["retake", "-p", "x", "-o", "o.mp4", "--video", "v.mp4", "--start", "1", "--end", "2"])
+    assert args.low_ram is False
+
+
+def test_retake_pipeline_accepts_low_ram_streaming(tmp_path, monkeypatch):
+    from ltx_pipelines_mlx.retake import RetakePipeline
+
+    (tmp_path / "embedded_config.json").write_text('{"transformer": {}}')
+    pipe = RetakePipeline(model_dir=str(tmp_path), low_ram_streaming=True)
+    assert pipe.low_ram_streaming is True

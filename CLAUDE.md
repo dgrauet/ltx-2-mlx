@@ -797,6 +797,7 @@ LTX-2.3 bf16 distilled, 480x704x33: confirmed runs end-to-end on M2 Pro 32 GB. W
 - `a2v` (audio-to-video)
 - `keyframe` (interpolation)
 - `ic-lora` (control video conditioning, via bind-time LoRA fusion)
+- `retake` / `extend` (dev model + CFG; mirrors upstream RetakePipeline's `offload_mode`)
 
 Validated runs on M2 Pro 32 GB:
 - bf16 HQ at 480x704x97 (4 sec): 49:38 — would OOM without streaming.
@@ -1026,7 +1027,7 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
 | `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to `AutoDuration()` on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`; `--auto-duration MIN:MAX` overrides the clamp. Absent on 2.3 packs, where omitting `-f` now raises immediately (see "Auto-Duration" above) |
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
 | `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB) |
-| `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames; no `--low-ram` on these commands, so long/HD sources may exceed 32 GB) |
+| `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames). `--low-ram` wired (mirrors upstream `offload_mode`): 49-frame retake that OOM'd now peaks at 13.8 GB |
 | `ic-lora`, `hdr-ic-lora`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
 | `enhance` / `--enhance-prompt` | raises `NotImplementedError` (`_guard_enhance_not_gemma4`) — Gemma 3 only |
 | `--enable-teacache` | raises `ValueError` — 2.3 polynomial isn't calibrated for 2.5 |

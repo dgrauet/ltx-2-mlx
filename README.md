@@ -166,7 +166,7 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 | `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to an auto-predicted duration on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`; `--auto-duration MIN:MAX` overrides the clamp. Not available on 2.3 packs (no `DurationHead` weights); `-f` stays required there |
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
 | `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB) |
-| `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames; no `--low-ram` on these commands, so long/HD sources may exceed 32 GB) |
+| `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames). `--low-ram` wired (mirrors upstream `offload_mode`): 49-frame retake that OOM'd now peaks at 13.8 GB |
 | `ic-lora`, `hdr-ic-lora`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
 | `enhance` / `--enhance-prompt` | raises a clear error (Gemma 3-only) |
 | `--enable-teacache` | raises a clear error (not calibrated for 2.5) |

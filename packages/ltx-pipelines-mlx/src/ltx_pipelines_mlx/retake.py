@@ -73,6 +73,8 @@ class RetakePipeline(BasePipeline):
         model_dir: Path to model weights.
         gemma_model_id: Gemma model for text encoding.
         low_memory: Aggressive memory management.
+        low_ram_streaming: Stream transformer blocks from mmap'd safetensors
+            (``--low-ram``); mirrors upstream RetakePipeline's ``offload_mode``.
         dev_transformer: Dev transformer filename.
     """
 
@@ -81,9 +83,15 @@ class RetakePipeline(BasePipeline):
         model_dir: str,
         gemma_model_id: str = "mlx-community/gemma-3-12b-it-4bit",
         low_memory: bool = True,
+        low_ram_streaming: bool = False,
         dev_transformer: str = "transformer-dev.safetensors",
     ):
-        super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
+        super().__init__(
+            model_dir,
+            gemma_model_id=gemma_model_id,
+            low_memory=low_memory,
+            low_ram_streaming=low_ram_streaming,
+        )
         self._dev_transformer = dev_transformer
         # Source frame rate, recorded by _encode_source_video so CLI-level
         # decode helpers can forward it to _decode_and_save_video without

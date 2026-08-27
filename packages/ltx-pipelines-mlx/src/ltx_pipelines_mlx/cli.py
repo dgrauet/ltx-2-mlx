@@ -235,7 +235,7 @@ def _add_generation_args(parser: argparse.ArgumentParser, *, frames_default: int
             "transformer peak Metal ~75%% (e.g. q8 ~10-12 GB -> ~2.8 GB). "
             "Targets 16 GB Macs (q8) and 32 GB Macs (bf16). Supported "
             "on generate (one-stage / --two-stage / --two-stages-hq), a2v, "
-            "keyframe, and ic-lora. Compatible with generate's --lora flag "
+            "keyframe, ic-lora, retake, and extend. Compatible with generate's --lora flag "
             "via per-block BlockLoraSource bind-time fusion. Two-stage at "
             "LoRA strength 1.0 swaps to the pre-fused "
             "transformer-distilled.safetensors at the stage 1->2 transition; "
@@ -502,6 +502,11 @@ examples:
         "--stg-scale", type=float, default=None, help="STG guidance scale (default: 1.0 — upstream LTX_2_3_PARAMS)"
     )
     ret.add_argument("--no-regen-audio", action="store_true", help="Preserve original audio (don't regenerate)")
+    ret.add_argument(
+        "--low-ram",
+        action="store_true",
+        help="Stream transformer blocks from mmap'd safetensors (see generate --low-ram)",
+    )
 
     # --- extend ---
     ext = sub.add_parser("extend", help="[beta] Add frames before or after an existing video")
@@ -509,6 +514,11 @@ examples:
     ext.add_argument("--video", "-v", required=True, help="Source video file")
     ext.add_argument("--extend-frames", type=int, required=True, help="Number of latent frames to add")
     ext.add_argument("--direction", choices=["before", "after"], default="after", help="Direction (default: after)")
+    ext.add_argument(
+        "--low-ram",
+        action="store_true",
+        help="Stream transformer blocks from mmap'd safetensors (see generate --low-ram)",
+    )
     ext.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 30)")
     ext.add_argument("--cfg-scale", type=float, default=None, help="CFG guidance scale (default: 3.0)")
     ext.add_argument(
@@ -1102,7 +1112,11 @@ def _cmd_retake(args: argparse.Namespace) -> None:
         print("Mode: Retake")
         print(f"Video: {args.video}, frames {args.start}-{args.end}")
 
-    pipe = RetakePipeline(model_dir=args.model, gemma_model_id=args.gemma)
+    pipe = RetakePipeline(
+        model_dir=args.model,
+        gemma_model_id=args.gemma,
+        low_ram_streaming=getattr(args, "low_ram", False),
+    )
     pipe.verbose = not args.quiet
     pipe.stepwise = _build_stepwise(args)
     kwargs: dict = dict(
@@ -1140,7 +1154,11 @@ def _cmd_extend(args: argparse.Namespace) -> None:
         print(f"Mode: Extend ({args.direction})")
         print(f"Video: {args.video}, +{args.extend_frames} latent frames")
 
-    pipe = RetakePipeline(model_dir=args.model, gemma_model_id=args.gemma)
+    pipe = RetakePipeline(
+        model_dir=args.model,
+        gemma_model_id=args.gemma,
+        low_ram_streaming=getattr(args, "low_ram", False),
+    )
     pipe.verbose = not args.quiet
     pipe.stepwise = _build_stepwise(args)
     kwargs: dict = dict(
