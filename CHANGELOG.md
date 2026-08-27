@@ -10,6 +10,39 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.23...v0.15.0) (2026-08-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **pipelines:** `generate`'s implicit -f 97 default is gone on LTX-2.3 packs. Without a DurationHead-equipped checkpoint (2.3), num_frames must now be passed explicitly (via -f) or generation raises immediately; LTX-2.5 packs auto-predict duration from the prompt when -f is omitted.
+* **pipelines:** two-stage and two-stages-hq audio output changes for the same seed (2.3 included); the two-stage baselines must be re-recorded.
+* **core:** versioned DiT config — read the 2.5 fields from the checkpoint ([#101](https://github.com/dgrauet/ltx-2-mlx/issues/101))
+
+### Features
+
+* **core:** load the 2.5 conv video VAE pair by pack evidence ([#105](https://github.com/dgrauet/ltx-2-mlx/issues/105)) ([2a2e1b2](https://github.com/dgrauet/ltx-2-mlx/commit/2a2e1b29ff2b395f23e9967e43e9c828334dbfb8))
+* **core:** port the euler-ancestral sampler and the 2.5 sigma tables ([#103](https://github.com/dgrauet/ltx-2-mlx/issues/103)) ([e3cd8cb](https://github.com/dgrauet/ltx-2-mlx/commit/e3cd8cbb0e5ad4759238522d068f2f8007045cba))
+* **core:** vendor the Gemma-4 text tower and key the encoder off the checkpoint ([#104](https://github.com/dgrauet/ltx-2-mlx/issues/104)) ([0459f0a](https://github.com/dgrauet/ltx-2-mlx/commit/0459f0ab25dd5a3b2676b6c14b49992d822779a4))
+* **core:** versioned DiT config — read the 2.5 fields from the checkpoint ([#101](https://github.com/dgrauet/ltx-2-mlx/issues/101)) ([83a7011](https://github.com/dgrauet/ltx-2-mlx/commit/83a70112ef1fb144181656934893eab5d610c8b4))
+* **pipelines:** auto-predicted duration via the LTX-2.5 DurationHead ([#112](https://github.com/dgrauet/ltx-2-mlx/issues/112)) ([8fff273](https://github.com/dgrauet/ltx-2-mlx/commit/8fff27307c9930f5c1413ccaa50bd2dc7d25d22f))
+* **pipelines:** validate keyframe interpolation on LTX-2.5 packs ([#110](https://github.com/dgrauet/ltx-2-mlx/issues/110)) ([0f70ec3](https://github.com/dgrauet/ltx-2-mlx/commit/0f70ec3801ee5e38e9c3a9251c289e1bc3e1b7f7))
+* **pipelines:** wire the distilled pipeline for LTX-2.5 packs ([#106](https://github.com/dgrauet/ltx-2-mlx/issues/106)) ([ab33200](https://github.com/dgrauet/ltx-2-mlx/commit/ab33200b17623e4e7024c1cf53a35b8e1b9af55c))
+* **pipelines:** wire the two-stage dev+CFG pipeline for LTX-2.5 packs ([#107](https://github.com/dgrauet/ltx-2-mlx/issues/107)) ([dd23aff](https://github.com/dgrauet/ltx-2-mlx/commit/dd23aff436c14698d649e4c0a35cd7d0b6b75efa))
+
+
+### Bug Fixes
+
+* **cli:** forward the source frame rate in the retake/extend decode helper ([#113](https://github.com/dgrauet/ltx-2-mlx/issues/113)) ([add0142](https://github.com/dgrauet/ltx-2-mlx/commit/add0142ece318bb09ad4bf295214724859fb241b))
+* **pipelines:** keep stage-1 audio in the two-stage pipelines, matching upstream ([#108](https://github.com/dgrauet/ltx-2-mlx/issues/108)) ([c6dd5b9](https://github.com/dgrauet/ltx-2-mlx/commit/c6dd5b94f3f5028d7a66b15d56a8e60374a2b53e))
+
+
+### Documentation
+
+* mark --two-stages-hq as supported on LTX-2.5 packs ([#109](https://github.com/dgrauet/ltx-2-mlx/issues/109)) ([a4825db](https://github.com/dgrauet/ltx-2-mlx/commit/a4825db99be7c5a934ac69356ebab495f4d29a65))
+* mark a2v as supported on LTX-2.5 packs ([#111](https://github.com/dgrauet/ltx-2-mlx/issues/111)) ([a7124e9](https://github.com/dgrauet/ltx-2-mlx/commit/a7124e96492469251c879b7606b97c73e0e9965d))
+* mark retake and extend as supported on LTX-2.5 packs ([#114](https://github.com/dgrauet/ltx-2-mlx/issues/114)) ([15b0dec](https://github.com/dgrauet/ltx-2-mlx/commit/15b0dec26bbb96b23817fb60a641a3c729c406b8))
+
 ## [0.14.23](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.22...v0.14.23) (2026-08-23)
 
 
