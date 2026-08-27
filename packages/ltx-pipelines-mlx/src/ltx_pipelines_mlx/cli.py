@@ -1406,9 +1406,13 @@ def _decode_and_save(
         pipe._loaded = False
         aggressive_cleanup()
 
-    # Load decoders on-demand and decode+save
+    # Load decoders on-demand and decode+save. The source frame rate was
+    # recorded by _encode_source_video; _decode_and_save_video requires it
+    # (keyword-only since the v0.14.0 frame_rate audit).
+    if pipe.source_frame_rate is None:
+        raise RuntimeError("source_frame_rate was never recorded; encode the source video first")
     pipe._load_decoders()
-    pipe._decode_and_save_video(video_latent, audio_latent, args.output)
+    pipe._decode_and_save_video(video_latent, audio_latent, args.output, frame_rate=pipe.source_frame_rate)
 
 
 def _guard_enhance_not_gemma4(gemma_path: str) -> None:

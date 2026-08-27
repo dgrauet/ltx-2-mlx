@@ -85,6 +85,10 @@ class RetakePipeline(BasePipeline):
     ):
         super().__init__(model_dir, gemma_model_id=gemma_model_id, low_memory=low_memory)
         self._dev_transformer = dev_transformer
+        # Source frame rate, recorded by _encode_source_video so CLI-level
+        # decode helpers can forward it to _decode_and_save_video without
+        # re-probing the file.
+        self.source_frame_rate: float | None = None
 
     def _encode_source_video(
         self,
@@ -146,6 +150,7 @@ class RetakePipeline(BasePipeline):
             frame_rate=info.fps,
             num_frames=vae_compatible_frames,
         )
+        self.source_frame_rate = meta.frame_rate
         return video_latent, audio_latent, meta
 
     def retake_from_video(
