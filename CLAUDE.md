@@ -184,8 +184,8 @@ LTX-2.5 packs (same variant semantics; carry the Gemma-4 text tower, conv VAE pa
 
 | Variant | HuggingFace | Size | Notes |
 |---------|-------------|------|-------|
-| bf16 | [dgrauet/ltx-2.5-mlx](https://huggingface.co/dgrauet/ltx-2.5-mlx) | ~131GB | Full precision (dev + distilled + Gemma-4 in bf16); needs `--low-ram` on 32GB |
-| int8 | [dgrauet/ltx-2.5-mlx-q8](https://huggingface.co/dgrauet/ltx-2.5-mlx-q8) | ~70GB | Recommended; validated e2e on all 2.5 pipelines |
+| bf16 | [dgrauet/ltx-2.5-mlx](https://huggingface.co/dgrauet/ltx-2.5-mlx) | ~120GB | Full precision (dev + distilled + Gemma-4 in bf16); needs `--low-ram` on 32GB |
+| int8 | [dgrauet/ltx-2.5-mlx-q8](https://huggingface.co/dgrauet/ltx-2.5-mlx-q8) | ~75GB | Recommended; validated e2e on all 2.5 pipelines |
 | int4 | [dgrauet/ltx-2.5-mlx-q4](https://huggingface.co/dgrauet/ltx-2.5-mlx-q4) | ~47GB | Lower quality; validated (contracts + deterministic distilled render, ~97s/render) |
 
 ### MLX Layout Conventions
