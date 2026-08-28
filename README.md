@@ -4,7 +4,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 
 ## Features
 
-- **LTX-2.5 (early support)** — `generate --distilled --model <2.5-pack-dir>`; auto-detected from the pack, no new flag. See [LTX-2.5 section](#ltx-25-early-support) for what's supported in v1.
+- **LTX-2.5** — full pipeline coverage on 2.5 packs (`--distilled`, `--two-stage`, `--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend`), auto-detected from the pack (no new flag), plus **auto-predicted duration** via the DurationHead (omit `-f`, or clamp with `--auto-duration MIN:MAX`). Only the IC-LoRA family waits on official 2.5 task LoRAs. See [LTX-2.5 section](#ltx-25).
 - **Text-to-Video** — generate video + stereo 48kHz audio from a text prompt
 - **Image-to-Video** — animate a reference image
 - **Audio-to-Video** — generate video conditioned on an audio track
@@ -18,9 +18,9 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **Prompt Relay** — sequence local prompts over time within one generation (`--segment "text" [LEN]`); a training-free Gaussian penalty gates each prompt's tokens to a slice of the timeline via the video→text cross-attention. Works across all generate modes; on CFG modes the mask applies to the conditional pass only.
 - **Prompt enhancement** — Gemma 3 12B rewrites short prompts into detailed descriptions
 - **Training** — LoRA fine-tuning with flow matching (T2V and V2V strategies)
-- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers generate / `--two-stage` / `--two-stages-hq` / a2v / keyframe / ic-lora; bind-time LoRA fusion supports custom distilled-lora-strength)
+- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers generate / `--two-stage` / `--two-stages-hq` / a2v / keyframe / ic-lora / retake / extend; bind-time LoRA fusion supports custom distilled-lora-strength)
 - **Modality tiling (`--tile-frames N --tile-spatial M`)** — split video tokens into spatial+temporal tiles to cap O(N²) attention activations. Combined with `--low-ram`, unblocks long / HD / 4K generations on Mac Studio (64-128 GB) that would otherwise OOM.
-- **3 model variants** — bf16, int8, int4 (fits 16GB–64GB Macs)
+- **6 model packs** — bf16 / int8 / int4 for each of LTX-2.3 and LTX-2.5 (fits 16GB–64GB Macs)
 - **3 upsamplers** — spatial 2x, spatial 1.5x, temporal 2x
 
 > **Production readiness**: pipelines are classified as Stable / Beta /
@@ -119,7 +119,7 @@ ltx-2-mlx generate -p "1080p scene" --two-stages-hq --low-ram -f 97 \
 ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q8
 ```
 
-## LTX-2.5 (early support)
+## LTX-2.5
 
 ```bash
 ltx-2-mlx generate --distilled --model /path/to/ltx-2.5-mlx-q8 \
@@ -173,8 +173,8 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 | Modality tiling, Prompt Relay | validated on 2.3 only |
 | Diffusion (`DiffVAEMode`) VAE decoder | not loaded — conv decoder used |
 
-Further 2.5 pipelines (a2v, keyframe, ic-lora, ...) land in
-subsequent releases.
+The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once
+Lightricks publishes the official 2.5 task IC-LoRAs.
 
 ### Python API
 

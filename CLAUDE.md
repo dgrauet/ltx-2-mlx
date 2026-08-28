@@ -8,7 +8,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2/) (Lightricks) for 
 - **ltx-pipelines-mlx** (`ltx_pipelines_mlx`) — generation pipelines: T2V, I2V, retake, extend, keyframe, IC-LoRA, two-stage
 - **ltx-trainer** (`ltx_trainer_mlx`) - ltx-2 training, democratized.
 
-Loads pre-converted MLX weights from the [LTX-2.3 MLX collection on HuggingFace](https://huggingface.co/collections/dgrauet/ltx-23). Weight conversion is handled by [mlx-forge](https://github.com/dgrauet/mlx-forge).
+Loads pre-converted MLX weights from the [LTX-2.3](https://huggingface.co/collections/dgrauet/ltx-23) and [LTX 2.5](https://huggingface.co/collections/dgrauet/ltx-25-6a90c410ff65a75f8aeae402) MLX collections on HuggingFace. Weight conversion is handled by [mlx-forge](https://github.com/dgrauet/mlx-forge).
 
 ---
 
@@ -942,7 +942,7 @@ End-to-end run on M2 Pro 32 GB, dev model + HDR LoRA fused, q8:
 
 ---
 
-## LTX-2.5 (Early Support)
+## LTX-2.5
 
 `generate --distilled --model <2.5-pack-dir>` runs end-to-end on a local
 LTX-2.5 pack. No new CLI flag — generation is auto-detected from the pack's
@@ -1042,8 +1042,8 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
 | Modality tiling, Prompt Relay | validated on 2.3 only |
 | Diffusion (`DiffVAEMode`) VAE decoder | not loaded — conv `vae_decoder_conv` used (see Weight Format) |
 
-Further 2.5 pipelines (a2v, keyframe, ic-lora, ...) land in
-subsequent releases behind the same pack-evidence detection.
+The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once
+Lightricks publishes the official 2.5 task IC-LoRAs.
 
 ### Key Files
 
