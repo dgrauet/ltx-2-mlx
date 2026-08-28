@@ -10,6 +10,19 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.1](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.0...v0.15.1) (2026-08-28)
+
+
+### Features
+
+* **pipelines:** wire --low-ram block streaming into retake and extend ([#115](https://github.com/dgrauet/ltx-2-mlx/issues/115)) ([99c9c7f](https://github.com/dgrauet/ltx-2-mlx/commit/99c9c7f124d3a56b5bfd63ebb8e96cf76cc7cd0a))
+
+
+### Documentation
+
+* add the LTX-2.5 pack variants table (bf16 / q8 / q4) ([#117](https://github.com/dgrauet/ltx-2-mlx/issues/117)) ([09c1c78](https://github.com/dgrauet/ltx-2-mlx/commit/09c1c78e0194fb5bdf0b10e8171bb2e2b270dfa1))
+* reflect the completed LTX-2.5 coverage across README and CLAUDE.md ([#118](https://github.com/dgrauet/ltx-2-mlx/issues/118)) ([62499a4](https://github.com/dgrauet/ltx-2-mlx/commit/62499a456612710f556cabeaf8bc58b99316a52b))
+
 ## [0.15.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.14.23...v0.15.0) (2026-08-27)
 
 

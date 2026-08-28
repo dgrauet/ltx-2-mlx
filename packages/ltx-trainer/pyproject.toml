@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ltx-trainer-mlx"
-version = "0.15.0"
+version = "0.15.1"
 description = "LTX-2 training toolkit ported to MLX for Apple Silicon"
 license = "MIT"
 requires-python = ">=3.11"
