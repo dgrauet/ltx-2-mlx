@@ -13,6 +13,16 @@ stability guarantees.
 ## [0.15.2](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.1...v0.15.2) (2026-08-29)
 
 
+### Features
+
+* AdaLN per-token sigma-dedupe + lazy per-block gather — multi-GB activation-memory cut on conditioned runs, bitwise-identical by construction ([#86](https://github.com/dgrauet/ltx-2-mlx/issues/86)) ([24f8aa8](https://github.com/dgrauet/ltx-2-mlx/commit/24f8aa8339688d6d6006e262bdcdbe64db1203a6)). Contributed by [@mrbizarro](https://github.com/mrbizarro). Opt-out switches: `LTX2_ADALN_DEDUPE=0`, `LTX2_ADALN_LAZY=0`.
+
+
+### Dependencies
+
+* bump mlx 0.31.1 → 0.32.2 ([#85](https://github.com/dgrauet/ltx-2-mlx/issues/85)) ([7a8aba2](https://github.com/dgrauet/ltx-2-mlx/commit/7a8aba21d2ca95e5a7abf12f93f2ba3216e3fb5c)). Contributed by [@plz12345](https://github.com/plz12345).
+
+
 ### Bug Fixes
 
 * **core:** keep bitwise AdaLN comparisons below the M1 Metal reduction limit ([#121](https://github.com/dgrauet/ltx-2-mlx/issues/121)) ([5627990](https://github.com/dgrauet/ltx-2-mlx/commit/5627990b4055883c4217a47d765e4a9e51963aa7))
