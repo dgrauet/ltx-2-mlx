@@ -358,18 +358,7 @@ class StreamingLTXModel(nn.Module):
             # perturbations are active. This loses the compile speedup
             # but the eager block's per-step latency is dominated by
             # attention compute, so the regression is small (~5-10%).
-            #
-            # The lazy AdaLN carrier (``PerTokenAdaLNParams``) is the same
-            # class of non-tree argument: it only ever reaches the blocks
-            # when per-token timesteps are in play AND the dedupe+lazy
-            # pair is enabled, so gate on exactly that. The eager block
-            # keeps the lazy memory cut; only the compile speedup is
-            # forfeited on those steps.
-            from ltx_core_mlx.model.transformer import model as _model_mod
-
-            per_token = kwargs.get("video_timesteps") is not None or kwargs.get("audio_timesteps") is not None
-            lazy_carrier_possible = _model_mod._ADALN_DEDUPE and _model_mod._ADALN_LAZY
-            use_compiled = kwargs.get("perturbations") is None and not (per_token and lazy_carrier_possible)
+            use_compiled = kwargs.get("perturbations") is None
 
             def provider(idx: int) -> nn.Module:
                 streamer.bind(
