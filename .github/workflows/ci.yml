@@ -55,6 +55,9 @@ jobs:
 
   test:
     runs-on: macos-14
+    # A wedged Metal command buffer on the M1 runners once burned the full 6 h
+    # default; the suite normally finishes in ~2 min.
+    timeout-minutes: 45
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -69,7 +72,9 @@ jobs:
       - name: Type-check with ty
         run: uv run ty check
         continue-on-error: true
-      - run: uv run pytest tests/ -v -m "not slow" --tb=short
+      # faulthandler_timeout dumps all thread stacks if any single test
+      # exceeds 10 min, so a GPU-side hang leaves a usable trace in the log.
+      - run: uv run pytest tests/ -v -m "not slow" --tb=short -o faulthandler_timeout=600
 
   # Lints the pull request TITLE, not the individual commits.
   #
