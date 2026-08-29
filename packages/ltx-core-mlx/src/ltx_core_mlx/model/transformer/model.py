@@ -84,8 +84,13 @@ _ADALN_DEDUPE_MIN_ROWS = int(_os.environ.get("LTX2_ADALN_DEDUPE_MIN_ROWS", "1024
 _ADALN_DEDUPE_MAX_FRAC = float(_os.environ.get("LTX2_ADALN_DEDUPE_MAX_FRAC", "0.5"))
 # Candidate padded row counts, cheapest first. 0 = "use the unique rows as-is".
 _ADALN_DEDUPE_PADS = (0, 256, 1024, 4096)
-# Chunk size (rows) for the one-time bitwise verification, to bound peak memory.
-_ADALN_VERIFY_CHUNK = 2048
+# Chunk size (rows) for the one-time bitwise verification. Bounds peak memory,
+# and -- decisive -- keeps every equality reduction far below the size where
+# Metal all-reductions become unreliable on M1-family GPUs (mlx 0.32.2
+# mis-reduces `mx.all`/`mx.array_equal` above ~2^27 elements there, in BOTH
+# directions: spurious False on equal arrays and spurious True on unequal
+# ones). 256 rows x 9*4096 columns = 9.4M elements per comparison.
+_ADALN_VERIFY_CHUNK = 256
 
 # The dedupe plan (signature -> padded row count, or None once proven not
 # bit-identical) lives ON each AdaLayerNormSingle instance, never in a module
