@@ -382,7 +382,22 @@ class StreamingLTXModel(nn.Module):
                 return compiled if use_compiled else shared
 
             kwargs["block_provider"] = provider
-        return self.inner(*args, **kwargs)
+        # The lazy AdaLN carrier (``PerTokenAdaLNParams``) is a non-tree
+        # argument, so it cannot cross the compiled block -- and the compiled
+        # block is load-bearing here: it is what keeps 48 per-block syncs
+        # under the Metal watchdog (see the module docstring). Rather than
+        # falling back to the eager block (forfeiting that protection), keep
+        # the GEMM dedupe but materialise its result eagerly for the duration
+        # of this forward: the lazy activation cut is forfeited under
+        # streaming, the watchdog/compile properties are not.
+        from ltx_core_mlx.model.transformer import model as _model_mod
+
+        lazy_prev = _model_mod._ADALN_LAZY
+        _model_mod._ADALN_LAZY = False
+        try:
+            return self.inner(*args, **kwargs)
+        finally:
+            _model_mod._ADALN_LAZY = lazy_prev
 
     def __getattr__(self, name: str):
         try:

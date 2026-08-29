@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 import numpy as np
+import pytest
 
 from ltx_core_mlx.model.transformer import model as model_mod
 from ltx_core_mlx.model.transformer.adaln import AdaLayerNormSingle, PerTokenAdaLNParams
@@ -267,25 +268,6 @@ def test_scalar_and_per_token_unpack_paths_still_work() -> None:
     assert len(out) == 9 and out[0].shape == (2, 7, 32)
 
 
-if __name__ == "__main__":
-    import time
-    import traceback
-
-    failures = 0
-    for name, fn in sorted(globals().items()):
-        if not name.startswith("test_") or not callable(fn):
-            continue
-        t0 = time.time()
-        try:
-            fn()
-            print(f"PASS  {name}  ({time.time() - t0:.1f}s)")
-        except Exception:
-            failures += 1
-            print(f"FAIL  {name}  ({time.time() - t0:.1f}s)")
-            traceback.print_exc()
-    raise SystemExit(1 if failures else 0)
-
-
 def test_verdict_does_not_transport_between_modules() -> None:
     """The M1-CI bug class (#86 review): a verdict earned by one module's
     weights must never be reused by a same-shaped module with other weights.
@@ -299,6 +281,9 @@ def test_verdict_does_not_transport_between_modules() -> None:
     mod_b = _module(4096, 9, seed=2)
 
     LTXModel._adaln_per_token(None, mod_a, t_emb)  # calibrates A
+    probe_a, _ = LTXModel._adaln_per_token(None, mod_a, t_emb)
+    if not isinstance(probe_a, PerTokenAdaLNParams):
+        pytest.skip("calibration rejects the shrunken GEMM on this hardware; transport is moot")
     params_b, _ = LTXModel._adaln_per_token(None, mod_b, t_emb)
     assert not isinstance(params_b, PerTokenAdaLNParams), (
         "module B skipped its own calibration: verdict transported from module A"
@@ -319,3 +304,22 @@ def test_plan_never_reaches_module_parameters() -> None:
     assert "_adaln_dedupe_plan" in mod.__dict__, "plan was never created"
     leaked = [k for k, _ in tree_flatten(mod.parameters()) if "dedupe" in k]
     assert leaked == [], f"plan leaked into parameters(): {leaked}"
+
+
+if __name__ == "__main__":
+    import time
+    import traceback
+
+    failures = 0
+    for name, fn in sorted(globals().items()):
+        if not name.startswith("test_") or not callable(fn):
+            continue
+        t0 = time.time()
+        try:
+            fn()
+            print(f"PASS  {name}  ({time.time() - t0:.1f}s)")
+        except Exception:
+            failures += 1
+            print(f"FAIL  {name}  ({time.time() - t0:.1f}s)")
+            traceback.print_exc()
+    raise SystemExit(1 if failures else 0)

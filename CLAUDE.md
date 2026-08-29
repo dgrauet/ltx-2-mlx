@@ -1071,6 +1071,22 @@ LTX-2 mitigates both by inserting `mx.eval` at strategic points so each command 
 
 Mac Studio / M-series Ultra users who have never seen a watchdog crash may recover full lazy-graph pipelining by setting `LTX2_GEMMA_EVAL_EVERY=0` and `LTX2_DIT_EVAL_EVERY=0`. This disables all eval guards and restores maximum throughput at the cost of watchdog safety on machines where those guards were needed.
 
+### AdaLN dedupe switches (per-token timesteps only)
+
+The per-token AdaLN path deduplicates identical sigma rows into one shrunken
+GEMM (bitwise-verified per module by a one-time calibration; the calibrating
+call returns the exact reference) and defers the per-token gather into the
+blocks. Both are on by default and bit-identical by construction:
+
+- `LTX2_ADALN_DEDUPE=0` — disable the dedupe entirely.
+- `LTX2_ADALN_LAZY=0` — keep the dedupe but materialise the gather eagerly
+  (the `--low-ram` streamer does this automatically: the lazy carrier cannot
+  cross the compiled block, and the compiled block is what keeps the 48
+  per-block syncs under the Metal watchdog).
+- `LTX2_ADALN_DEDUPE_MIN_ROWS` (default 1024), `LTX2_ADALN_DEDUPE_MAX_FRAC`
+  (default 0.5) — thresholds below/above which the dedupe is not attempted.
+- `LTX2_ADALN_DEDUPE_DEBUG=1` — log calibration verdicts.
+
 ### `LTX2_GEMMA_MAX_LENGTH`
 
 Caps the padded Gemma sequence length (default `1024`). Reducing to `512` halves Gemma forward time but **shifts left-padded RoPE positions away from the LTX training distribution** — quality risk. Use only as a last resort on heavily contended systems.
