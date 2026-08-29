@@ -87,17 +87,37 @@ _ADALN_DEDUPE_PADS = (0, 256, 1024, 4096)
 # Chunk size (rows) for the one-time bitwise verification, to bound peak memory.
 _ADALN_VERIFY_CHUNK = 2048
 
-# signature -> padded row count to use, or None once proven not bit-identical.
-_ADALN_DEDUPE_PLAN: dict[tuple, int | None] = {}
+# The dedupe plan (signature -> padded row count, or None once proven not
+# bit-identical) lives ON each AdaLayerNormSingle instance, never in a module
+# global. Bit-equality between the shrunken and full GEMM is only evidence
+# about the kernel pair exercised with *this module's weights*; a verdict
+# earned by one module must not be transported to another whose weights (or
+# very identity) differ. A global plan did exactly that and broke bit-identity
+# on M1 CI while passing on newer chips (#86 review). Plain dict of
+# primitives: MLX's Module tree operations only traverse array/Module values,
+# so the plan never appears in parameters() or load_weights contracts.
+
+
+def _dedupe_plan_of(adaln_module: AdaLayerNormSingle) -> dict[tuple, int | None]:
+    """Return the module's own calibration plan, creating it on first use."""
+    plan = adaln_module.__dict__.get("_adaln_dedupe_plan")
+    if plan is None:
+        plan = {}
+        adaln_module.__dict__["_adaln_dedupe_plan"] = plan
+    return plan
 
 
 def _adaln_signature(adaln_module: AdaLayerNormSingle, flat: mx.array, padded_rows: int) -> tuple:
-    """Shape/dtype signature that determines MLX kernel selection.
+    """Per-module shape/dtype signature for the calibration verdict.
 
-    Kernel choice depends on shapes, dtypes and strides -- never on values --
-    so a verdict established once for a signature holds for every later call
-    with the same signature. ``padded_rows`` is part of the signature because
-    it is the row count of the *shrunken* GEMM being validated.
+    A verdict certifies bit-equality between the shrunken and the full GEMM
+    *for this module's weights* at these shapes. Agreement across M x 36864
+    float32 outputs is overwhelming evidence that the same kernel pair (and
+    reduction order) was exercised -- in which case equality is universal for
+    every input -- but that reasoning is only sound while the GEMM it was
+    established on does not change, which is why the plan lives on the module
+    (see ``_dedupe_plan_of``) and ``padded_rows`` -- the row count of the
+    shrunken GEMM being validated -- is part of the key.
     """
     lin = adaln_module.linear
     w = lin.weight
@@ -215,7 +235,7 @@ def _dedupe_adaln(adaln_module: AdaLayerNormSingle, flat: mx.array) -> tuple[mx.
     pending: list[tuple[int, tuple]] = []
     for rows in _candidate_rows(u, m):
         sig = _adaln_signature(adaln_module, flat, rows)
-        verdict = _ADALN_DEDUPE_PLAN.get(sig, -1)
+        verdict = _dedupe_plan_of(adaln_module).get(sig, -1)
         if verdict is None:
             continue  # already proven not bit-identical -- try a larger padding
         if verdict == -1:
@@ -258,7 +278,7 @@ def _calibrate_adaln_dedupe(
 
     Returns the *reference* (full-size) result, so the calibrating call is
     exact by construction. Records a verdict per candidate in
-    ``_ADALN_DEDUPE_PLAN``.
+    the module's own dedupe plan (see ``_dedupe_plan_of``).
     """
     debug = bool(_os.environ.get("LTX2_ADALN_DEDUPE_DEBUG"))
     ref_params, ref_embedded = adaln_module(flat)
@@ -270,7 +290,7 @@ def _calibrate_adaln_dedupe(
         ok = _gathered_equals(params_u, inv, ref_params) and _gathered_equals(embedded_u, inv, ref_embedded)
         del params_u, embedded_u
         mx.clear_cache()
-        _ADALN_DEDUPE_PLAN[sig] = rows if ok else None
+        _dedupe_plan_of(adaln_module)[sig] = rows if ok else None
         if debug:
             print(
                 f"[adaln-dedupe] tokens={sig[0]} nparams={sig[3]} unique={u} gemm_rows={rows} -> "

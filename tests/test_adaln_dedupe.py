@@ -174,6 +174,9 @@ def _assert_unpack_identical(dim: int, num_params: int, pattern: str, batch: int
     t_emb = _embed(_pattern(pattern, batch, tokens))
     label = f"{dim}/{num_params}/{pattern}/{batch}x{tokens}"
 
+    # The plan lives on the module and the calibrating (first) call returns
+    # the exact reference, not a carrier -- warm it up, then exercise dedupe.
+    LTXModel._adaln_per_token(None, mod, t_emb)
     lazy_params, _ = LTXModel._adaln_per_token(None, mod, t_emb)
     assert isinstance(lazy_params, PerTokenAdaLNParams), f"{label}: expected a deferred-gather carrier"
     assert lazy_params.shape == (batch, tokens, num_params * dim), f"{label}: carrier reports {lazy_params.shape}"
@@ -207,7 +210,9 @@ def test_lazy_unpack_is_bit_identical() -> None:
 def test_lazy_carrier_holds_only_the_distinct_rows() -> None:
     """The whole point: what survives the call is a handful of rows, not B*N."""
     mod = _module(4096, 9, seed=21)
-    params, embedded = LTXModel._adaln_per_token(None, mod, _embed(_pattern("two", 1, 20000)))
+    t_emb = _embed(_pattern("two", 1, 20000))
+    LTXModel._adaln_per_token(None, mod, t_emb)  # calibrating call returns the reference
+    params, embedded = LTXModel._adaln_per_token(None, mod, t_emb)
     assert isinstance(params, PerTokenAdaLNParams)
     assert isinstance(embedded, PerTokenAdaLNParams)
     assert params.unique_rows == 2, f"expected 2 distinct rows, got {params.unique_rows}"
@@ -279,3 +284,38 @@ if __name__ == "__main__":
             print(f"FAIL  {name}  ({time.time() - t0:.1f}s)")
             traceback.print_exc()
     raise SystemExit(1 if failures else 0)
+
+
+def test_verdict_does_not_transport_between_modules() -> None:
+    """The M1-CI bug class (#86 review): a verdict earned by one module's
+    weights must never be reused by a same-shaped module with other weights.
+
+    Both modules share every signature component; only the weights differ.
+    Each must go through its own calibrating call (reference output, no
+    carrier) before its own dedupe kicks in.
+    """
+    t_emb = _embed(_pattern("two", 1, 4096))
+    mod_a = _module(4096, 9, seed=1)
+    mod_b = _module(4096, 9, seed=2)
+
+    LTXModel._adaln_per_token(None, mod_a, t_emb)  # calibrates A
+    params_b, _ = LTXModel._adaln_per_token(None, mod_b, t_emb)
+    assert not isinstance(params_b, PerTokenAdaLNParams), (
+        "module B skipped its own calibration: verdict transported from module A"
+    )
+    params_b2, _ = LTXModel._adaln_per_token(None, mod_b, t_emb)
+    assert isinstance(params_b2, PerTokenAdaLNParams), "module B never calibrated"
+
+
+def test_plan_never_reaches_module_parameters() -> None:
+    """The per-module plan is bookkeeping, not state: parameters() and the
+    weight-loading contracts must not see it."""
+    from mlx.utils import tree_flatten
+
+    mod = _module(2048, 4, seed=3)
+    t_emb = _embed(_pattern("two", 1, 4096))
+    LTXModel._adaln_per_token(None, mod, t_emb)
+    LTXModel._adaln_per_token(None, mod, t_emb)
+    assert "_adaln_dedupe_plan" in mod.__dict__, "plan was never created"
+    leaked = [k for k, _ in tree_flatten(mod.parameters()) if "dedupe" in k]
+    assert leaked == [], f"plan leaked into parameters(): {leaked}"
