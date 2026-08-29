@@ -10,6 +10,14 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.2](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.1...v0.15.2) (2026-08-29)
+
+
+### Bug Fixes
+
+* **core:** keep bitwise AdaLN comparisons below the M1 Metal reduction limit ([#121](https://github.com/dgrauet/ltx-2-mlx/issues/121)) ([5627990](https://github.com/dgrauet/ltx-2-mlx/commit/5627990b4055883c4217a47d765e4a9e51963aa7))
+* **core:** run the plain AdaLN path under streaming, not dedupe-without-lazy ([#119](https://github.com/dgrauet/ltx-2-mlx/issues/119)) ([4d60fc9](https://github.com/dgrauet/ltx-2-mlx/commit/4d60fc92bc141b681703e1ab3b5c6f6ee1497ed6))
+
 ## [0.15.1](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.0...v0.15.1) (2026-08-28)
 
 
