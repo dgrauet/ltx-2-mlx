@@ -94,8 +94,10 @@ _ADALN_VERIFY_CHUNK = 2048
 # earned by one module must not be transported to another whose weights (or
 # very identity) differ. A global plan did exactly that and broke bit-identity
 # on M1 CI while passing on newer chips (#86 review). Plain dict of
-# primitives: MLX's Module tree operations only traverse array/Module values,
-# so the plan never appears in parameters() or load_weights contracts.
+# primitives, stored via ``module.__dict__`` on purpose: that BYPASSES
+# ``nn.Module.__setattr__`` (which would route a dict into the module tree and
+# expose it to tree traversals). Never assign the plan with plain attribute
+# syntax.
 
 
 def _dedupe_plan_of(adaln_module: AdaLayerNormSingle) -> dict[tuple, int | None]:
@@ -110,14 +112,16 @@ def _dedupe_plan_of(adaln_module: AdaLayerNormSingle) -> dict[tuple, int | None]
 def _adaln_signature(adaln_module: AdaLayerNormSingle, flat: mx.array, padded_rows: int) -> tuple:
     """Per-module shape/dtype signature for the calibration verdict.
 
-    A verdict certifies bit-equality between the shrunken and the full GEMM
-    *for this module's weights* at these shapes. Agreement across M x 36864
-    float32 outputs is overwhelming evidence that the same kernel pair (and
-    reduction order) was exercised -- in which case equality is universal for
-    every input -- but that reasoning is only sound while the GEMM it was
-    established on does not change, which is why the plan lives on the module
-    (see ``_dedupe_plan_of``) and ``padded_rows`` -- the row count of the
-    shrunken GEMM being validated -- is part of the key.
+    A verdict certifies bit-equality between the shrunken and the full GEMM,
+    established empirically for this module's weights at these exact shapes.
+    That evidence does not transport: not to another module, not to other
+    weights, not to other shapes -- the M1-CI failures that motivated the
+    per-module plan are the proof that kernel-pair agreement observed on one
+    GEMM says nothing about another. Hence the plan lives on the module (see
+    ``_dedupe_plan_of``), ``padded_rows`` -- the row count of the shrunken
+    GEMM being validated -- is part of the key, and so is the identity of the
+    weight array itself, so a fine-tune step that swaps the weight buffer
+    invalidates every verdict earned under the old values.
     """
     lin = adaln_module.linear
     w = lin.weight
@@ -126,6 +130,7 @@ def _adaln_signature(adaln_module: AdaLayerNormSingle, flat: mx.array, padded_ro
         int(flat.shape[1]),
         int(padded_rows),
         int(adaln_module.num_params),
+        id(w),
         tuple(int(s) for s in w.shape),
         str(w.dtype),
         type(lin).__name__,
