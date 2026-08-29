@@ -374,18 +374,22 @@ class StreamingLTXModel(nn.Module):
         # The lazy AdaLN carrier (``PerTokenAdaLNParams``) is a non-tree
         # argument, so it cannot cross the compiled block -- and the compiled
         # block is load-bearing here: it is what keeps 48 per-block syncs
-        # under the Metal watchdog (see the module docstring). Rather than
-        # falling back to the eager block (forfeiting that protection), keep
-        # the GEMM dedupe but materialise its result eagerly for the duration
-        # of this forward: the lazy activation cut is forfeited under
-        # streaming, the watchdog/compile properties are not.
+        # under the Metal watchdog (see the module docstring). Disable the
+        # whole dedupe pair for streamed forwards rather than just the lazy
+        # gather: benchmarked at 480x704x97 (M2 Pro, q8), dedupe-without-lazy
+        # is the slowest arm of all (the materialised full-width gather costs
+        # more than the GEMM it saves -- 420s vs 313s plain / 339s lazy), so
+        # the plain path is what streaming should run.
         from ltx_core_mlx.model.transformer import model as _model_mod
 
+        dedupe_prev = _model_mod._ADALN_DEDUPE
         lazy_prev = _model_mod._ADALN_LAZY
+        _model_mod._ADALN_DEDUPE = False
         _model_mod._ADALN_LAZY = False
         try:
             return self.inner(*args, **kwargs)
         finally:
+            _model_mod._ADALN_DEDUPE = dedupe_prev
             _model_mod._ADALN_LAZY = lazy_prev
 
     def __getattr__(self, name: str):
