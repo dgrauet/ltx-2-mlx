@@ -17,6 +17,8 @@ Runnable either under pytest or directly::
 
 from __future__ import annotations
 
+import os
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -44,6 +46,28 @@ def _bitwise_equal(a: mx.array, b: mx.array) -> bool:
         if not bool(mx.array_equal(a[start : start + _EQ_CHUNK], b[start : start + _EQ_CHUNK]).item()):
             return False
     return True
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _cpu_backend_on_ci():
+    """Run this module on the CPU backend on CI runners.
+
+    The macos-14 runners expose a paravirtualized Metal device whose
+    all-reductions both mis-reduce (see module docstring) and, worse, wedge
+    permanently mid-`mx.array_equal` (a faulthandler dump caught the hang
+    inside the calibration's `_gathered_equals`; the job burned its full
+    timeout). The Python logic under test is backend-independent; the
+    empirical Metal kernel-pair validation this module also performs only
+    means something on real Apple Silicon, where it runs locally (including
+    the `-m slow` production-scale shapes).
+    """
+    if not os.environ.get("CI"):
+        yield
+        return
+    prev = mx.default_device()
+    mx.set_default_device(mx.Device(mx.cpu))
+    yield
+    mx.set_default_device(prev)
 
 
 def _embed(per_token_timesteps: mx.array) -> mx.array:
