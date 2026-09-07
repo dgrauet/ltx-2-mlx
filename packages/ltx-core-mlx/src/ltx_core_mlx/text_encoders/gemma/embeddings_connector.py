@@ -99,14 +99,10 @@ class ConnectorAttention(nn.Module):
             q = apply_rope_split(q, cos_f, sin_f)
             k = apply_rope_split(k, cos_f, sin_f)
 
-        # Scaled dot-product attention
-        attn_weights = (q @ k.transpose(0, 1, 3, 2)) * self.scale
-
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-
-        attn_weights = mx.softmax(attn_weights, axis=-1)
-        out = attn_weights @ v
+        # Scaled dot-product attention (fused Metal kernel instead of the
+        # composed matmul/softmax/matmul -- same fix as the main
+        # transformer's own Attention block, see model/transformer/attention.py)
+        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=attention_mask)
 
         # Per-head gating (only when gate weights exist)
         if self.to_gate_logits is not None:
