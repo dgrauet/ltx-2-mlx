@@ -88,9 +88,7 @@ class AttentionCrossAttn(nn.Module):
         k = self.k_proj(tokens).reshape(batch, num_tokens, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
         v = self.v_proj(tokens).reshape(batch, num_tokens, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
 
-        scores = (q * self.scale) @ k.transpose(0, 1, 3, 2)
-        weights = mx.softmax(scores, axis=-1)
-        out = weights @ v
+        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
 
         out = out.transpose(0, 2, 1, 3).reshape(batch, num_queries, self.num_heads * self.head_dim)
         return self.out_proj(out)

@@ -142,15 +142,14 @@ class AudioAttnBlock(nn.Module):
         residual = x
         h = self.norm(x)
 
-        q = self.q(h).reshape(B, H * W, C)
-        k = self.k(h).reshape(B, H * W, C)
-        v = self.v(h).reshape(B, H * W, C)
+        q = self.q(h).reshape(B, 1, H * W, C)
+        k = self.k(h).reshape(B, 1, H * W, C)
+        v = self.v(h).reshape(B, 1, H * W, C)
 
         scale = C**-0.5
-        attn = (q @ k.transpose(0, 2, 1)) * scale
-        attn = mx.softmax(attn, axis=-1)
+        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale)
 
-        out = (attn @ v).reshape(B, H, W, C)
+        out = out.reshape(B, H, W, C)
         out = self.proj_out(out)
         return residual + out
 
