@@ -28,6 +28,7 @@ import contextlib
 import logging
 import os
 import subprocess
+import tempfile
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
@@ -209,6 +210,53 @@ def _group_tiles_by_temporal_slice(tiles: list[Tile]) -> list[list[Tile]]:
         groups.append(current_group)
 
     return groups
+
+
+# Bytes of ffmpeg stderr surfaced in the error when it exits non-zero.
+_FFMPEG_STDERR_TAIL = 4096
+
+
+@contextlib.contextmanager
+def _ffmpeg_sink(cmd: list[str]) -> Iterator[subprocess.Popen[bytes]]:
+    """Run an ffmpeg command that consumes raw frames on stdin.
+
+    stderr goes to an unnamed temporary file rather than a pipe: a pipe that
+    nobody reads fills at the OS buffer limit (64 KB on macOS), after which
+    ffmpeg blocks on stderr, stops draining stdin, and ``wait()`` never
+    returns (#92). The file is read back only when ffmpeg exits non-zero,
+    so a failing encode raises with ffmpeg's own diagnostics instead of
+    silently producing a truncated or missing file.
+
+    On exit, stdin is closed and the process reaped regardless of how the
+    body ended. An exception raised by the body propagates unchanged --
+    ffmpeg's resulting exit status is a consequence, not the cause.
+
+    Args:
+        cmd: Full ffmpeg argv, reading video from ``-`` / ``pipe:0``.
+
+    Yields:
+        The running process; write frames to ``proc.stdin``.
+
+    Raises:
+        RuntimeError: If the body completed but ffmpeg exited non-zero.
+    """
+    with tempfile.TemporaryFile() as stderr_file:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=stderr_file)
+        assert proc.stdin is not None
+        try:
+            yield proc
+        finally:
+            if not proc.stdin.closed:
+                # ffmpeg may already have exited, and closing flushes
+                # buffered bytes into a dead pipe.
+                with contextlib.suppress(BrokenPipeError):
+                    proc.stdin.close()
+            proc.wait()
+        if proc.returncode != 0:
+            stderr_file.seek(0, os.SEEK_END)
+            stderr_file.seek(max(0, stderr_file.tell() - _FFMPEG_STDERR_TAIL))
+            tail = stderr_file.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"ffmpeg exited with status {proc.returncode}:\n{tail}")
 
 
 class VideoDecoder(nn.Module):
@@ -560,9 +608,15 @@ class VideoDecoder(nn.Module):
             cmd.extend(["-i", audio_path, "-c:a", "aac"])
         cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", output_path])
 
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        assert proc.stdin is not None
+        try:
+            with _ffmpeg_sink(cmd) as proc:
+                self._stream_frames(latent, tiling, proc)
+        finally:
+            aggressive_cleanup()
 
+    def _stream_frames(self, latent: mx.array, tiling: TilingConfig | None, proc: subprocess.Popen[bytes]) -> None:
+        """Decode ``latent`` tile by tile and push uint8 RGB frames into ``proc.stdin``."""
+        assert proc.stdin is not None
         frame_writer = _OrderedFrameWriter(proc.stdin, overlap=_media_write_overlap_enabled())
         try:
             for chunk in self.tiled_decode(latent, tiling):  # (B, 3, T, H, W)
@@ -587,26 +641,11 @@ class VideoDecoder(nn.Module):
                 latent.shape[2] * 8 - 7,
             )
         finally:
-            # Subprocess teardown belongs here, not after the try: a write error
-            # other than a closed pipe (a stalled stream raises OSError) would
-            # otherwise propagate past this point and leave ffmpeg running until
-            # garbage collection.
-            try:
-                frame_writer.shutdown()
-            finally:
-                # Reaping ffmpeg does not depend on how the writer shut down.
-                # Executor.shutdown() does not surface worker exceptions today,
-                # so this nesting is currently unreachable; it is structural so
-                # that a writer that starts raising cannot leak the process.
-                try:
-                    if proc.stdin and not proc.stdin.closed:
-                        # ffmpeg may already have exited, and closing flushes
-                        # buffered bytes into a dead pipe.
-                        with contextlib.suppress(BrokenPipeError):
-                            proc.stdin.close()
-                finally:
-                    proc.wait()
-                    aggressive_cleanup()
+            # The writer must drain before _ffmpeg_sink closes stdin and reaps
+            # ffmpeg: a write error other than a closed pipe (a stalled stream
+            # raises OSError) propagates from here, and the sink's own finally
+            # still tears the process down.
+            frame_writer.shutdown()
 
 
 class VideoEncoder(nn.Module):
