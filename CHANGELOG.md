@@ -10,6 +10,24 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.3](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.2...v0.15.3) (2026-09-12)
+
+
+### Features
+
+* **pipelines:** add `generate --no-audio` to skip audio decode and mux ([#132](https://github.com/dgrauet/ltx-2-mlx/issues/132)) ([54ce09e](https://github.com/dgrauet/ltx-2-mlx/commit/54ce09ec030647e3fca6e5f8f404e30901b8f90e)), closes [#126](https://github.com/dgrauet/ltx-2-mlx/issues/126)
+
+
+### Bug Fixes
+
+* **core:** load DurationHead packs with pre-split q/k/v projections ([#130](https://github.com/dgrauet/ltx-2-mlx/issues/130)) ([5b22407](https://github.com/dgrauet/ltx-2-mlx/commit/5b22407547cb2edaeb2d46e9ecdf67aff209c3bd)), closes [#125](https://github.com/dgrauet/ltx-2-mlx/issues/125)
+* **core:** stop VideoDecoder.decode_and_stream deadlocking on unread ffmpeg stderr ([#131](https://github.com/dgrauet/ltx-2-mlx/issues/131)) ([1181277](https://github.com/dgrauet/ltx-2-mlx/commit/11812779769f9a87d09aae1264a151faa8f97330)), closes [#92](https://github.com/dgrauet/ltx-2-mlx/issues/92)
+
+
+### Documentation
+
+* credit the v0.15.2 external contributions in the changelog ([#122](https://github.com/dgrauet/ltx-2-mlx/issues/122)) ([91e6f6c](https://github.com/dgrauet/ltx-2-mlx/commit/91e6f6c9bd621ff2ae31adfee643e113d67d6ae8))
+
 ## [0.15.2](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.1...v0.15.2) (2026-08-29)
 
 
