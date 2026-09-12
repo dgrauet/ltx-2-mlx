@@ -30,6 +30,8 @@ Weight keys (under the ``duration_head.`` prefix in ``duration_head.safetensors`
     ``attention_pooler.query_tokens``
     ``attention_pooler.cross_attn.in_proj_weight``   # torch nn.MultiheadAttention, fused (3*hidden, hidden)
     ``attention_pooler.cross_attn.in_proj_bias``     # fused (3*hidden,)
+      -- or, in packs converted with the projections pre-split (#125):
+    ``attention_pooler.cross_attn.{q,k,v}_proj.{weight,bias}``
     ``attention_pooler.cross_attn.out_proj.{weight,bias}``
     ``mlp_hidden.{weight,bias}``
     ``mlp_out.{weight,bias}``
@@ -207,13 +209,64 @@ class DurationHead(nn.Module):
         return mx.exp(log_duration)
 
 
+_CROSS_ATTN = "attention_pooler.cross_attn."
+_FUSED_KEYS = (_CROSS_ATTN + "in_proj_weight", _CROSS_ATTN + "in_proj_bias")
+_SPLIT_KEYS = tuple(f"{_CROSS_ATTN}{p}.{t}" for p in ("q_proj", "k_proj", "v_proj") for t in ("weight", "bias"))
+
+
+def _normalize_cross_attn_projections(raw: dict[str, mx.array]) -> None:
+    """Bring the pooler's q/k/v projections to the split layout, in place.
+
+    Two pack layouts exist in the wild for the same weights (#125):
+
+    * **fused** -- torch ``nn.MultiheadAttention``'s ``in_proj_weight``
+      ``(3*hidden, hidden)`` / ``in_proj_bias`` ``(3*hidden,)``, as shipped by
+      the ``dgrauet/ltx-2.5-mlx*`` packs. Split along axis 0 into q, k, v.
+    * **split** -- ``{q,k,v}_proj.{weight,bias}`` already separated, as shipped
+      by ``mlx-community/ltx-2.5-mlx``. Passed through untouched.
+
+    Args:
+        raw: Prefix-stripped weight dict; mutated so that only the split keys
+            remain.
+
+    Raises:
+        ValueError: If both layouts are present (ambiguous -- never pick one
+            silently) or neither is (a clear message beats ``KeyError``).
+    """
+    has_fused = all(k in raw for k in _FUSED_KEYS)
+    has_split = all(k in raw for k in _SPLIT_KEYS)
+    if has_fused and has_split:
+        raise ValueError(
+            "duration_head pack carries both the fused in_proj_{weight,bias} and the "
+            "split {q,k,v}_proj projections; ambiguous, refusing to pick one"
+        )
+    if not has_fused and not has_split:
+        raise ValueError(
+            "duration_head pack has no complete cross-attention projection: expected either "
+            f"fused {list(_FUSED_KEYS)} or split {list(_SPLIT_KEYS)}"
+        )
+    if has_split:
+        return
+
+    in_proj_weight = raw.pop(_FUSED_KEYS[0])  # (3*hidden, hidden)
+    in_proj_bias = raw.pop(_FUSED_KEYS[1])  # (3*hidden,)
+    for name, w, b in zip(
+        ("q_proj", "k_proj", "v_proj"),
+        mx.split(in_proj_weight, 3, axis=0),
+        mx.split(in_proj_bias, 3, axis=0),
+        strict=True,
+    ):
+        raw[f"{_CROSS_ATTN}{name}.weight"] = w
+        raw[f"{_CROSS_ATTN}{name}.bias"] = b
+
+
 def load_duration_head(path: str | Path) -> DurationHead:
     """Build and load a :class:`DurationHead` from a pack's ``duration_head.safetensors``.
 
-    Strips the ``duration_head.`` prefix and splits torch
-    ``nn.MultiheadAttention``'s fused ``in_proj_weight``/``in_proj_bias``
-    into separate q/k/v projections so the flat weight dict maps onto the
-    named submodules (``attention_pooler.cross_attn.{q_proj,k_proj,v_proj}``).
+    Strips the ``duration_head.`` prefix and normalizes the cross-attention
+    projection layout (see :func:`_normalize_cross_attn_projections`) so the
+    flat weight dict maps onto the named submodules
+    (``attention_pooler.cross_attn.{q_proj,k_proj,v_proj}``).
 
     Args:
         path: Path to ``duration_head.safetensors`` (the file itself, not
@@ -224,6 +277,8 @@ def load_duration_head(path: str | Path) -> DurationHead:
 
     Raises:
         FileNotFoundError: If ``path`` does not exist.
+        ValueError: If the pack carries neither, or both, of the supported
+            cross-attention projection layouts.
     """
     path = Path(path)
     if not path.exists():
@@ -238,16 +293,7 @@ def load_duration_head(path: str | Path) -> DurationHead:
     num_queries = raw["attention_pooler.query_tokens"].shape[0]
     num_heads = 4  # fixed by upstream architecture; not encoded in the pack
 
-    in_proj_weight = raw.pop("attention_pooler.cross_attn.in_proj_weight")  # (3*hidden, hidden)
-    in_proj_bias = raw.pop("attention_pooler.cross_attn.in_proj_bias")  # (3*hidden,)
-    q_w, k_w, v_w = mx.split(in_proj_weight, 3, axis=0)
-    q_b, k_b, v_b = mx.split(in_proj_bias, 3, axis=0)
-    raw["attention_pooler.cross_attn.q_proj.weight"] = q_w
-    raw["attention_pooler.cross_attn.q_proj.bias"] = q_b
-    raw["attention_pooler.cross_attn.k_proj.weight"] = k_w
-    raw["attention_pooler.cross_attn.k_proj.bias"] = k_b
-    raw["attention_pooler.cross_attn.v_proj.weight"] = v_w
-    raw["attention_pooler.cross_attn.v_proj.bias"] = v_b
+    _normalize_cross_attn_projections(raw)
 
     model = DurationHead(
         video_cross_attention_dim=video_dim,

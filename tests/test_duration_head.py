@@ -27,6 +27,16 @@ from ltx_pipelines_mlx.utils.types import AutoDuration
 from tests.conftest import LTX25_Q8_DIR
 
 
+def _try_cached_community_duration_head():
+    """Path to ``mlx-community/ltx-2.5-mlx``'s ``duration_head.safetensors`` if already in the HF cache, else None (never downloads)."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:  # pragma: no cover
+        return None
+    hit = try_to_load_from_cache("mlx-community/ltx-2.5-mlx", "duration_head.safetensors")
+    return hit if isinstance(hit, str) else None
+
+
 def test_duration_head_requires_at_least_one_modality():
     model = DurationHead()
     with pytest.raises(ValueError, match="at least one of"):
@@ -150,6 +160,112 @@ def test_duration_head_pinned_regression():
     out_audio = model(audio_tokens=audio_tokens)
 
     # Pinned against the reference pack; regenerate if the pack's weights change.
+    assert out_both.item() == pytest.approx(4.09065055847168, rel=1e-5)
+    assert out_video.item() == pytest.approx(3.8629565238952637, rel=1e-5)
+    assert out_audio.item() == pytest.approx(4.285473346710205, rel=1e-5)
+
+
+# ============================================================================
+# #125: pack key layout -- fused torch ``in_proj`` vs pre-split q/k/v
+# ============================================================================
+
+
+def _synthetic_duration_head_tensors(hidden: int = 8, video_dim: int = 12, audio_dim: int = 6) -> dict[str, mx.array]:
+    """Tiny fused-layout pack (the ``dgrauet/ltx-2.5-mlx*`` layout), ``duration_head.`` prefix included."""
+    mx.random.seed(125)
+
+    def rnd(*shape: int) -> mx.array:
+        return mx.random.normal(shape).astype(mx.bfloat16)
+
+    p = "duration_head."
+    return {
+        p + "video_input_proj.weight": rnd(hidden, video_dim),
+        p + "video_input_proj.bias": rnd(hidden),
+        p + "video_modality_emb": rnd(hidden),
+        p + "audio_input_proj.weight": rnd(hidden, audio_dim),
+        p + "audio_input_proj.bias": rnd(hidden),
+        p + "audio_modality_emb": rnd(hidden),
+        p + "attention_pooler.query_tokens": rnd(1, hidden),
+        p + "attention_pooler.cross_attn.in_proj_weight": rnd(3 * hidden, hidden),
+        p + "attention_pooler.cross_attn.in_proj_bias": rnd(3 * hidden),
+        p + "attention_pooler.cross_attn.out_proj.weight": rnd(hidden, hidden),
+        p + "attention_pooler.cross_attn.out_proj.bias": rnd(hidden),
+        p + "mlp_hidden.weight": rnd(hidden, hidden),
+        p + "mlp_hidden.bias": rnd(hidden),
+        p + "mlp_out.weight": rnd(1, hidden),
+        p + "mlp_out.bias": rnd(1),
+    }
+
+
+def _split_qkv_layout(fused: dict[str, mx.array]) -> dict[str, mx.array]:
+    """Re-express a fused-layout pack in the ``mlx-community/ltx-2.5-mlx`` pre-split layout."""
+    p = "duration_head.attention_pooler.cross_attn."
+    out = {k: v for k, v in fused.items() if not k.startswith(p + "in_proj")}
+    for name, w, b in zip(
+        ("q_proj", "k_proj", "v_proj"),
+        mx.split(fused[p + "in_proj_weight"], 3, axis=0),
+        mx.split(fused[p + "in_proj_bias"], 3, axis=0),
+        strict=True,
+    ):
+        out[p + name + ".weight"] = w
+        out[p + name + ".bias"] = b
+    return out
+
+
+def test_load_duration_head_accepts_pre_split_qkv_layout(tmp_path):
+    """#125: the community pack ships q/k/v already split; it must load and match the fused layout bit-for-bit."""
+    fused = _synthetic_duration_head_tensors()
+    mx.save_safetensors(str(tmp_path / "fused.safetensors"), fused)
+    mx.save_safetensors(str(tmp_path / "split.safetensors"), _split_qkv_layout(fused))
+
+    model_fused = load_duration_head(tmp_path / "fused.safetensors")
+    model_split = load_duration_head(tmp_path / "split.safetensors")
+
+    mx.random.seed(0)
+    video_tokens = mx.random.normal((1, 5, 12))
+    audio_tokens = mx.random.normal((1, 3, 6))
+    out_fused = model_fused(video_tokens=video_tokens, audio_tokens=audio_tokens)
+    out_split = model_split(video_tokens=video_tokens, audio_tokens=audio_tokens)
+    assert mx.array_equal(out_fused, out_split)
+
+
+def test_load_duration_head_rejects_mixed_qkv_layout(tmp_path):
+    """A pack carrying both the fused and the split projections is ambiguous -- fail loudly, never pick one."""
+    fused = _synthetic_duration_head_tensors()
+    mixed = {**fused, **_split_qkv_layout(fused)}
+    mx.save_safetensors(str(tmp_path / "mixed.safetensors"), mixed)
+
+    with pytest.raises(ValueError, match="in_proj"):
+        load_duration_head(tmp_path / "mixed.safetensors")
+
+
+def test_load_duration_head_rejects_missing_qkv_projections(tmp_path):
+    """Neither layout present: a clear error naming the expected keys, not a bare KeyError."""
+    fused = _synthetic_duration_head_tensors()
+    p = "duration_head.attention_pooler.cross_attn."
+    broken = {k: v for k, v in fused.items() if not k.startswith(p + "in_proj")}
+    mx.save_safetensors(str(tmp_path / "broken.safetensors"), broken)
+
+    with pytest.raises(ValueError, match="in_proj"):
+        load_duration_head(tmp_path / "broken.safetensors")
+
+
+_COMMUNITY_DURATION_HEAD = _try_cached_community_duration_head()
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(_COMMUNITY_DURATION_HEAD is None, reason="mlx-community/ltx-2.5-mlx duration_head not in HF cache")
+def test_community_pack_duration_head_matches_pinned_regression():
+    """The community pack's split-layout weights are bitwise the reference pack's; same pinned outputs."""
+    model = load_duration_head(_COMMUNITY_DURATION_HEAD)
+
+    mx.random.seed(0)
+    video_tokens = mx.random.normal((1, 1024, 4096))
+    audio_tokens = mx.random.normal((1, 1024, 2048))
+    out_both = model(video_tokens=video_tokens, audio_tokens=audio_tokens)
+    out_video = model(video_tokens=video_tokens)
+    out_audio = model(audio_tokens=audio_tokens)
+
     assert out_both.item() == pytest.approx(4.09065055847168, rel=1e-5)
     assert out_video.item() == pytest.approx(3.8629565238952637, rel=1e-5)
     assert out_audio.item() == pytest.approx(4.285473346710205, rel=1e-5)
