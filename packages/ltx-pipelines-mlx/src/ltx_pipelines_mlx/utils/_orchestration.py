@@ -173,20 +173,31 @@ def decode_and_save_video(
     *,
     frame_rate: float,
     low_memory: bool = True,
+    generate_audio: bool = True,
 ) -> str:
     """Decode audio+video latents and mux to mp4 via ffmpeg.
 
     Args:
         video_decoder: :class:`VideoDecoder` block (loads vae_decoder lazily).
         audio_decoder: :class:`AudioDecoder` block (audio VAE + vocoder).
+            Never touched when ``generate_audio`` is ``False``.
         video_latent: Encoded video latent.
         audio_latent: Encoded audio latent.
         output_path: Destination mp4 path.
         frame_rate: Output frame rate.
         low_memory: When ``True`` aggressively releases intermediate
             buffers between audio and video decode.
+        generate_audio: When ``False`` (``--no-audio``, #126) skip the audio
+            decode entirely and write an mp4 with no audio track. The video
+            stream is identical either way: the DiT already produced the
+            audio latent jointly, only its decode + mux is skipped.
     """
     import tempfile
+
+    if not generate_audio:
+        video_decoder.decode_and_stream(video_latent, output_path, frame_rate=frame_rate, audio_path=None)
+        aggressive_cleanup()
+        return output_path
 
     waveform = audio_decoder(audio_latent)
     if low_memory:

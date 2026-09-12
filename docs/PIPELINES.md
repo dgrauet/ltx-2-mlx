@@ -33,6 +33,7 @@ by tier, see [PIPELINE_MATURITY.md](PIPELINE_MATURITY.md).
 | Flag / env var | Default | Effect | Supported pipelines |
 |---|---|---|---|
 | `--low-ram` | off | Block streaming: stream DiT layers from mmap'd safetensors. Peak ≈ 1 block + Gemma. ~75% transformer RAM cut. | `generate` (one-stage / `--two-stage` / `--two-stages-hq`), `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora` |
+| `--no-audio` | off | Skip audio decode + mux; mp4 written with no audio track. Video unchanged (the DiT still produces audio latents jointly; only the audio VAE / vocoder / BWE load + decode are skipped). | `generate` (all variants) |
 | `--tile-frames N` | 1 | Split video tokens into N temporal tiles. Caps O(N²) attention activations. | `generate` (all variants), `a2v`, `keyframe` |
 | `--tile-spatial M` | 1 | Split video tokens into M×M spatial tiles. Total tiles = `tile-frames × M²`. | same as above |
 | `--tile-overlap K` | 2 | Token-grid overlap (smoother blend at cost of redundant compute). | when tiling active |

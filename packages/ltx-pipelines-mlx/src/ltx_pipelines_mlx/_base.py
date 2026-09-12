@@ -76,6 +76,10 @@ class BasePipeline:
     #: on subclasses) so shared helpers like ``_check_teacache_supported`` can
     #: read it safely regardless of which pipeline family sets it.
     _is_25: bool = False
+    #: ``False`` skips audio decoders (load + decode + mux) and writes an mp4
+    #: with no audio track (``generate --no-audio``, #126). Set by the CLI
+    #: after construction, like ``verbose`` / ``stepwise``. Video is unchanged.
+    generate_audio: bool = True
 
     def __init__(
         self,
@@ -340,7 +344,14 @@ class BasePipeline:
         self.audio_conditioner.load()
 
     def _load_decoders(self) -> None:
-        """Load VAE decoder + audio decoder + vocoder via composition blocks."""
+        """Load VAE decoder + audio decoder + vocoder via composition blocks.
+
+        The audio block stays unloaded when ``generate_audio`` is ``False``.
+        """
+        if not self.generate_audio:
+            with phase("Loading decoders (VAE only, --no-audio)", verbose=self.verbose):
+                self.video_decoder_block.load()
+            return
         with phase("Loading decoders (VAE + audio + vocoder)", verbose=self.verbose):
             self.video_decoder_block.load()
             self.audio_decoder_block.load()
@@ -488,7 +499,8 @@ class BasePipeline:
             self._loaded = False
             aggressive_cleanup()
 
-        with phase("Decoding video + audio + muxing", verbose=self.verbose):
+        label = "Decoding video + audio + muxing" if self.generate_audio else "Decoding video (--no-audio)"
+        with phase(label, verbose=self.verbose):
             return _impl(
                 self.video_decoder_block,
                 self.audio_decoder_block,
@@ -497,6 +509,7 @@ class BasePipeline:
                 output_path,
                 frame_rate=frame_rate,
                 low_memory=self.low_memory,
+                generate_audio=self.generate_audio,
             )
 
     # ------------------------------------------------------------------

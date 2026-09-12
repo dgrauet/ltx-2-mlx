@@ -325,6 +325,15 @@ examples:
     gen = sub.add_parser("generate", help="Generate video from text (T2V) or image (I2V)")
     _add_generation_args(gen, frames_default=None)
     gen.add_argument(
+        "--no-audio",
+        action="store_true",
+        help=(
+            "Skip audio decode + mux and write an mp4 with no audio track. "
+            "Video generation is unchanged (audio latents are still produced jointly by the DiT); "
+            "only the audio VAE / vocoder load and decode are skipped."
+        ),
+    )
+    gen.add_argument(
         "--auto-duration",
         type=_parse_auto_duration,
         default=None,
@@ -918,6 +927,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         )
         pipe.verbose = not args.quiet
         pipe.stepwise = _build_stepwise(args)
+        pipe.generate_audio = not args.no_audio
         if lora_paths:
             pipe._pending_loras = lora_paths
         kwargs: dict = dict(
@@ -959,6 +969,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         )
         pipe.verbose = not args.quiet
         pipe.stepwise = _build_stepwise(args)
+        pipe.generate_audio = not args.no_audio
         if lora_paths:
             pipe._pending_loras = lora_paths
         kwargs: dict = dict(
@@ -1005,6 +1016,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         )
         pipe.verbose = not args.quiet
         pipe.stepwise = _build_stepwise(args)
+        pipe.generate_audio = not args.no_audio
         if lora_paths:
             pipe._pending_loras = lora_paths
         # two-stage / HQ accept the upstream-iso multi-image conditioning list.
