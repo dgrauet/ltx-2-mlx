@@ -24,6 +24,7 @@ from ltx_core_mlx.guidance.perturbations import (
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS
+from ltx_pipelines_mlx.utils.estimate import StepEstimator, describe_work
 from ltx_pipelines_mlx.utils.res2s import get_res2s_coefficients, phi
 
 # Per-step preview hook: ``on_step(step_idx, num_steps, video_x0, sigma)``.
@@ -76,6 +77,13 @@ def _compute_per_token_timesteps(
         Per-token timesteps (B, N).
     """
     return (denoise_mask * sigma).squeeze(-1)
+
+
+def _step_timed(estimator: StepEstimator, step_idx: int, video_x: mx.array, audio_x: mx.array) -> None:
+    """Feed one completed step to the estimator, syncing only for the step it times."""
+    if estimator.wants_sync:
+        mx.eval(video_x, audio_x)
+    estimator.step_done(step_idx)
 
 
 def denoise_loop(
@@ -138,6 +146,12 @@ def denoise_loop(
     # sigmas already includes the terminal value (e.g. 0.0), so iterate
     # consecutive pairs directly — no extra phantom step.
     steps = list(zip(sigmas[:-1], sigmas[1:]))
+    estimator = StepEstimator(
+        describe_work(video_state=video_state, audio_state=audio_state, sigmas=sigmas),
+        show=show_progress,
+        label="denoising",
+    )
+    estimator.announce()
     iterator = tqdm(steps, desc="Denoising", disable=not show_progress)
 
     # Determine whether we need per-token timesteps (for conditioning masks).
@@ -185,6 +199,7 @@ def denoise_loop(
 
         # Force computation for memory efficiency
         mx.async_eval(video_x, audio_x)
+        _step_timed(estimator, step_idx, video_x, audio_x)
 
     aggressive_cleanup()
 
@@ -278,6 +293,12 @@ def euler_ancestral_denoising_loop(
     audio_dtype = audio_x.dtype
 
     steps = list(zip(sigmas[:-1], sigmas[1:]))
+    estimator = StepEstimator(
+        describe_work(video_state=video_state, audio_state=audio_state, sigmas=sigmas),
+        show=show_progress,
+        label="denoising (ancestral)",
+    )
+    estimator.announce()
     iterator = tqdm(steps, desc="Denoising (ancestral)", disable=not show_progress)
 
     video_uniform = _is_uniform_mask(video_state.denoise_mask)
@@ -356,6 +377,7 @@ def euler_ancestral_denoising_loop(
 
         # Force computation for memory efficiency
         mx.async_eval(video_x, audio_x)
+        _step_timed(estimator, step_idx, video_x, audio_x)
 
         if terminal_step:
             break
@@ -515,6 +537,19 @@ def res2s_denoise_loop(
 
     n_full_steps = len(sigmas) - 1
 
+    estimator = StepEstimator(
+        describe_work(
+            video_state=video_state,
+            audio_state=audio_state,
+            sigmas=sigmas,
+            video_guider_factory=video_guider_factory,
+            evals_per_step=2,  # substep + step
+            extra_forwards=1 if sigmas[-1] == 0 else 0,  # terminal predict below
+        ),
+        show=show_progress,
+        label="denoising (res2s guided)" if video_guider_factory is not None else "denoising (res2s)",
+    )
+
     # Inject minimal sigma to avoid division by zero (matching reference)
     if sigmas[-1] == 0:
         sigmas = sigmas[:-1] + [0.0011, 0.0]
@@ -655,6 +690,7 @@ def res2s_denoise_loop(
         return v_x0.astype(mx.float32), a_x0.astype(mx.float32)
 
     desc = "Denoising (res2s guided)" if video_guider_factory is not None else "Denoising (res2s)"
+    estimator.announce()
     iterator = tqdm(range(n_full_steps), desc=desc, disable=not show_progress)
 
     for step_idx in iterator:
@@ -773,6 +809,7 @@ def res2s_denoise_loop(
         audio_x = _sde_step(x_anchor_a, x_next_a, sigma, sigma_next, step_noise_a).astype(mx.float32)
 
         mx.async_eval(video_x, audio_x)
+        _step_timed(estimator, step_idx, video_x, audio_x)
 
     # Final cleanup: if original schedule ended at 0, do one last denoise.
     # TeaCache is bypassed for this terminal step — it's a one-shot denoise
@@ -893,6 +930,14 @@ def guided_denoise_loop(
     audio_x = audio_state.latent
 
     steps = list(zip(sigmas[:-1], sigmas[1:]))
+    estimator = StepEstimator(
+        describe_work(
+            video_state=video_state, audio_state=audio_state, sigmas=sigmas, video_guider_factory=video_guider_factory
+        ),
+        show=show_progress,
+        label="denoising (guided)",
+    )
+    estimator.announce()
     iterator = tqdm(steps, desc="Denoising (guided)", disable=not show_progress)
 
     # Determine whether we need per-token timesteps (for conditioning masks).
@@ -1108,6 +1153,7 @@ def guided_denoise_loop(
 
         # Force computation for memory efficiency
         mx.async_eval(video_x, audio_x)
+        _step_timed(estimator, step_idx, video_x, audio_x)
 
     aggressive_cleanup()
 

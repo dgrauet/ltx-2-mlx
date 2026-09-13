@@ -295,6 +295,14 @@ def _resolve_num_frames_arg(args: argparse.Namespace) -> int | AutoDuration:
     return DEFAULT_AUTO_DURATION
 
 
+_RETAKE_COST_EPILOG = (
+    "Cost note: denoising cost follows the TOTAL clip length, not the size of the "
+    "regenerated window -- preserved frames are still computed and attended over on "
+    "every pass, so retaking 1 latent frame of a 10 s clip costs the same as retaking all of it. "
+    "An [estimate] line on stderr states the work before step 1 and a time projection after it."
+)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser (all subcommands).
 
@@ -500,7 +508,11 @@ examples:
     )
 
     # --- retake ---
-    ret = sub.add_parser("retake", help="[beta] Regenerate a time segment of an existing video")
+    ret = sub.add_parser(
+        "retake",
+        help="[beta] Regenerate a time segment of an existing video",
+        epilog=_RETAKE_COST_EPILOG,
+    )
     _add_base_args(ret)
     ret.add_argument("--video", "-v", required=True, help="Source video file")
     ret.add_argument("--start", type=int, required=True, help="Start latent frame index (inclusive)")
@@ -518,7 +530,11 @@ examples:
     )
 
     # --- extend ---
-    ext = sub.add_parser("extend", help="[beta] Add frames before or after an existing video")
+    ext = sub.add_parser(
+        "extend",
+        help="[beta] Add frames before or after an existing video",
+        epilog=_RETAKE_COST_EPILOG,
+    )
     _add_base_args(ext)
     ext.add_argument("--video", "-v", required=True, help="Source video file")
     ext.add_argument("--extend-frames", type=int, required=True, help="Number of latent frames to add")

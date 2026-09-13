@@ -64,6 +64,14 @@ by tier, see [PIPELINE_MATURITY.md](PIPELINE_MATURITY.md).
 | `retake` | `--video` (required), `--start` / `--end` (latent frame indices, required), `--steps` (30), `--no-regen-audio`, `--cfg-scale`, `--stg-scale` |
 | `extend` | `--video` (required), `--extend-frames N` (required), `--direction before|after`, `--steps`, `--cfg-scale`, `--stg-scale` |
 
+## Progress output (stderr)
+
+All CLI progress goes to **stderr** so stdout stays clean for callers that pipe it:
+
+- `[phase] ...` / `[phase] done in X.Ys` brackets the silent stages (Gemma load, prompt encode, DiT load, decoders, decode). Silenced by `--quiet`.
+- Each denoising stage prints `[estimate] <stage>: N steps x P passes over V video + A audio tokens = F forwards` **before** its first step (tqdm cannot say anything until iteration 1 completes, which at tens of seconds per step is exactly when a run looks hung), then `[estimate] <stage>: ~T remaining (S s/forward)` after the first computed step (tagged `first step includes warm-up` — kernel compilation and cache warm-up make it an upper bound) and once more after the second, timed on that step alone (tagged `refined`, the number to trust). Nothing after that. Passes per step come from the guider schedule (`cond` always, `uncond` under CFG, `ptb` under STG, `mod` under modality isolation; res_2s doubles them). Multi-stage pipelines print one pair per stage; there is no cross-stage total.
+- `retake` / `extend`: the estimate carries `cost follows total clip length, not the regenerated window` — preserved frames are still computed and attended over on every pass, so retaking 1 latent frame of a 10 s clip costs the same as retaking all of it.
+
 ## Compatibility notes
 
 - `generate --lora <path>` (one-stage) is **incompatible with `--low-ram`** (LoRA pre-fuse happens before streaming setup). Use `ic-lora` or pre-fuse via mlx-forge.
