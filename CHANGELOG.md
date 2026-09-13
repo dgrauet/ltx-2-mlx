@@ -10,6 +10,13 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.4](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.3...v0.15.4) (2026-09-13)
+
+
+### Features
+
+* **pipelines:** print an up-front denoising cost estimate before step 1 ([#133](https://github.com/dgrauet/ltx-2-mlx/issues/133)) ([077d560](https://github.com/dgrauet/ltx-2-mlx/commit/077d560096a0e2daeeec7e2084c2f6334705ba31)), closes [#94](https://github.com/dgrauet/ltx-2-mlx/issues/94)
+
 ## [0.15.3](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.2...v0.15.3) (2026-09-12)
 
 
