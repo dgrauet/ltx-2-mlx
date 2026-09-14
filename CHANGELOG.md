@@ -10,6 +10,13 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.5](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.4...v0.15.5) (2026-09-14)
+
+
+### Features
+
+* **core:** generated keyframe slots + keyframe absolute-position marker (LTX 2.5) ([#135](https://github.com/dgrauet/ltx-2-mlx/issues/135)) ([45c5c53](https://github.com/dgrauet/ltx-2-mlx/commit/45c5c53ae9ed608a895b93ed2885ad5dc89d9b23))
+
 ## [0.15.4](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.3...v0.15.4) (2026-09-13)
 
 
