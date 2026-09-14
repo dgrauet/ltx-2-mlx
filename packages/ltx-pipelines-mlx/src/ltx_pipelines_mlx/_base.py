@@ -37,11 +37,12 @@ from ltx_pipelines_mlx.utils.blocks import (
     resolve_num_frames,
 )
 from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
+from ltx_pipelines_mlx.utils.helpers import has_generated_keyframes
 from ltx_pipelines_mlx.utils.progress import phase
 from ltx_pipelines_mlx.utils.types import AutoDuration
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ltx_core_mlx.conditioning.prompt_relay import PromptRelayInput
     from ltx_pipelines_mlx.utils.samplers import OnStepFn
@@ -80,6 +81,10 @@ class BasePipeline:
     #: with no audio track (``generate --no-audio``, #126). Set by the CLI
     #: after construction, like ``verbose`` / ``stepwise``. Video is unchanged.
     generate_audio: bool = True
+    #: ``(B, C, K, H, W)`` latent of the generated keyframe slots from the last
+    #: stage-1 run (``generate --num-generated-keyframes``), or ``None``. Not
+    #: decoded by the standard pipelines; kept for keyframe-aware consumers (DFR).
+    generated_keyframes: mx.array | None = None
 
     def __init__(
         self,
@@ -253,6 +258,31 @@ class BasePipeline:
                 "TeaCache is calibrated for LTX-2.3 only; its polynomial does not "
                 "transfer to 2.5 packs. Drop --enable-teacache for this model."
             )
+
+    def _require_generated_keyframes_support(self, generated_keyframes: int | Sequence[int]) -> None:
+        """Refuse generated keyframe slots on a checkpoint without the keyframe embedding.
+
+        Call at the top of a ``generate_*`` method, before prompt encoding: the
+        answer comes from the checkpoint config alone. Slots on a checkpoint
+        without ``use_keyframes_abs_pos_embedding`` would be denoised as
+        unmarked tokens while still costing a full latent frame of tokens each,
+        so refuse rather than silently degrade (mirror of upstream
+        ``DiffusionStage.assert_generated_keyframes_supported``).
+
+        Raises:
+            ValueError: If slots are requested and the pack's transformer config
+                does not set ``use_keyframes_abs_pos_embedding``.
+        """
+        if not has_generated_keyframes(generated_keyframes):
+            return
+        config = LTXModelConfig.from_checkpoint_dir(self.model_dir)
+        if config.use_keyframes_abs_pos_embedding:
+            return
+        raise ValueError(
+            f"Generated keyframe slots were requested, but the checkpoint at {self.model_dir} does not set "
+            "'use_keyframes_abs_pos_embedding' in its transformer config, so it has no keyframe "
+            "absolute-position embedding (LTX 2.5 packs do). Use a 2.5 pack or drop --num-generated-keyframes."
+        )
 
     def _require_num_frames_source(self, num_frames: int | AutoDuration) -> None:
         """Guard against ``AutoDuration`` on a checkpoint with no DurationHead weights.

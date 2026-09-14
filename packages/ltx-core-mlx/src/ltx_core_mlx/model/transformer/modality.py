@@ -42,6 +42,9 @@ class Modality:
         attention_mask: Optional ``(B, T, T)`` self-attention mask in
             ``[0, 1]``. ``None`` means full attention between all
             tokens. Built incrementally by conditioning items.
+        keyframes_mask: Optional ``(B, T, 1)`` marker of single-pixel-frame
+            tokens (see ``LatentState.keyframes_mask``). Sliced per tile
+            like ``timesteps``.
     """
 
     latent: mx.array
@@ -52,6 +55,7 @@ class Modality:
     enabled: bool = True
     context_mask: mx.array | None = None
     attention_mask: mx.array | None = None
+    keyframes_mask: mx.array | None = None
 
     def split(self, sizes: list[int]) -> list[Modality]:
         """Split along the batch dimension into chunks of the given sizes.

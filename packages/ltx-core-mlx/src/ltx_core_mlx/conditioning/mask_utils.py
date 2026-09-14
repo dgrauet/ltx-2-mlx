@@ -156,3 +156,52 @@ def update_attention_mask(
         num_existing_tokens=latent_state.latent.shape[1],
         cross_mask=cross_mask,
     )
+
+
+def first_frame_keyframes_mask(denoise_mask: mx.array, tokens_per_frame: int) -> mx.array:
+    """Mark the target's first latent frame, which encodes a single pixel frame.
+
+    The video encoder is causal: the first temporal latent frame covers 1 pixel frame while
+    every later one covers ``temporal_scale_factor``. That makes it the same token class as a
+    generated keyframe slot, and the reference marks it unconditionally, independently of
+    whether any slots exist. Plain data about the latent; models without the keyframe
+    embedding ignore it.
+
+    Args:
+        denoise_mask: ``(B, N, 1)`` mask whose layout and dtype the marker shares.
+        tokens_per_frame: Token count of one latent frame at the target's spatial size.
+
+    Returns:
+        ``(B, N, 1)`` marker: 1 on the first ``tokens_per_frame`` tokens, 0 elsewhere.
+    """
+    batch, num_tokens, _ = denoise_mask.shape
+    head = mx.ones((batch, min(tokens_per_frame, num_tokens), 1), dtype=denoise_mask.dtype)
+    tail = mx.zeros((batch, max(num_tokens - tokens_per_frame, 0), 1), dtype=denoise_mask.dtype)
+    return mx.concatenate([head, tail], axis=1)
+
+
+def extend_keyframes_mask(latent_state: LatentState, num_new_tokens: int, *, marked: bool) -> mx.array | None:
+    """Extend :attr:`LatentState.keyframes_mask` to cover newly appended tokens.
+
+    Every conditioning item that appends tokens must call this, otherwise the per-token marker
+    goes out of sync with the token sequence.
+
+    Args:
+        latent_state: State being extended.
+        num_new_tokens: Number of tokens the item appends.
+        marked: Whether the new tokens encode a single standalone pixel frame in the
+            *generated* stream. True only for generated keyframe slots; given-content tokens
+            (image guidance, reference latents) are never marked, matching the reference.
+
+    Returns:
+        The extended mask, or ``None`` when there was no mask and the new tokens are unmarked.
+    """
+    existing = latent_state.keyframes_mask
+    if existing is None and not marked:
+        return None
+    batch = latent_state.latent.shape[0]
+    dtype = existing.dtype if existing is not None else latent_state.denoise_mask.dtype
+    if existing is None:
+        existing = mx.zeros((batch, latent_state.latent.shape[1], 1), dtype=dtype)
+    fill = mx.ones if marked else mx.zeros
+    return mx.concatenate([existing, fill((batch, num_new_tokens, 1), dtype=dtype)], axis=1)

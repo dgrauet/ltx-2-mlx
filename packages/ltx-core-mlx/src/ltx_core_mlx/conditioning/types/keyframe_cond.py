@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from ltx_core_mlx.conditioning.mask_utils import update_attention_mask
+from ltx_core_mlx.conditioning.mask_utils import extend_keyframes_mask, update_attention_mask
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState
 from ltx_core_mlx.utils.positions import VIDEO_SPATIAL_SCALE, VIDEO_TEMPORAL_SCALE
 
@@ -164,4 +164,7 @@ class VideoConditionByKeyframeIndex:
             denoise_mask=new_mask,
             positions=new_positions,
             attention_mask=new_attn_mask,
+            keyframes_mask=extend_keyframes_mask(
+                state, num_new_tokens=new_latent.shape[1] - state.latent.shape[1], marked=False
+            ),
         )

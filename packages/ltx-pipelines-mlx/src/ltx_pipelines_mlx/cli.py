@@ -333,6 +333,19 @@ examples:
     gen = sub.add_parser("generate", help="Generate video from text (T2V) or image (I2V)")
     _add_generation_args(gen, frames_default=None)
     gen.add_argument(
+        "--num-generated-keyframes",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Number of extra generated keyframes to place at evenly spaced interior frame positions "
+            "(default: 0, off). Each keyframe relaxes the effective temporal compression at its position "
+            "but costs a full latent frame of tokens while yielding one pixel frame, so N keyframes add "
+            "roughly N / num_latent_frames to the stage-1 sequence length. Stage 1 only. Requires an "
+            "LTX 2.5 pack (use_keyframes_abs_pos_embedding); refused up front otherwise."
+        ),
+    )
+    gen.add_argument(
         "--no-audio",
         action="store_true",
         help=(
@@ -955,6 +968,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             frame_rate=args.frame_rate,
             seed=args.seed,
             images=args.images,
+            generated_keyframes=args.num_generated_keyframes,
         )
         # The dev one-stage pipeline uses `num_steps` (single sampler), not stage1/stage2.
         if args.stage1_steps is not None:
@@ -997,6 +1011,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             frame_rate=args.frame_rate,
             seed=args.seed,
             images=args.images,
+            generated_keyframes=args.num_generated_keyframes,
         )
         if args.stage1_steps is not None:
             kwargs["stage1_steps"] = args.stage1_steps
@@ -1047,6 +1062,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             frame_rate=args.frame_rate,
             seed=args.seed,
             images=args.images,
+            generated_keyframes=args.num_generated_keyframes,
         )
         if args.stage1_steps is not None:
             kwargs["stage1_steps"] = args.stage1_steps

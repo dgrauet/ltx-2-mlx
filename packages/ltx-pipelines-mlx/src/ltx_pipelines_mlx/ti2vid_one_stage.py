@@ -26,6 +26,8 @@ Trade-offs vs the other generate variants:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import mlx.core as mx
 
 from ltx_core_mlx.components.guiders import (
@@ -36,6 +38,7 @@ from ltx_core_mlx.components.patchifiers import (
     compute_video_latent_shape,
     snap_output_dimensions,
 )
+from ltx_core_mlx.conditioning.types.keyframe_slots import extract_generated_keyframes
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import (
@@ -43,6 +46,7 @@ from ltx_core_mlx.utils.positions import (
     compute_audio_token_count,
     compute_video_positions,
 )
+from ltx_pipelines_mlx.utils.helpers import generated_keyframe_conditionings
 
 from .scheduler import ltx2_schedule
 from .ti2vid_two_stages import DEFAULT_CFG_SCALE, TI2VidTwoStagesPipeline
@@ -119,6 +123,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         image: str | None = None,
         images=None,
         prompt_relay=None,
+        generated_keyframes: int | Sequence[int] = 0,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
         tap: callable | None = None,
@@ -132,6 +137,9 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             num_frames: Number of frames (must satisfy ``(F-1) % 8 == 0``), or
                 an :class:`AutoDuration` request to predict it from the prompt
                 (requires a DurationHead-equipped checkpoint).
+            generated_keyframes: ``0`` (off), an ``int`` for that many evenly spaced interior
+                generated keyframe slots, or explicit pixel-frame indices. Stage 1 only;
+                requires a pack with ``use_keyframes_abs_pos_embedding`` (LTX 2.5).
             seed: Random seed.
             num_steps: Denoising steps (default: 30).
             cfg_scale: CFG guidance scale (default: 3.0).
@@ -147,6 +155,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             Tuple of (video_latent, audio_latent) at target resolution.
         """
         self._require_num_frames_source(num_frames)
+        self._require_generated_keyframes_support(generated_keyframes)
 
         # --- Text encoding (positive + negative for CFG; Prompt Relay encodes the
         # combined prompt on the positive side) ---
@@ -194,6 +203,10 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
                 video_encoder=self.vae_encoder,
                 frame_rate=frame_rate,
             )
+        conditionings = [
+            *conditionings,
+            *generated_keyframe_conditionings(generated_keyframes, num_frames, frame_rate=frame_rate),
+        ]
 
         video_state = create_noised_state(
             base_shape=video_shape,
@@ -272,6 +285,9 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             aggressive_cleanup()
 
         # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
+        self.generated_keyframes = extract_generated_keyframes(
+            output.video_latent, video_state.generated_keyframe_layout, self.video_patchifier, (H, W)
+        )
         gen_tokens = output.video_latent[:, : F * H * W, :]
         video_latent = self.video_patchifier.unpatchify(gen_tokens, (F, H, W))
         audio_latent = self.audio_patchifier.unpatchify(output.audio_latent)
@@ -294,6 +310,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         image: str | None = None,
         images=None,
         prompt_relay=None,
+        generated_keyframes: int | Sequence[int] = 0,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
         **_unused_kwargs,
@@ -317,6 +334,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             image=image,
             images=images,
             prompt_relay=prompt_relay,
+            generated_keyframes=generated_keyframes,
             video_guider_params=video_guider_params,
             audio_guider_params=audio_guider_params,
         )

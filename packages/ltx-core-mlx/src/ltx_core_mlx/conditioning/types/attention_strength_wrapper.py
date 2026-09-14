@@ -5,6 +5,8 @@ Ported from ltx-core/src/ltx_core/conditioning/types/attention_strength_wrapper.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import mlx.core as mx
 
 from ltx_core_mlx.conditioning.mask_utils import update_attention_mask
@@ -67,10 +69,4 @@ class ConditioningItemAttentionStrengthWrapper:
             batch_size=new_state.latent.shape[0],
         )
 
-        return LatentState(
-            latent=new_state.latent,
-            clean_latent=new_state.clean_latent,
-            denoise_mask=new_state.denoise_mask,
-            positions=new_state.positions,
-            attention_mask=new_attention_mask,
-        )
+        return replace(new_state, attention_mask=new_attention_mask)

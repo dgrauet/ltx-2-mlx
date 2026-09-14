@@ -447,6 +447,29 @@ class LTXModelConfig:
         return cls()
 
 
+def apply_keyframes_absolute_embedding(
+    hidden_states: mx.array,
+    keyframes_mask: mx.array | None,
+    embedding: mx.array | None,
+) -> mx.array:
+    """Add the learned keyframe marker to single-pixel-frame tokens.
+
+    Applied to projected hidden states, immediately after ``patchify_proj``
+    (mirror of upstream ``transformer_args.apply_keyframes_absolute_embedding``).
+    Exact no-op when there is no mask or the model has no embedding
+    (2.3 checkpoints), so those paths stay bit-identical.
+
+    Args:
+        hidden_states: ``(B, T, D)`` projected tokens.
+        keyframes_mask: ``(B, T, 1)`` marker, or ``None`` for "no token is marked".
+        embedding: The model's ``(1, D)`` embedding, or ``None`` if it has none.
+    """
+    if embedding is None or keyframes_mask is None:
+        return hidden_states
+    mask = (keyframes_mask > 0).astype(hidden_states.dtype)
+    return hidden_states + mask * embedding.astype(hidden_states.dtype)
+
+
 class LTXModel(nn.Module):
     """LTX-2.3 Diffusion Transformer for joint audio+video generation.
 
@@ -478,10 +501,11 @@ class LTXModel(nn.Module):
 
         # Marks tokens whose latent encodes a single standalone pixel frame.
         # Zero-initialized, so a checkpoint that predates it behaves
-        # identically until the parameter is trained. Applied by the keyframe
-        # conditioning path (not in this forward) — mirror of upstream
-        # model.py. Only created when the checkpoint config asks for it, so
-        # 2.3 checkpoints keep their exact parameter tree.
+        # identically until the parameter is trained. Added to the tokens
+        # marked by ``video_keyframes_mask`` right after patchify_proj (see
+        # ``apply_keyframes_absolute_embedding``) — mirror of upstream. Only
+        # created when the checkpoint config asks for it, so 2.3 checkpoints
+        # keep their exact parameter tree.
         if config.use_keyframes_abs_pos_embedding:
             self.keyframes_abs_pos_embedding = mx.zeros((1, vd))
 
@@ -598,6 +622,7 @@ class LTXModel(nn.Module):
         audio_latent: mx.array,
         timestep: mx.array,
         video_timesteps: mx.array | None = None,
+        video_keyframes_mask: mx.array | None = None,
     ) -> mx.array:
         """Cheap probe: block 0's modulated video input (TeaCache gate signal).
 
@@ -621,6 +646,9 @@ class LTXModel(nn.Module):
         timestep = timestep.astype(mx.bfloat16)
 
         video_hidden = self.patchify_proj(video_latent)
+        video_hidden = apply_keyframes_absolute_embedding(
+            video_hidden, video_keyframes_mask, getattr(self, "keyframes_abs_pos_embedding", None)
+        )
         t_emb = self._embed_timestep_scalar(timestep)
 
         if video_timesteps is not None:
@@ -643,6 +671,7 @@ class LTXModel(nn.Module):
         video_attention_mask: mx.array | None = None,
         audio_attention_mask: mx.array | None = None,
         video_cross_attention_mask: mx.array | None = None,
+        video_keyframes_mask: mx.array | None = None,
         video_timesteps: mx.array | None = None,
         audio_timesteps: mx.array | None = None,
         perturbations: BatchedPerturbationConfig | None = None,
@@ -705,6 +734,9 @@ class LTXModel(nn.Module):
 
         # Embed patches
         video_hidden = self.patchify_proj(video_latent)
+        video_hidden = apply_keyframes_absolute_embedding(
+            video_hidden, video_keyframes_mask, getattr(self, "keyframes_abs_pos_embedding", None)
+        )
         audio_hidden = self.audio_patchify_proj(audio_latent)
 
         # --- Timestep embeddings ---

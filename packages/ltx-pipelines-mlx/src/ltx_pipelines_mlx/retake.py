@@ -32,6 +32,7 @@ from ltx_core_mlx.components.guiders import (
     create_multimodal_guider_factory,
 )
 from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
+from ltx_core_mlx.conditioning.mask_utils import first_frame_keyframes_mask
 from ltx_core_mlx.conditioning.types.latent_cond import (
     LatentState,
     TemporalRegionMask,
@@ -320,6 +321,7 @@ class RetakePipeline(BasePipeline):
             clean_latent=source_tokens,
             denoise_mask=denoise_mask,
             positions=video_positions,
+            keyframes_mask=first_frame_keyframes_mask(denoise_mask, tokens_per_frame),
         )
         video_state = noise_latent_state(video_state, sigma=1.0, seed=seed)
 
@@ -508,6 +510,7 @@ class RetakePipeline(BasePipeline):
             clean_latent=clean_video,
             denoise_mask=video_denoise_mask,
             positions=video_positions,
+            keyframes_mask=first_frame_keyframes_mask(video_denoise_mask, H * W),
         )
         video_state = noise_latent_state(video_state, sigma=1.0, seed=seed)
 

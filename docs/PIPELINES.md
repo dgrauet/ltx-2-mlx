@@ -34,6 +34,7 @@ by tier, see [PIPELINE_MATURITY.md](PIPELINE_MATURITY.md).
 |---|---|---|---|
 | `--low-ram` | off | Block streaming: stream DiT layers from mmap'd safetensors. Peak ≈ 1 block + Gemma. ~75% transformer RAM cut. | `generate` (one-stage / `--two-stage` / `--two-stages-hq`), `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora` |
 | `--no-audio` | off | Skip audio decode + mux; mp4 written with no audio track. Video unchanged (the DiT still produces audio latents jointly; only the audio VAE / vocoder / BWE load + decode are skipped). | `generate` (all variants) |
+| `--num-generated-keyframes N` | 0 | Append N generated keyframe slots (single-pixel-frame tokens at evenly spaced interior frames) to stage 1; relaxes temporal compression where motion is fast, +1 latent frame of tokens per slot. LTX 2.5 packs only (refused up front on 2.3). | `generate` (all variants) |
 | `--tile-frames N` | 1 | Split video tokens into N temporal tiles. Caps O(N²) attention activations. | `generate` (all variants), `a2v`, `keyframe` |
 | `--tile-spatial M` | 1 | Split video tokens into M×M spatial tiles. Total tiles = `tile-frames × M²`. | same as above |
 | `--tile-overlap K` | 2 | Token-grid overlap (smoother blend at cost of redundant compute). | when tiling active |
@@ -71,6 +72,10 @@ All CLI progress goes to **stderr** so stdout stays clean for callers that pipe 
 - `[phase] ...` / `[phase] done in X.Ys` brackets the silent stages (Gemma load, prompt encode, DiT load, decoders, decode). Silenced by `--quiet`.
 - Each denoising stage prints `[estimate] <stage>: N steps x P passes over V video + A audio tokens = F forwards` **before** its first step (tqdm cannot say anything until iteration 1 completes, which at tens of seconds per step is exactly when a run looks hung), then `[estimate] <stage>: ~T remaining (S s/forward)` after the first computed step (tagged `first step includes warm-up` — kernel compilation and cache warm-up make it an upper bound) and once more after the second, timed on that step alone (tagged `refined`, the number to trust). Nothing after that. Passes per step come from the guider schedule (`cond` always, `uncond` under CFG, `ptb` under STG, `mod` under modality isolation; res_2s doubles them). Multi-stage pipelines print one pair per stage; there is no cross-stage total.
 - `retake` / `extend`: the estimate carries `cost follows total clip length, not the regenerated window` — preserved frames are still computed and attended over on every pass, so retaking 1 latent frame of a 10 s clip costs the same as retaking all of it.
+
+## Multishot on LTX-2.5
+
+"Native multishot" is a capability of the 2.5 model, not a pipeline feature: write the shots in order in a single prompt, following [Lightricks' prompting guide](https://docs.ltx.video/open-source-model/usage-guides/prompting-guide). Nothing to enable on this runtime. If the model does not cut where you want, `--segment` (Prompt Relay) gates local prompts to time ranges on top of the global prompt.
 
 ## Compatibility notes
 

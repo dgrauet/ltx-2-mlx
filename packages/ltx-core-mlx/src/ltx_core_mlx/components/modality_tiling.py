@@ -225,6 +225,9 @@ class VideoModalityTiler:
         tiled_attention_mask: mx.array | None = None
         if attention_mask is not None:
             tiled_attention_mask = attention_mask[:, keep_idx, :][:, :, keep_idx]
+        tiled_keyframes_mask: mx.array | None = None
+        if modality.keyframes_mask is not None:
+            tiled_keyframes_mask = modality.keyframes_mask[:, keep_idx, :]
 
         cond_blend_weights: mx.array | None = None
         if num_total > self._num_generated_tokens:
@@ -250,6 +253,7 @@ class VideoModalityTiler:
             enabled=modality.enabled,
             context_mask=modality.context_mask,
             attention_mask=tiled_attention_mask,
+            keyframes_mask=tiled_keyframes_mask,
         )
         return tiled, TileContext(keep_mask=keep_mask, cond_blend_weights=cond_blend_weights)
 
@@ -356,6 +360,7 @@ class TiledLTXModel:
             tile_kwargs["video_latent"] = tiled_modality.latent
             tile_kwargs["video_positions"] = tiled_modality.positions
             tile_kwargs["video_attention_mask"] = tiled_modality.attention_mask
+            tile_kwargs["video_keyframes_mask"] = tiled_modality.keyframes_mask
             if "video_timesteps" in kwargs and kwargs["video_timesteps"] is not None:
                 tile_kwargs["video_timesteps"] = tiled_modality.timesteps
 
@@ -381,6 +386,7 @@ class TiledLTXModel:
         latent = kwargs["video_latent"]
         positions = kwargs.get("video_positions")
         attention_mask = kwargs.get("video_attention_mask")
+        keyframes_mask = kwargs.get("video_keyframes_mask")
         timesteps = kwargs.get("video_timesteps")
         sigma = kwargs.get("timestep")
         context = kwargs.get("video_text_embeds")
@@ -405,6 +411,7 @@ class TiledLTXModel:
             enabled=True,
             context_mask=None,
             attention_mask=attention_mask,
+            keyframes_mask=keyframes_mask,
         )
 
     def __getattr__(self, name: str):

@@ -9,6 +9,8 @@ Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages_hq.py
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import mlx.core as mx
 from mlx_arsenal.diffusion import TeaCacheController
 
@@ -20,12 +22,13 @@ from ltx_core_mlx.components.patchifiers import (
     compute_video_latent_shape,
     snap_output_dimensions,
 )
+from ltx_core_mlx.conditioning.types.keyframe_slots import extract_generated_keyframes
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule
 from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TI2VidTwoStagesPipeline
-from ltx_pipelines_mlx.utils.helpers import create_noised_state
+from ltx_pipelines_mlx.utils.helpers import create_noised_state, generated_keyframe_conditionings
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, res2s_denoise_loop
 from ltx_pipelines_mlx.utils.types import DEFAULT_AUTO_DURATION, AutoDuration
 
@@ -101,6 +104,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         image: str | None = None,
         images=None,
         prompt_relay=None,
+        generated_keyframes: int | Sequence[int] = 0,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
         enable_teacache: bool = False,
@@ -116,6 +120,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         resolved after prompt encoding (see :meth:`TI2VidTwoStagesPipeline.generate_two_stage`).
         """
         self._require_num_frames_source(num_frames)
+        self._require_generated_keyframes_support(generated_keyframes)
         self._check_teacache_supported(enable_teacache)
 
         # --- Text encoding (Prompt Relay: encode the combined prompt) ---
@@ -172,6 +177,10 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
                 video_encoder=self.vae_encoder,
                 frame_rate=frame_rate,
             )
+        conditionings_1 = [
+            *conditionings_1,
+            *generated_keyframe_conditionings(generated_keyframes, num_frames, frame_rate=frame_rate),
+        ]
 
         # Stage 1 video/audio: legacy_scalar_blend=True for bit-exact match
         # (see ti2vid_two_stages.py for rationale).
@@ -252,6 +261,9 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         # Strip any appended keyframe tokens (multi-anchor with frame_idx>0
         # appends via VideoConditionByKeyframeIndex; only the base
         # F*H*W tokens are spatial latent we need to unpatchify).
+        self.generated_keyframes = extract_generated_keyframes(
+            output_1.video_latent, video_state.generated_keyframe_layout, self.video_patchifier, (H_half, W_half)
+        )
         gen_tokens_1 = output_1.video_latent[:, : F * H_half * W_half, :]
         video_half = self.video_patchifier.unpatchify(gen_tokens_1, (F, H_half, W_half))
 

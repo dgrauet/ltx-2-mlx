@@ -11,6 +11,7 @@ Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages.py
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import mlx.core as mx
@@ -24,6 +25,7 @@ from ltx_core_mlx.components.patchifiers import (
     compute_video_latent_shape,
     snap_output_dimensions,
 )
+from ltx_core_mlx.conditioning.types.keyframe_slots import extract_generated_keyframes
 from ltx_core_mlx.loader.fuse_loras import apply_loras
 from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
 from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
@@ -35,7 +37,11 @@ from ltx_core_mlx.utils.weights import load_split_safetensors
 from ltx_pipelines_mlx._base import BasePipeline
 from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule
 from ltx_pipelines_mlx.utils.generation import is_ltx25_pack
-from ltx_pipelines_mlx.utils.helpers import create_noised_state
+from ltx_pipelines_mlx.utils.helpers import (
+    create_noised_state,
+    generated_keyframe_conditionings,
+    has_generated_keyframes,
+)
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
 from ltx_pipelines_mlx.utils.types import DEFAULT_AUTO_DURATION, AutoDuration
 
@@ -372,6 +378,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         image: str | None = None,
         images=None,
         prompt_relay=None,
+        generated_keyframes: int | Sequence[int] = 0,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
         enable_teacache: bool = False,
@@ -387,6 +394,9 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             num_frames: Number of frames, or an :class:`AutoDuration` request to
                 predict it from the prompt (requires a DurationHead-equipped
                 checkpoint; see :meth:`_base.BasePipeline._require_num_frames_source`).
+            generated_keyframes: ``0`` (off), an ``int`` for that many evenly spaced interior
+                generated keyframe slots, or explicit pixel-frame indices. Stage 1 only;
+                requires a pack with ``use_keyframes_abs_pos_embedding`` (LTX 2.5).
             seed: Random seed.
             stage1_steps: Denoising steps for stage 1 (default: 20).
             stage2_steps: Denoising steps for stage 2.
@@ -409,6 +419,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             Tuple of (video_latent, audio_latent) at full resolution.
         """
         self._require_num_frames_source(num_frames)
+        self._require_generated_keyframes_support(generated_keyframes)
         self._check_teacache_supported(enable_teacache)
 
         # --- Text encoding (Prompt Relay: encode the combined prompt; the negative
@@ -466,6 +477,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
                 video_encoder=self.vae_encoder,
                 frame_rate=frame_rate,
             )
+        conditionings_1 = [
+            *conditionings_1,
+            *generated_keyframe_conditionings(generated_keyframes, num_frames, frame_rate=frame_rate),
+        ]
 
         # Stage 1: scalar-blend-then-cond for video matches legacy create_initial_state
         # → apply_conditioning → noise_latent_state(sigma=1) flow bit-exact for both T2V
@@ -558,6 +573,9 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         # --- Upscale with denormalize/renormalize ---
         # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
+        self.generated_keyframes = extract_generated_keyframes(
+            output_1.video_latent, video_state.generated_keyframe_layout, self.video_patchifier, (H_half, W_half)
+        )
         gen_tokens_1 = output_1.video_latent[:, : F * H_half * W_half, :]
         video_half = self.video_patchifier.unpatchify(gen_tokens_1, (F, H_half, W_half))
 
@@ -685,6 +703,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         enable_teacache: bool = False,
         teacache_thresh: float | None = None,
         prompt_relay=None,
+        generated_keyframes: int | Sequence[int] = 0,
     ) -> str:
         """Generate two-stage video+audio and save to file.
 
@@ -716,6 +735,8 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             gen_kwargs["stage1_steps"] = stage1_steps
         if prompt_relay is not None:
             gen_kwargs["prompt_relay"] = prompt_relay
+        if has_generated_keyframes(generated_keyframes):
+            gen_kwargs["generated_keyframes"] = generated_keyframes
         video_latent, audio_latent = self.generate_two_stage(**gen_kwargs)
 
         # Free transformer + encoder to make room for decoders

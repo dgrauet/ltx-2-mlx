@@ -172,6 +172,7 @@ def denoise_loop(
             video_positions=video_positions,
             audio_positions=audio_positions,
             video_attention_mask=video_attention_mask,
+            video_keyframes_mask=video_state.keyframes_mask,
             audio_attention_mask=audio_attention_mask,
         )
         if video_cross_attention_mask is not None:
@@ -320,6 +321,7 @@ def euler_ancestral_denoising_loop(
             video_positions=video_positions,
             audio_positions=audio_positions,
             video_attention_mask=video_attention_mask,
+            video_keyframes_mask=video_state.keyframes_mask,
             audio_attention_mask=audio_attention_mask,
         )
         if video_cross_attention_mask is not None:
@@ -600,6 +602,7 @@ def res2s_denoise_loop(
             video_positions=video_positions,
             audio_positions=audio_positions,
             video_attention_mask=video_attention_mask,
+            video_keyframes_mask=video_state.keyframes_mask,
             audio_attention_mask=audio_attention_mask,
         )
         # Prompt Relay: positive-context passes only; overridden to None on uncond.
@@ -714,6 +717,7 @@ def res2s_denoise_loop(
                 audio_latent=audio_x.astype(mx.bfloat16),
                 timestep=mx.broadcast_to(sig_arr, (B_v,)),
                 video_timesteps=stage1_video_timesteps,
+                video_keyframes_mask=video_state.keyframes_mask,
             )
 
         should_compute_full = True
@@ -976,6 +980,7 @@ def guided_denoise_loop(
             video_positions=video_positions,
             audio_positions=audio_positions,
             video_attention_mask=video_attention_mask,
+            video_keyframes_mask=video_state.keyframes_mask,
             audio_attention_mask=audio_attention_mask,
         )
         # Prompt Relay gates the video->text cross-attention. Applied to every
@@ -1000,6 +1005,7 @@ def guided_denoise_loop(
                 audio_latent=audio_x,
                 timestep=mx.broadcast_to(sigma_arr, (B,)),
                 video_timesteps=base_kwargs.get("video_timesteps"),
+                video_keyframes_mask=video_state.keyframes_mask,
             )
 
         should_compute_full = True

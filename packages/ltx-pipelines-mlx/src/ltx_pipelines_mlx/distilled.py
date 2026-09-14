@@ -21,6 +21,8 @@ For dev model + CFG quality, see :class:`TI2VidTwoStagesPipeline` /
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import mlx.core as mx
 
 from ltx_core_mlx.components.diffusion_steps import EulerAncestralDiffusionStep
@@ -28,6 +30,7 @@ from ltx_core_mlx.components.patchifiers import (
     compute_video_latent_shape,
     snap_output_dimensions,
 )
+from ltx_core_mlx.conditioning.types.keyframe_slots import extract_generated_keyframes
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import (
@@ -35,6 +38,7 @@ from ltx_core_mlx.utils.positions import (
     compute_audio_token_count,
     compute_video_positions,
 )
+from ltx_pipelines_mlx.utils.helpers import generated_keyframe_conditionings
 
 from .scheduler import (
     DISTILLED_SIGMAS,
@@ -207,6 +211,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         image: str | None = None,
         images=None,
         prompt_relay=None,
+        generated_keyframes: int | Sequence[int] = 0,
         enable_teacache: bool = False,
         **_unused_kwargs,
     ) -> tuple[mx.array, mx.array]:
@@ -219,6 +224,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             num_frames: Number of frames, or an :class:`AutoDuration` request to
                 predict it from the prompt (requires a DurationHead-equipped
                 checkpoint).
+            generated_keyframes: ``0`` (off), an ``int`` for that many evenly spaced interior
+                generated keyframe slots, or explicit pixel-frame indices. Stage 1 only;
+                requires a pack with ``use_keyframes_abs_pos_embedding`` (LTX 2.5).
             seed: Random seed.
             stage1_steps: Stage 1 steps (default: full DISTILLED_SIGMAS = 8).
             stage2_steps: Stage 2 steps (default: full STAGE_2_SIGMAS = 3).
@@ -238,6 +246,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             ValueError: when ``enable_teacache`` is requested on an LTX-2.5 pack.
         """
         self._require_num_frames_source(num_frames)
+        self._require_generated_keyframes_support(generated_keyframes)
         if enable_teacache and self._is_25:
             raise ValueError(
                 "TeaCache is not calibrated for LTX-2.5 packs: the polynomial "
@@ -305,6 +314,10 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
                 video_encoder=self.vae_encoder,
                 frame_rate=frame_rate,
             )
+        conditionings_1 = [
+            *conditionings_1,
+            *generated_keyframe_conditionings(generated_keyframes, num_frames, frame_rate=frame_rate),
+        ]
 
         video_state = create_noised_state(
             base_shape=video_shape,
@@ -357,6 +370,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
 
         # --- Upscale (same denorm/upsample/renorm as TI2VidTwoStagesPipeline) ---
         # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
+        self.generated_keyframes = extract_generated_keyframes(
+            output_1.video_latent, video_state.generated_keyframe_layout, self.video_patchifier, (H_half, W_half)
+        )
         gen_tokens_1 = output_1.video_latent[:, : F * H_half * W_half, :]
         video_half = self.video_patchifier.unpatchify(gen_tokens_1, (F, H_half, W_half))
         video_mlx = video_half.transpose(0, 2, 3, 4, 1)

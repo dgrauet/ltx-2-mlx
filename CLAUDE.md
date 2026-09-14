@@ -360,7 +360,7 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 
 | Command | Pipeline | Tier | Description |
 |---------|----------|------|-------------|
-| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. `-f/--frames` defaults to auto-predicted duration on 2.5 packs (via `DurationHead`) and is **required** on 2.3 packs (immediate `ValueError` before any Gemma load if omitted). `--auto-duration MIN:MAX` overrides the predictor's clamp range on 2.5 packs. `--no-audio` skips audio decode + mux (mp4 with no audio track; video unchanged, audio latents still generated jointly). |
+| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. `-f/--frames` defaults to auto-predicted duration on 2.5 packs (via `DurationHead`) and is **required** on 2.3 packs (immediate `ValueError` before any Gemma load if omitted). `--auto-duration MIN:MAX` overrides the predictor's clamp range on 2.5 packs. `--no-audio` skips audio decode + mux (mp4 with no audio track; video unchanged, audio latents still generated jointly). `--num-generated-keyframes N` (2.5 packs) adds N generated keyframe slots to stage 1 for fast motion. |
 | `keyframe` | Keyframe interpolation | Stable | Two-stage interpolation between start/end frames |
 | `ic-lora` | IC-LoRA | Stable | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
 | `hdr-ic-lora` | HDR IC-LoRA | Stable | Two-stage HDR generation via IC-LoRA + LogC3 inverse (saves SDR mp4 + linear-HDR `.npz`) |
@@ -1011,6 +1011,46 @@ Key files: `packages/ltx-core-mlx/src/ltx_core_mlx/duration_head/duration_head.p
 `seconds_to_clamped_num_frames`); `_base.py::BasePipeline._require_num_frames_source`
 / `_resolve_num_frames`; `cli.py::_parse_auto_duration` / `_resolve_num_frames_arg`.
 
+### Generated keyframe slots (`--num-generated-keyframes N`, 2.5 packs)
+
+Port of upstream ``VideoGeneratedKeyframeSlots`` + the keyframe absolute-position
+embedding. Extra single-pixel-frame token slots are appended to the stage-1
+sequence at evenly spaced interior pixel frames (``linspace(0, F-1, N+2)``
+rounded, endpoints excluded) with ``denoise_mask=1`` and a temporal RoPE span
+of exactly one pixel frame; the model generates their content and conditions
+the surrounding video on them, which relaxes the effective 8× temporal
+compression where motion is fast. Cost: one latent frame of tokens per slot.
+Stage 2 needs no slots (the effect is baked into the stage-1 latent). The
+denoised slot content is extracted as ``(B, C, K, H, W)`` into
+``BasePipeline.generated_keyframes`` before the conditioning tokens are cut; the
+standard pipelines don't decode it (DFR will).
+
+**Keyframe marker on every 2.5 render.** Upstream marks the target's *first
+latent frame* in ``LatentState.keyframes_mask`` unconditionally (the causal
+encoder makes it cover 1 pixel frame) and adds the learned
+``keyframes_abs_pos_embedding`` to marked tokens right after ``patchify_proj``.
+The 2.5 packs carry a small non-zero embedding (norm ≈ 0.05); before this port
+we loaded it and never applied it, so 2.5 renders were slightly off upstream on
+frame 0. Now applied on every 2.5 state (both stages, retake/extend included),
+which shifts 2.5 outputs; 2.3 packs have no such parameter and stay
+byte-identical. ``video_keyframes_mask`` kwarg on ``LTXModel.__call__``
+(``None`` = exact no-op) is threaded from the state by all four sampler loops,
+the TeaCache gate probe, ``Modality`` and the tiling wrapper.
+
+Key files: ``conditioning/types/keyframe_slots.py`` (item + extraction),
+``conditioning/mask_utils.py`` (``first_frame_keyframes_mask`` /
+``extend_keyframes_mask``), ``model/transformer/model.py``
+(``apply_keyframes_absolute_embedding``), ``utils/helpers.py``
+(``evenly_spaced_keyframe_positions`` / ``generated_keyframe_conditionings``),
+``BasePipeline._require_generated_keyframes_support`` (fails before any Gemma
+load on packs without the embedding). Tests: ``tests/test_keyframe_slots.py``.
+
+**Multishot prompting.** LTX-2.5's "native multishot" is a model capability, not
+a pipeline feature: describe the shots in order in one prompt (see
+[Lightricks' prompting guide](https://docs.ltx.video/open-source-model/usage-guides/prompting-guide)).
+On this runtime, `--segment` (Prompt Relay) additionally gates local prompts to
+time ranges when the model does not cut where you want.
+
 ### Two-Stage on LTX-2.5
 
 `generate --two-stage --model <2.5-pack-dir>` runs the dev model + CFG
@@ -1040,6 +1080,8 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
 | `enhance` / `--enhance-prompt` | raises `NotImplementedError` (`_guard_enhance_not_gemma4`) — Gemma 3 only |
 | `--enable-teacache` | raises `ValueError` — 2.3 polynomial isn't calibrated for 2.5 |
 | Modality tiling, Prompt Relay | validated on 2.3 only |
+| Generated keyframe slots (`--num-generated-keyframes N`) | supported on `generate` (all four modes, stage 1 only); refused up front on 2.3 packs (no `use_keyframes_abs_pos_embedding`) |
+| DFR (`DFRPipeline`), diffusion video decoder (`NADiffusionDecoder`, `vae_decoder_av.safetensors` is already in the packs) | not yet ported — DFR needs the diffusion decoder + `Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler` |
 | Diffusion (`DiffVAEMode`) VAE decoder | not loaded — conv `vae_decoder_conv` used (see Weight Format) |
 
 The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once

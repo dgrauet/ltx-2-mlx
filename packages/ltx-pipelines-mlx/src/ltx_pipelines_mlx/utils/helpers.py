@@ -11,10 +11,13 @@ to be read side-by-side with the upstream Python files.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
 
+from ltx_core_mlx.conditioning.mask_utils import first_frame_keyframes_mask
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState, noise_latent_state
 
 if TYPE_CHECKING:
@@ -146,11 +149,20 @@ def create_noised_state(
         # drift across denoise steps.
         latent = initial_latent
 
+    denoise_mask = mx.ones((base_shape[0], base_shape[1], 1), dtype=dtype)
+    # Video states (3 position axes) mark their first latent frame as a
+    # single-pixel-frame token class, exactly like upstream
+    # ``VideoLatentTools.create_initial_state``; audio states carry no marker.
+    _, spatial_h, spatial_w = spatial_dims
+    keyframes_mask = (
+        first_frame_keyframes_mask(denoise_mask, spatial_h * spatial_w) if positions.shape[-1] == 3 else None
+    )
     state = LatentState(
         latent=latent,
         clean_latent=latent,
-        denoise_mask=mx.ones((base_shape[0], base_shape[1], 1), dtype=dtype),
+        denoise_mask=denoise_mask,
         positions=positions,
+        keyframes_mask=keyframes_mask,
     )
 
     if legacy_scalar_blend:
@@ -163,14 +175,98 @@ def create_noised_state(
         mx.random.seed(seed)
         noise = mx.random.normal(state.clean_latent.shape).astype(mx.bfloat16)
         blended = noise * sigma + state.clean_latent * (1.0 - sigma)
-        state = LatentState(
-            latent=blended,
-            clean_latent=state.clean_latent,
-            denoise_mask=state.denoise_mask,
-            positions=state.positions,
-            attention_mask=state.attention_mask,
-        )
-        return state_with_conditionings(state, conditionings, spatial_dims)
+        state = replace(state, latent=blended)
+        state = state_with_conditionings(state, conditionings, spatial_dims)
+        return _noise_generated_keyframe_slots(state, sigma, seed)
 
     state = state_with_conditionings(state, conditionings, spatial_dims)
     return noise_latent_state(state, sigma=sigma, seed=seed)
+
+
+#: Decorrelates the slot noise draw from the main latent draw (which reuses ``seed``).
+GENERATED_KEYFRAME_NOISE_SEED_OFFSET = 20000
+
+
+def _noise_generated_keyframe_slots(state: LatentState, sigma: float, seed: int) -> LatentState:
+    """Noise generated keyframe slots appended *after* the legacy scalar blend.
+
+    Upstream noises the whole sequence after conditioning, so slots (zero latent,
+    ``denoise_mask=1``) come out as ``noise * sigma + latent * (1 - sigma)``. The legacy
+    path blends before conditioning for bit-equivalence with older baselines, which would
+    leave slots at their seed value; this applies the same blend to the slot range only.
+    """
+    layout = state.generated_keyframe_layout
+    if layout is None:
+        return state
+    mx.random.seed(seed + GENERATED_KEYFRAME_NOISE_SEED_OFFSET)
+    slot = state.latent[:, layout.token_slice]
+    noise = mx.random.normal(slot.shape).astype(slot.dtype)
+    blended = noise * sigma + slot * (1.0 - sigma)
+    latent = mx.concatenate(
+        [state.latent[:, : layout.first_token], blended, state.latent[:, layout.first_token + layout.num_tokens :]],
+        axis=1,
+    )
+    return replace(state, latent=latent)
+
+
+def evenly_spaced_keyframe_positions(num_keyframes: int, num_frames: int) -> list[int]:
+    """Interior pixel-frame positions for ``num_keyframes`` generated keyframes, endpoints excluded.
+
+    Mirror of upstream: ``linspace(0, num_frames - 1, num_keyframes + 2)`` rounded
+    half-to-even (torch.round semantics), computed in float32 like torch's linspace.
+    """
+    import numpy as np
+
+    if num_keyframes < 0:
+        raise ValueError(f"num_keyframes must be non-negative, got {num_keyframes}")
+    if num_keyframes == 0:
+        return []
+    if num_frames < num_keyframes + 2:
+        raise ValueError(
+            f"Generated keyframes need at least num_keyframes + 2 target frames, got "
+            f"num_keyframes={num_keyframes}, num_frames={num_frames}"
+        )
+    grid = np.linspace(0, num_frames - 1, num_keyframes + 2, dtype=np.float32)
+    return [int(v) for v in np.rint(grid).astype(np.int64).tolist()[1:-1]]
+
+
+def has_generated_keyframes(generated_keyframes: int | Sequence[int]) -> bool:
+    """Whether a ``generated_keyframes`` request asks for any slots (never test truthiness of an array)."""
+    if isinstance(generated_keyframes, int):
+        return generated_keyframes > 0
+    return len(generated_keyframes) > 0
+
+
+def resolve_generated_keyframes(generated_keyframes: int | Sequence[int], num_frames: int) -> list[int]:
+    """Normalize the pipeline-level ``generated_keyframes`` argument to sorted pixel-frame indices.
+
+    An ``int`` requests that many evenly spaced interior keyframes; a sequence gives the target
+    pixel-frame indices explicitly. ``0`` / empty means the feature is off.
+    """
+    if isinstance(generated_keyframes, int):
+        return evenly_spaced_keyframe_positions(generated_keyframes, num_frames)
+    positions = sorted({int(p) for p in generated_keyframes})
+    if positions and (positions[0] < 0 or positions[-1] >= num_frames):
+        raise ValueError(
+            f"Generated keyframe positions must lie in [0, {num_frames}), got {sorted(int(p) for p in generated_keyframes)}"
+        )
+    return positions
+
+
+def generated_keyframe_conditionings(
+    generated_keyframes: int | Sequence[int],
+    num_frames: int,
+    *,
+    frame_rate: float,
+) -> list:
+    """Build the generated-keyframe conditioning, or an empty list when the feature is off.
+
+    All slots go into one :class:`VideoGeneratedKeyframeSlots` so their tokens form a single
+    contiguous, exactly-locatable range.
+    """
+    from ltx_core_mlx.conditioning.types.keyframe_slots import VideoGeneratedKeyframeSlots
+
+    positions = resolve_generated_keyframes(generated_keyframes, num_frames)
+    if not positions:
+        return []
+    return [VideoGeneratedKeyframeSlots(pixel_frame_indices=positions, frame_rate=frame_rate)]
