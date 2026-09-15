@@ -8,6 +8,7 @@ from ltx_pipelines_mlx.scheduler import (
     get_sigma_schedule,
     ltx2_schedule,
     sigma_to_timestep,
+    stage2_sigmas,
 )
 
 
@@ -62,6 +63,50 @@ class TestStage2Sigmas:
         """Stage 2 sigmas should be a subset of distilled sigmas."""
         for s in STAGE_2_SIGMAS:
             assert s in DISTILLED_SIGMAS
+
+
+# ---------------------------------------------------------------------------
+# stage2_sigmas — must ALWAYS terminate at 0.0 (regression: a2v fast corruption)
+# ---------------------------------------------------------------------------
+class TestStage2SigmasHelper:
+    """Regression guard for the stage-2 schedule-truncation bug.
+
+    Prefix-slicing STAGE_2_SIGMAS for stage2_steps < 3 used to drop the terminal
+    0.0, leaving the VAE a partially noised latent (rendered as colour speckle).
+    stage2_sigmas() must always end at 0.0 regardless of step count.
+    """
+
+    def test_none_returns_full_schedule(self):
+        assert stage2_sigmas(None) == STAGE_2_SIGMAS
+        assert stage2_sigmas(0) == STAGE_2_SIGMAS
+
+    @pytest.mark.parametrize("steps", [1, 2, 3, 4, 5])
+    def test_always_terminates_at_zero(self, steps):
+        assert stage2_sigmas(steps)[-1] == 0.0
+
+    @pytest.mark.parametrize("steps", [1, 2, 3])
+    def test_length_is_steps_plus_one(self, steps):
+        # N steps => N+1 sigmas (denoise_loop iterates consecutive pairs)
+        assert len(stage2_sigmas(steps)) == steps + 1
+
+    def test_three_steps_matches_full_table(self):
+        # The supported case must be byte-identical to the old STAGE_2_SIGMAS[:4].
+        assert stage2_sigmas(3) == STAGE_2_SIGMAS
+
+    def test_two_steps_keeps_calibrated_head(self):
+        assert stage2_sigmas(2) == [STAGE_2_SIGMAS[0], STAGE_2_SIGMAS[1], 0.0]
+
+    def test_beyond_table_length_clamps_without_phantom_zero(self):
+        # asking for more steps than the table provides must not append a
+        # second trailing 0.0 (a zero-length final Euler step).
+        assert stage2_sigmas(4) == STAGE_2_SIGMAS
+        assert stage2_sigmas(9) == STAGE_2_SIGMAS
+
+    @pytest.mark.parametrize("steps", [1, 2, 3, 4])
+    def test_strictly_decreasing(self, steps):
+        s = stage2_sigmas(steps)
+        for i in range(len(s) - 1):
+            assert s[i] > s[i + 1]
 
 
 # ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ __all__ = [
     "get_sigma_schedule",
     "ltx2_schedule",
     "sigma_to_timestep",
+    "stage2_sigmas",
 ]
 
 # Predefined sigma schedule for 8-step distilled model.
@@ -90,6 +91,44 @@ LTX_2_5_STAGE_2_DISTILLED_SIGMAS: list[float] = [
     0.421875,
     0.0,
 ]
+
+
+def stage2_sigmas(stage2_steps: int | None = None) -> list[float]:
+    """Stage-2 refinement sigma schedule that always terminates at 0.0.
+
+    ``STAGE_2_SIGMAS`` is a fixed 4-value table (3 steps) whose terminal value
+    is 0.0. Naively prefix-slicing it for ``stage2_steps < 3`` (e.g.
+    ``STAGE_2_SIGMAS[:stage2_steps + 1]``) drops that terminal 0.0, so
+    ``denoise_loop`` stops at a non-zero sigma and hands the VAE a latent that
+    is still partially noised — which the decoder renders as heavy colour
+    speckle. Always append the terminal 0.0 so the final Euler step fully
+    denoises, for any step count.
+
+    Args:
+        stage2_steps: Number of stage-2 steps. ``None``/0 → the full default
+            3-step schedule. Values ``>= 3`` are clamped to the 3 steps the
+            table provides (no phantom zero-length final step).
+
+    Note:
+        Deliberately scoped to ``STAGE_2_SIGMAS``. The LTX-2.5 distilled path has
+        its own value-identical ``LTX_2_5_STAGE_2_DISTILLED_SIGMAS`` and appears
+        to carry the same truncation, but upstream's tests assert that slice AND
+        the table's object identity on purpose, and the speckle this fixes was
+        only ever reproduced on the dev two-stage path. Left alone rather than
+        "fixed" on inference.
+
+    Returns:
+        Sigma list of length ``num_steps + 1``, always ending at 0.0.
+    """
+    if not stage2_steps:
+        return list(STAGE_2_SIGMAS)
+    head = list(STAGE_2_SIGMAS[:stage2_steps])
+    if head and head[-1] == 0.0:
+        # Only stage2_steps >= 4 lands here: STAGE_2_SIGMAS[:3] stops at 0.421875, so
+        # stage2_steps == 3 takes the append path below and reconstructs the full table.
+        # Same result either way; this branch just avoids appending a duplicate 0.0.
+        return head
+    return head + [0.0]
 
 
 def get_sigma_schedule(
