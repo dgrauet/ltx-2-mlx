@@ -7,10 +7,14 @@ model code so they stay testable without weights.
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass, replace
 
+import mlx.core as mx
+
 from ltx_core_mlx.model.video_vae.diffusion_decoder.config import DiffusionDecoderConfig, Kernel
+from ltx_core_mlx.model.video_vae.tiling import compute_trapezoidal_mask_1d
 
 
 @dataclass(frozen=True)
@@ -296,3 +300,146 @@ class DiffusionTileConfig:
         ov_h = geometry.overlap_px if height else 0
         ov_w = geometry.overlap_px if width else 0
         return cls(frames, ov_t, height, ov_h, width, ov_w).validate(geometry)
+
+
+@dataclass(frozen=True)
+class DiffusionTile:
+    """One tile: input slices on the stage-4 grid, output slices + 1-D masks on the pixel grid.
+
+    Attributes:
+        index: Position in the schedule (temporal group slowest, then h, then w); seeds the tile noise.
+        in_t: Temporal slice of the stage-4 **content** frames (ghost frames are appended by the decoder
+            when ``pad_trailing``).
+        in_h: Stage-4 H slice.
+        in_w: Stage-4 W slice.
+        out_t: Pixel-frame slice of the padded-latent output.
+        out_h: Pixel H slice.
+        out_w: Pixel W slice.
+        mask_t: Float32 trapezoid mask of length ``out_t.stop - out_t.start``.
+        mask_h: Float32 mask over ``out_h``.
+        mask_w: Float32 mask over ``out_w``.
+        is_origin: The tile starts at stage-4 frame 0 (drops the duplicated leading frame).
+        pad_trailing: The tile reaches the last content frame (gets the ghost frames, then the ghost crop).
+    """
+
+    index: int
+    in_t: slice
+    in_h: slice
+    in_w: slice
+    out_t: slice
+    out_h: slice
+    out_w: slice
+    mask_t: mx.array
+    mask_h: mx.array
+    mask_w: mx.array
+    is_origin: bool
+    pad_trailing: bool
+
+
+def output_fhw(geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel) -> Kernel:
+    """Pixel shape ``(F_px, H_px, W_px)`` decoded from a padded latent (``(F-1)*8+1, 32H, 32W``)."""
+    f, h, w = latent_fhw_padded
+    ft, fh, fw = geometry.latent_scale
+    return ((f - 1) * ft + 1, h * fh, w * fw)
+
+
+def _axis_specs(
+    geometry: DiffusionTileGeometry, axis: int, length: int, tile_px: int, overlap_px: int
+) -> list[tuple[slice, slice, mx.array]]:
+    """``(in_slice, out_slice, mask)`` per interval of one axis (upstream ``dt:462-491``)."""
+    st3 = geometry.strides[3][axis]
+    specs = []
+    for iv in geometry.intervals_for_axis(axis, length, tile_px, overlap_px):
+        if axis == 0:
+            px = propagate_temporal(iv, st3)
+        else:
+            px = propagate_spatial(propagate_spatial(iv, st3), geometry.patch_size)
+        mask = compute_trapezoidal_mask_1d(px.length, px.left_ramp, px.right_ramp).astype(mx.float32)
+        specs.append((slice(iv.start, iv.end), slice(px.start, px.end), mask))
+    return specs
+
+
+def build_tile_schedule(
+    geometry: DiffusionTileGeometry,
+    latent_fhw_padded: Kernel,
+    config: DiffusionTileConfig | None,
+    *,
+    allow_small_overlap: bool = False,
+) -> list[DiffusionTile]:
+    """Cartesian product of the per-axis intervals, temporal axis slowest (upstream ``dt:421-505``).
+
+    Args:
+        geometry: Decoder tile geometry.
+        latent_fhw_padded: Latent shape after :func:`padded_latent_fhw` (content, no ghost frames).
+        config: Tile sizes; ``None`` = one tile covering everything.
+        allow_small_overlap: Test-only escape from the recommended-overlap check.
+    """
+    cfg = config or DiffusionTileConfig(0, 0, 0, 0, 0, 0)
+    cfg.validate(geometry, allow_small_overlap=allow_small_overlap)
+    t4, h4, w4 = geometry.stage4_content_thw(*latent_fhw_padded)
+    t_specs = _axis_specs(geometry, 0, t4, *cfg.axis(0))
+    h_specs = _axis_specs(geometry, 1, h4, *cfg.axis(1))
+    w_specs = _axis_specs(geometry, 2, w4, *cfg.axis(2))
+    tiles: list[DiffusionTile] = []
+    for i, ((it, ot, mt), (ih, oh, mh), (iw, ow, mw)) in enumerate(itertools.product(t_specs, h_specs, w_specs)):
+        tiles.append(
+            DiffusionTile(
+                index=i,
+                in_t=it,
+                in_h=ih,
+                in_w=iw,
+                out_t=ot,
+                out_h=oh,
+                out_w=ow,
+                mask_t=mt,
+                mask_h=mh,
+                mask_w=mw,
+                is_origin=it.start == 0,
+                pad_trailing=it.stop == t4,
+            )
+        )
+    return tiles
+
+
+def masks_are_complementary(tiles: list[DiffusionTile], out_fhw: Kernel, atol: float = 1e-5) -> bool:
+    """True when, per axis, the masks of the unique output slices sum to one everywhere (``tl:501-535``)."""
+    for axis, (out_attr, mask_attr) in enumerate((("out_t", "mask_t"), ("out_h", "mask_h"), ("out_w", "mask_w"))):
+        total = mx.zeros((out_fhw[axis],), dtype=mx.float32)
+        seen: set[tuple[int, int]] = set()
+        for tile in tiles:
+            s: slice = getattr(tile, out_attr)
+            if (s.start, s.stop) in seen:
+                continue
+            seen.add((s.start, s.stop))
+            total[s] = total[s] + getattr(tile, mask_attr)
+        if not mx.allclose(total, mx.ones_like(total), atol=atol).item():
+            return False
+    return True
+
+
+def group_tiles_by_temporal_slice(tiles: list[DiffusionTile]) -> list[list[DiffusionTile]]:
+    """Consecutive tiles sharing ``out_t`` form one temporal group (schedule order is temporal-slowest)."""
+    groups: list[list[DiffusionTile]] = []
+    for tile in tiles:
+        if groups and groups[-1][0].out_t == tile.out_t:
+            groups[-1].append(tile)
+        else:
+            groups.append([tile])
+    return groups
+
+
+def describe_tiling(geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel, config: DiffusionTileConfig) -> str:
+    """One-line human summary: tile counts, sizes, overlaps and the compute redundancy factor."""
+    t4, h4, w4 = geometry.stage4_content_thw(*latent_fhw_padded)
+    n_t = len(geometry.intervals_for_axis(0, t4, *config.axis(0)))
+    n_h = len(geometry.intervals_for_axis(1, h4, *config.axis(1)))
+    n_w = len(geometry.intervals_for_axis(2, w4, *config.axis(2)))
+    f_px, h_px, w_px = output_fhw(geometry, latent_fhw_padded)
+    tile_t = config.tile_frames or f_px
+    tile_h = config.tile_px_h or h_px
+    tile_w = config.tile_px_w or w_px
+    redundancy = n_t * n_h * n_w * tile_t * tile_h * tile_w / (f_px * h_px * w_px)
+    return (
+        f"tiles={n_t}x{n_h}x{n_w} ({n_t * n_h * n_w}) frames={config.tile_frames}/{config.overlap_frames} "
+        f"px={config.tile_px_h}x{config.tile_px_w}/{config.overlap_px_h} redundancy=x{redundancy:.1f}"
+    )

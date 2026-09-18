@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
+
+import mlx.core as mx
 import pytest
 
 from ltx_core_mlx.model.video_vae.diffusion_decoder.config import LTX_2_5_DIFFUSION_DECODER
@@ -9,6 +12,11 @@ from ltx_core_mlx.model.video_vae.diffusion_decoder.tiling import (
     DiffusionTileConfig,
     DiffusionTileGeometry,
     Interval,
+    build_tile_schedule,
+    describe_tiling,
+    group_tiles_by_temporal_slice,
+    masks_are_complementary,
+    output_fhw,
     padded_latent_fhw,
     propagate_spatial,
     propagate_temporal,
@@ -155,3 +163,71 @@ def test_intervals_for_axis_converts_pixels_to_cells():
     assert g.intervals_for_axis(0, 17, 16, 8) == split_by_size(17, 8, 4, 3)
     assert g.intervals_for_axis(1, 12, 64, 32) == split_by_size(12, 8, 4, 3)
     assert g.intervals_for_axis(1, 12, 0, 0) == [Interval(0, 12)]
+
+
+TINY_G = DiffusionTileGeometry.from_config(TINY)
+TINY_CFG = DiffusionTileConfig(16, 8, 64, 32, 64, 32)
+
+
+def test_untiled_schedule_is_one_tile_covering_everything():
+    tiles = build_tile_schedule(TINY_G, (5, 3, 3), None)
+    assert len(tiles) == 1
+    t = tiles[0]
+    assert (t.in_t, t.in_h, t.in_w) == (slice(0, 17), slice(0, 12), slice(0, 12))
+    assert (t.out_t, t.out_h, t.out_w) == (slice(0, 33), slice(0, 96), slice(0, 96))
+    assert t.is_origin and t.pad_trailing and t.index == 0
+    assert mx.array_equal(t.mask_t, mx.ones(33)) and t.mask_t.dtype == mx.float32
+    assert output_fhw(TINY_G, (5, 3, 3)) == (33, 96, 96)
+
+
+def test_tiny_schedule_geometry():
+    tiles = build_tile_schedule(TINY_G, (5, 3, 3), TINY_CFG)
+    assert len(tiles) == 16 and [t.index for t in tiles] == list(range(16))
+    # temporal slowest: tiles 0-3 share in_t [0,8)
+    assert all(t.in_t == slice(0, 8) for t in tiles[:4]) and tiles[4].in_t == slice(4, 12)
+    assert [t.out_t for t in tiles[::4]] == [slice(0, 15), slice(7, 23), slice(15, 31), slice(23, 33)]
+    assert [t.is_origin for t in tiles[::4]] == [True, False, False, False]
+    assert [t.pad_trailing for t in tiles[::4]] == [False, False, False, True]
+    assert tiles[0].out_h == slice(0, 64) and tiles[1].out_w == slice(32, 96) and tiles[1].in_w == slice(4, 12)
+    assert tiles[0].mask_t.shape == (15,) and tiles[4].mask_t.shape == (16,) and tiles[12].mask_t.shape == (10,)
+    # ramps: first tile fades out over 8 frames with k/(r+1); middle tiles fade in with the complement
+    assert mx.allclose(tiles[0].mask_t[7:], mx.array([(9 - k) / 9 for k in range(1, 9)])).item()
+    assert mx.allclose(tiles[4].mask_t[:8], mx.array([k / 9 for k in range(1, 9)])).item()
+    assert masks_are_complementary(tiles, output_fhw(TINY_G, (5, 3, 3)))
+
+
+def test_production_schedule_1088x1920x97():
+    g = DiffusionTileGeometry.from_config(LTX_2_5_DIFFUSION_DECODER)
+    tiles = build_tile_schedule(g, (13, 34, 60), DiffusionTileConfig(80, 40, 320, 160, 320, 160))
+    assert len(tiles) == 2 * 6 * 11
+    assert tiles[0].in_t == slice(0, 40) and tiles[-1].in_t == slice(20, 49)
+    assert tiles[0].out_t == slice(0, 79) and tiles[-1].out_t == slice(39, 97)
+    assert tiles[-1].in_h == slice(100, 136) and tiles[-1].out_h == slice(800, 1088)
+    assert tiles[-1].in_w == slice(200, 240) and tiles[-1].out_w == slice(1600, 1920)
+    assert masks_are_complementary(tiles, output_fhw(g, (13, 34, 60)))
+    assert output_fhw(g, (13, 34, 60)) == (97, 1088, 1920)
+
+
+def test_schedule_rejects_small_overlap_unless_allowed():
+    with pytest.raises(ValueError):
+        build_tile_schedule(TINY_G, (5, 3, 3), DiffusionTileConfig(16, 0, 0, 0, 0, 0))
+    tiles = build_tile_schedule(TINY_G, (5, 3, 3), DiffusionTileConfig(16, 0, 0, 0, 0, 0), allow_small_overlap=True)
+    assert len(tiles) == 3 and tiles[1].out_t == slice(15, 31)
+
+
+def test_masks_not_complementary_for_asymmetric_ramps():
+    tiles = build_tile_schedule(TINY_G, (5, 3, 3), TINY_CFG)
+    bad = [dataclasses.replace(tiles[0], mask_t=mx.ones(15)), *tiles[1:]]
+    assert not masks_are_complementary(bad, output_fhw(TINY_G, (5, 3, 3)))
+
+
+def test_group_by_temporal_slice():
+    tiles = build_tile_schedule(TINY_G, (5, 3, 3), TINY_CFG)
+    groups = group_tiles_by_temporal_slice(tiles)
+    assert [len(g) for g in groups] == [4, 4, 4, 4]
+    assert [g[0].out_t.start for g in groups] == [0, 7, 15, 23]
+
+
+def test_describe_tiling():
+    s = describe_tiling(TINY_G, (5, 3, 3), TINY_CFG)
+    assert "tiles=4x2x2" in s and "frames=16/8" in s and "px=64x64/32" in s and "redundancy=x" in s
