@@ -76,8 +76,9 @@ def test_context_inject_equals_whole_volume_formula():
     blk = ChunkedDiffusionNABlock(4, 4, (3, 3, 3), context_channels=4)
     feat = mx.random.normal((1, 3, 2, 5, 8))
     x = mx.random.normal((1, 5, 4, 10, 4))
-    got = inject_context(x, feat, up, blk.context_proj, drop_leading_frame=True)
-    ref = x + blk.context_proj(up(feat, drop_leading_frame=True))
+    context = up(feat, drop_leading_frame=True)
+    got = inject_context(x, context, blk.context_proj)
+    ref = x + blk.context_proj(context)
     assert mx.allclose(got, ref, atol=1e-6).item()
 
 
@@ -105,9 +106,10 @@ def test_block_call_order_inject_attn_mlp():
     mod = adaln(mx.random.normal((1, 6)))
     feat = mx.random.normal((1, 3, 2, 5, 8))
     x = mx.random.normal((1, 5, 4, 10, dim))
-    y = blk(x, feat, up, mod, drop_leading_frame=True)
+    context = up(feat, drop_leading_frame=True)
+    y = blk(x, context, mod)
     p = [m + blk.scale_shift_table[i].reshape(1, 1, 1, 1, dim) for i, m in enumerate(mod)]
-    h = inject_context(x, feat, up, blk.context_proj, drop_leading_frame=True)
+    h = inject_context(x, context, blk.context_proj)
     h = blk.attention_residual(h, mod)
     ref = h + blk.mlp(blk.norm2(h) * (1 + p[3]) + p[4])
     assert mx.allclose(y, ref, atol=1e-5).item()

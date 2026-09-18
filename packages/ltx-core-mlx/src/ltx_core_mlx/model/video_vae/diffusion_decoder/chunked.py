@@ -7,6 +7,10 @@ last core column on the right). RoPE W positions are global (pad cells get out-o
 positions). Neighborhood attention runs on the padded slab as if it were the whole volume; only
 the core columns are written back. Interior columns therefore equal full-volume attention, the
 first / last ``halo`` columns do not — that is what upstream users get by default.
+
+The context (stage-4 feature pixel-shuffled to stage-5 resolution) is upsampled once by the
+caller (:meth:`NADiffusionDecoder.forward_stage_5`) and injected identically into every block,
+since the upsample input and the shared upsample weights are the same across blocks.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from ltx_core_mlx.model.video_vae.diffusion_decoder.blocks import NeighborhoodAttention3D
-from ltx_core_mlx.model.video_vae.diffusion_decoder.layers import LinearPixelShuffleUpsample, RMSNorm, SwiGLU
+from ltx_core_mlx.model.video_vae.diffusion_decoder.layers import RMSNorm, SwiGLU
 from ltx_core_mlx.model.video_vae.diffusion_decoder.neighborhood_attention import Kernel, na3d
 
 W_CHUNKS = 4  # upstream `_CHUNKED_W_CHUNKS`, not configurable
@@ -64,16 +68,14 @@ def build_w_slabs(x: mx.array, halo: int, w_chunks: int = W_CHUNKS) -> list[tupl
     return slabs
 
 
-def inject_context(
-    x: mx.array,
-    stage4_feat: mx.array,
-    upsample: LinearPixelShuffleUpsample,
-    context_proj: nn.Linear,
-    *,
-    drop_leading_frame: bool,
-) -> mx.array:
-    """``x + context_proj(upsample(stage4_feat))`` — upstream does it in 4 W pieces, which is column-wise identical."""
-    return x + context_proj(upsample(stage4_feat, drop_leading_frame=drop_leading_frame))
+def inject_context(x: mx.array, context: mx.array, context_proj: nn.Linear) -> mx.array:
+    """``x + context_proj(context)`` where ``context`` is the pixel-shuffled stage-4 feature.
+
+    Upstream re-applies ``upsamples[3]`` inside every block; the upsample is shared and its input
+    is identical, so computing it once per tile (see ``NADiffusionDecoder.forward_stage_5``) is
+    bit-identical and avoids eight redundant 512->2048 projections.
+    """
+    return x + context_proj(context)
 
 
 class ChunkedDiffusionNABlock(nn.Module):
@@ -107,16 +109,8 @@ class ChunkedDiffusionNABlock(nn.Module):
             outs.append(o[:, :, :, halo : halo + core_len])
         return x + mx.concatenate(outs, axis=3)
 
-    def __call__(
-        self,
-        x: mx.array,
-        stage4_feat: mx.array,
-        upsample: LinearPixelShuffleUpsample,
-        modulation: list[mx.array],
-        *,
-        drop_leading_frame: bool,
-    ) -> mx.array:
+    def __call__(self, x: mx.array, context: mx.array, modulation: list[mx.array]) -> mx.array:
         _, _, scale_mlp, shift_mlp = self._modulation(modulation)
-        x = inject_context(x, stage4_feat, upsample, self.context_proj, drop_leading_frame=drop_leading_frame)
+        x = inject_context(x, context, self.context_proj)
         x = self.attention_residual(x, modulation)
         return x + self.mlp(self.norm2(x) * (1 + scale_mlp) + shift_mlp)
