@@ -456,11 +456,13 @@ BUDGET_ENV = "LTX2_VAE_DECODE_BUDGET_GB"
 
 
 def _stage4_feature_bytes(geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel) -> int:
+    """bf16 bytes of the resident stage-4 feature including the ghost frames."""
     t4, h4, w4 = geometry.stage4_content_thw(*latent_fhw_padded)
     return (t4 + geometry.ghost_frames_s4) * h4 * w4 * geometry.stage4_channels * 2
 
 
 def _stage5_bytes_per_token(geometry: DiffusionTileGeometry) -> float:
+    """Activation bytes per stage-5 token: channels x 2 x STAGE5_MEM_COEF."""
     return geometry.stage5_channels * 2 * STAGE5_MEM_COEF
 
 
