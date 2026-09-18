@@ -28,6 +28,7 @@ class Interval:
 
     @property
     def length(self) -> int:
+        """Length of the interval: ``end - start``."""
         return self.end - self.start
 
 
