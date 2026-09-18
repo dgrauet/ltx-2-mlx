@@ -443,3 +443,99 @@ def describe_tiling(geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel, 
         f"tiles={n_t}x{n_h}x{n_w} ({n_t * n_h * n_w}) frames={config.tile_frames}/{config.overlap_frames} "
         f"px={config.tile_px_h}x{config.tile_px_w}/{config.overlap_px_h} redundancy=x{redundancy:.1f}"
     )
+
+
+#: Upstream ``chunked_eager`` stage-5 activation coefficient: bytes per token = channels * 2 * coef.
+STAGE5_MEM_COEF = 5.0
+#: Headroom kept free on top of the model and activations.
+RESERVE_BYTES = 1 << 30
+#: Weights are charged at least this much (upstream ``dt:77``).
+MIN_MODEL_BYTES = 1 << 30
+#: Budget env var, shared with the conv decoder.
+BUDGET_ENV = "LTX2_VAE_DECODE_BUDGET_GB"
+
+
+def _stage4_feature_bytes(geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel) -> int:
+    t4, h4, w4 = geometry.stage4_content_thw(*latent_fhw_padded)
+    return (t4 + geometry.ghost_frames_s4) * h4 * w4 * geometry.stage4_channels * 2
+
+
+def _stage5_bytes_per_token(geometry: DiffusionTileGeometry) -> float:
+    return geometry.stage5_channels * 2 * STAGE5_MEM_COEF
+
+
+def estimate_untiled_bytes(geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel) -> int:
+    """Activation bytes of a one-tile decode: stage-5 tokens x bytes/token + the fp16 output accumulator."""
+    f_px, h_px, w_px = output_fhw(geometry, latent_fhw_padded)
+    p = geometry.patch_size
+    tokens = f_px * (h_px // p) * (w_px // p)
+    return int(tokens * _stage5_bytes_per_token(geometry)) + f_px * h_px * w_px * 3 * 2
+
+
+def _candidates(
+    geometry: DiffusionTileGeometry, axis: int, length_s4: int, length_px: int, min_px: int, step: int, overlap: int
+) -> list[tuple[int, int]]:
+    """``(tile_px, n_intervals)`` for every grid size from the minimum up to the full axis."""
+    top = max(min_px, round_up(length_px, step))
+    out = []
+    for size in range(min_px, top + 1, step):
+        if size <= overlap:
+            continue
+        out.append((size, len(geometry.intervals_for_axis(axis, length_s4, size, overlap))))
+    return out
+
+
+def auto_tile_config(
+    geometry: DiffusionTileGeometry,
+    latent_fhw_padded: Kernel,
+    *,
+    budget_bytes: int,
+    weight_bytes: int,
+) -> DiffusionTileConfig | None:
+    """Pick tile sizes that keep the decode under ``budget_bytes`` (upstream ``dt:261-418``, simplified).
+
+    Returns ``None`` when the whole decode fits (no tiling). Otherwise the feasible
+    ``(frames, h, w)`` on the ``(step_frames, step_px, step_px)`` grid with the least overlap
+    redundancy; ties prefer the larger tile, then fewer tiles.
+
+    Raises:
+        ValueError: No tile fits (names ``LTX2_VAE_DECODE_BUDGET_GB``).
+    """
+    usable = (
+        budget_bytes
+        - max(weight_bytes, MIN_MODEL_BYTES)
+        - RESERVE_BYTES
+        - _stage4_feature_bytes(geometry, latent_fhw_padded)
+    )
+    if estimate_untiled_bytes(geometry, latent_fhw_padded) <= usable:
+        return None
+    t4, h4, w4 = geometry.stage4_content_thw(*latent_fhw_padded)
+    f_px, h_px, w_px = output_fhw(geometry, latent_fhw_padded)
+    ov_t, ov_hw = geometry.overlap_frames, geometry.overlap_px
+    cand_t = _candidates(geometry, 0, t4, f_px, geometry.min_tile_frames, geometry.step_frames, ov_t)
+    cand_h = _candidates(geometry, 1, h4, h_px, geometry.min_tile_px, geometry.step_px, ov_hw)
+    cand_w = _candidates(geometry, 2, w4, w_px, geometry.min_tile_px, geometry.step_px, ov_hw)
+    p = geometry.patch_size
+    per_token = _stage5_bytes_per_token(geometry)
+    best: tuple[float, int, int, int, int, int] | None = None
+    for tile_t, n_t in cand_t:
+        acc = 2 * tile_t * h_px * w_px * 6
+        if acc >= usable:
+            continue
+        max_tokens = (usable - acc) // per_token
+        for tile_h, n_h in cand_h:
+            for tile_w, n_w in cand_w:
+                if tile_t * (tile_h // p) * (tile_w // p) > max_tokens:
+                    continue
+                redundancy = n_t * n_h * n_w * tile_t * tile_h * tile_w / (f_px * h_px * w_px)
+                score = (redundancy, -(tile_t * tile_h * tile_w), n_t * n_h * n_w, tile_t, tile_h, tile_w)
+                if best is None or score < best:
+                    best = score
+    if best is None:
+        raise ValueError(
+            f"diffusion decoder: no tile fits the decode budget ({budget_bytes / 2**30:.1f} GB, "
+            f"{max(usable, 0) / 2**30:.1f} GB usable after weights, reserve and the stage-4 feature). "
+            f"Raise {BUDGET_ENV}, lower the resolution / frame count, or use --video-decoder conv."
+        )
+    _, _, _, tile_t, tile_h, tile_w = best
+    return DiffusionTileConfig(tile_t, ov_t, tile_h, ov_hw, tile_w, ov_hw)

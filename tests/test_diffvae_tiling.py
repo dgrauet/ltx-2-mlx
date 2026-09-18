@@ -9,11 +9,15 @@ import pytest
 
 from ltx_core_mlx.model.video_vae.diffusion_decoder.config import LTX_2_5_DIFFUSION_DECODER
 from ltx_core_mlx.model.video_vae.diffusion_decoder.tiling import (
+    MIN_MODEL_BYTES,
+    RESERVE_BYTES,
     DiffusionTileConfig,
     DiffusionTileGeometry,
     Interval,
+    auto_tile_config,
     build_tile_schedule,
     describe_tiling,
+    estimate_untiled_bytes,
     group_tiles_by_temporal_slice,
     masks_are_complementary,
     output_fhw,
@@ -231,3 +235,45 @@ def test_group_by_temporal_slice():
 def test_describe_tiling():
     s = describe_tiling(TINY_G, (5, 3, 3), TINY_CFG)
     assert "tiles=4x2x2" in s and "frames=16/8" in s and "px=64x64/32" in s and "redundancy=x" in s
+
+
+# TINY on latent (5, 3, 3): F_px=33, H_px=W_px=96 -> stage-5 tokens 33*24*24 = 19008, c5 = 4.
+_S4_BYTES = (17 + 8) * 12 * 12 * 8 * 2
+_UNTILED = 19008 * 4 * 2 * 5 + 33 * 96 * 96 * 6
+
+
+def _budget(usable: int) -> int:
+    return usable + MIN_MODEL_BYTES + RESERVE_BYTES + _S4_BYTES
+
+
+def test_estimate_untiled_bytes():
+    assert estimate_untiled_bytes(TINY_G, (5, 3, 3)) == _UNTILED
+
+
+def test_auto_returns_none_when_the_whole_decode_fits():
+    assert auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=_budget(_UNTILED), weight_bytes=0) is None
+    assert auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=_budget(_UNTILED - 1), weight_bytes=0) is not None
+
+
+def test_auto_picks_the_least_redundant_feasible_tile():
+    # usable 2,000,000: tile_t=16 -> acc 2*16*96*96*6 = 1,769,472; max tokens (2e6-acc)//40 = 5763
+    # 16x64x64 -> 16*16*16 = 4096 ok; 16x64x96 -> 6144 too big; tile_t=24 -> acc 2,654,208 > usable.
+    cfg = auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=_budget(2_000_000), weight_bytes=0)
+    assert cfg == DiffusionTileConfig(16, 8, 64, 32, 64, 32)
+
+
+def test_auto_prefers_whole_axes_when_memory_allows():
+    # usable = _UNTILED - 1 = 2,585,087. tile_t=16: acc 1,769,472, max tokens (usable-acc)//40 = 20,390;
+    # 16x96x96 -> 16*24*24 = 9216 tokens fits, and 96 px = 12 cells covers the whole axis (n_h = n_w = 1):
+    # redundancy 4*1*1*16*96*96/(33*96*96) = 1.94, versus 16x64x64 at 4*2*2*16*64*64/(33*96*96) = 3.45.
+    cfg = auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=_budget(_UNTILED - 1), weight_bytes=0)
+    assert cfg == DiffusionTileConfig(16, 8, 96, 32, 96, 32)
+
+
+def test_auto_weights_floor_and_failure():
+    # weights below 1 GiB are charged as 1 GiB (so the same budget gives the same answer)
+    a = auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=_budget(2_000_000), weight_bytes=10)
+    b = auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=_budget(2_000_000), weight_bytes=0)
+    assert a == b
+    with pytest.raises(ValueError, match="LTX2_VAE_DECODE_BUDGET_GB"):
+        auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=_budget(100), weight_bytes=0)
