@@ -68,6 +68,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         cfg_scale: float = 3.0,
         stg_scale: float = 1.0,
         on_step: OnStepFn | None = None,
+        teacache_controller=None,
     ) -> object:
         """Run Stage 1 denoising with Euler + CFG. Override for HQ (res2s)."""
         # Video: full guidance (ref LTX_2_3_PARAMS)
@@ -95,6 +96,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             audio_guider_factory=audio_factory,
             sigmas=sigmas,
             on_step=on_step,
+            teacache=teacache_controller,
         )
 
     def generate_and_save(
@@ -116,6 +118,8 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         images=None,
         audio_start_time: float = 0.0,
         audio_max_duration: float | None = None,
+        enable_teacache: bool = False,
+        teacache_thresh: float | None = None,
     ) -> str:
         """Generate video from audio and save to file.
 
@@ -252,6 +256,12 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         sigmas_1 = ltx2_schedule(stage1_steps, num_tokens=num_tokens)
         x0_model = X0Model(self.dit)
 
+        teacache_controller = None
+        if enable_teacache:
+            from ltx_pipelines_mlx.ti2vid_two_stages import _build_teacache_controller
+            teacache_controller = _build_teacache_controller(stage1_steps, teacache_thresh)
+            teacache_controller.reset()
+
         output_1 = self._denoise_stage1(
             x0_model=x0_model,
             video_state=video_state_1,
@@ -264,6 +274,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             cfg_scale=cfg_scale,
             stg_scale=stg_scale,
             on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
+            teacache_controller=teacache_controller,
         )
         if self.low_memory:
             aggressive_cleanup()

@@ -1196,6 +1196,10 @@ def _cmd_a2v(args: argparse.Namespace) -> None:
         kwargs["cfg_scale"] = args.cfg_scale
     if args.stg_scale is not None:
         kwargs["stg_scale"] = args.stg_scale
+    if getattr(args, "enable_teacache", False):
+        kwargs["enable_teacache"] = True
+        if getattr(args, "teacache_thresh", None) is not None:
+            kwargs["teacache_thresh"] = args.teacache_thresh
     pipe.generate_and_save(**kwargs)
 
     _print_result(args.output, t0, args.quiet)
