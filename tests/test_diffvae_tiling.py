@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import pytest
 
+from ltx_core_mlx.model.video_vae.diffusion_decoder.config import LTX_2_5_DIFFUSION_DECODER
 from ltx_core_mlx.model.video_vae.diffusion_decoder.tiling import (
+    DiffusionTileConfig,
+    DiffusionTileGeometry,
     Interval,
+    padded_latent_fhw,
     propagate_spatial,
     propagate_temporal,
+    round_up,
     split_by_size,
 )
+from tests.diffvae_tiny import TINY
 
 
 def _upstream_split(length: int, size: int, overlap: int, min_tile: int | None) -> list[tuple[int, int, int, int]]:
@@ -89,3 +95,63 @@ def test_temporal_propagation_is_causal():
 def test_spatial_propagation_scales_everything():
     assert propagate_spatial(Interval(4, 12, 4, 4), 2) == Interval(8, 24, 8, 8)
     assert propagate_spatial(propagate_spatial(Interval(4, 12, 4, 4), 2), 4) == Interval(32, 96, 32, 32)
+
+
+def test_production_geometry_matches_upstream_numbers():
+    g = DiffusionTileGeometry.from_config(LTX_2_5_DIFFUSION_DECODER)
+    assert g.pixel_scale == (2, 8, 8) and g.latent_scale == (8, 32, 32)
+    assert g.min_tile_s4 == (6, 6, 6) and g.halo4 == (2, 4, 4) and g.halo5 == (20, 20, 20)
+    assert (g.overlap_frames, g.overlap_px) == (40, 160)
+    assert (g.min_tile_frames, g.min_tile_px) == (80, 320)
+    assert (g.step_frames, g.step_px) == (8, 32)
+    assert g.ghost_frames_s4 == 8 and g.stage4_channels == 512 and g.stage5_channels == 256
+    assert g.stage4_content_thw(13, 34, 60) == (49, 136, 240)  # 1088x1920x97
+
+
+def test_tiny_geometry():
+    g = DiffusionTileGeometry.from_config(TINY)
+    assert g.min_tile_s4 == (3, 3, 3) and g.halo4 == (1, 1, 1) and g.halo5 == (1, 1, 1)
+    assert (g.overlap_frames, g.overlap_px) == (8, 32)
+    assert (g.min_tile_frames, g.min_tile_px) == (16, 64)
+    assert g.ghost_frames_s4 == 8
+    assert g.stage4_content_thw(5, 3, 3) == (17, 12, 12)
+
+
+def test_round_up_and_padded_fhw():
+    assert round_up(41, 8) == 48 and round_up(40, 8) == 40 and round_up(0, 8) == 0
+    assert padded_latent_fhw(LTX_2_5_DIFFUSION_DECODER, (2, 2, 3)) == (3, 7, 7)
+    assert padded_latent_fhw(LTX_2_5_DIFFUSION_DECODER, (13, 34, 60)) == (13, 34, 60)
+
+
+def test_tile_config_validation():
+    g = DiffusionTileGeometry.from_config(LTX_2_5_DIFFUSION_DECODER)
+    ok = DiffusionTileConfig(80, 40, 320, 160, 320, 160)
+    assert ok.validate(g) is ok
+    with pytest.raises(ValueError, match="overlap"):
+        DiffusionTileConfig(80, 32, 320, 160, 320, 160).validate(g)  # below recommended 40
+    DiffusionTileConfig(80, 32, 320, 160, 320, 160).validate(g, allow_small_overlap=True)
+    with pytest.raises(ValueError, match="multiple"):
+        DiffusionTileConfig(81, 40, 320, 160, 320, 160).validate(g)
+    with pytest.raises(ValueError, match="multiple"):
+        DiffusionTileConfig(80, 40, 324, 160, 320, 160).validate(g)
+    with pytest.raises(ValueError, match="at least"):
+        DiffusionTileConfig(80, 40, 8, 0, 320, 160).validate(g, allow_small_overlap=True)
+    with pytest.raises(ValueError, match="smaller"):
+        DiffusionTileConfig(40, 40, 320, 160, 320, 160).validate(g)
+    # A zero size disables that axis; its overlap is then ignored.
+    assert DiffusionTileConfig(0, 0, 320, 160, 0, 0).validate(g) is not None
+
+
+def test_from_pixels_uses_recommended_overlaps():
+    g = DiffusionTileGeometry.from_config(LTX_2_5_DIFFUSION_DECODER)
+    assert DiffusionTileConfig.from_pixels(g, 80, 320, 640) == DiffusionTileConfig(80, 40, 320, 160, 640, 160)
+    assert DiffusionTileConfig.from_pixels(g, 0, 320, 0) == DiffusionTileConfig(0, 0, 320, 160, 0, 0)
+    with pytest.raises(ValueError):
+        DiffusionTileConfig.from_pixels(g, 80, 300, 320)
+
+
+def test_intervals_for_axis_converts_pixels_to_cells():
+    g = DiffusionTileGeometry.from_config(TINY)
+    assert g.intervals_for_axis(0, 17, 16, 8) == split_by_size(17, 8, 4, 3)
+    assert g.intervals_for_axis(1, 12, 64, 32) == split_by_size(12, 8, 4, 3)
+    assert g.intervals_for_axis(1, 12, 0, 0) == [Interval(0, 12)]
