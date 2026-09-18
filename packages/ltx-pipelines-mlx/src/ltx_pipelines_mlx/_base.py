@@ -85,6 +85,9 @@ class BasePipeline:
     #: (LTX-2.5 ``NADiffusionDecoder``, opt-in, ``generate --video-decoder``).
     #: Set by the CLI after construction, like ``generate_audio`` / ``verbose``.
     video_decoder: str = "conv"
+    #: ``--diffvae-tile`` override for the diffusion decoder (``None`` = automatic
+    #: sizing from the decode budget). Set by the CLI after construction.
+    diffvae_tile: tuple[int, int, int] | None = None
     #: ``(B, C, K, H, W)`` latent of the generated keyframe slots from the last
     #: stage-1 run (``generate --num-generated-keyframes``), or ``None``. Not
     #: decoded by the standard pipelines; kept for keyframe-aware consumers (DFR).
@@ -383,6 +386,7 @@ class BasePipeline:
         The audio block stays unloaded when ``generate_audio`` is ``False``.
         """
         self.video_decoder_block.video_decoder = self.video_decoder
+        self.video_decoder_block.diffvae_tile = self.diffvae_tile
         diffusion_suffix = " diffusion" if self.video_decoder == "diffusion" else ""
         if not self.generate_audio:
             with phase(f"Loading decoders (VAE{diffusion_suffix} only, --no-audio)", verbose=self.verbose):

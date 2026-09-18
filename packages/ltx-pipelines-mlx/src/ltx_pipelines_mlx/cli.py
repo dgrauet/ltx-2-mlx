@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ltx_pipelines_mlx.utils.blocks import VIDEO_DECODER_CHOICES
@@ -310,13 +311,17 @@ def _require_diffusion_decoder_preconditions(args: argparse.Namespace, model_dir
 
     Raises:
         FileNotFoundError: The resolved pack has no diffusion decoder weights.
-        ValueError: The target latent exceeds the stage-5 token guard.
+        ValueError: ``--diffvae-tile`` was passed without ``--video-decoder diffusion``,
+            the override grid is invalid, or the resolved tiling can't fit the decode budget.
     """
+    override = tuple(args.diffvae_tile) if getattr(args, "diffvae_tile", None) else None
     if getattr(args, "video_decoder", "conv") != "diffusion":
+        if override is not None:
+            raise ValueError("--diffvae-tile requires --video-decoder diffusion")
         return
 
     from ltx_core_mlx.components.patchifiers import compute_video_latent_shape
-    from ltx_pipelines_mlx.utils.blocks import _DiffusionVideoDecoder, _resolve_model_dir
+    from ltx_pipelines_mlx.utils.blocks import _resolve_model_dir
 
     path = _resolve_model_dir(model_dir) / "vae_decoder_av.safetensors"
     if not path.exists():
@@ -326,6 +331,17 @@ def _require_diffusion_decoder_preconditions(args: argparse.Namespace, model_dir
     if not isinstance(num_frames, int):
         # Auto-duration: only an explicit --auto-duration gives a meaningful upper bound.
         if getattr(args, "auto_duration", None) is None:
+            if override is not None and override != (0, 0, 0):
+                # Grid validity doesn't depend on the frame count, so check it eagerly even
+                # though the token-count / budget check below needs a resolved frame bound.
+                from ltx_core_mlx.model.video_vae.diffusion_decoder.config import LTX_2_5_DIFFUSION_DECODER
+                from ltx_core_mlx.model.video_vae.diffusion_decoder.tiling import (
+                    DiffusionTileConfig,
+                    DiffusionTileGeometry,
+                )
+
+                geometry = DiffusionTileGeometry.from_config(LTX_2_5_DIFFUSION_DECODER)
+                DiffusionTileConfig.from_pixels(geometry, *override)
             print(
                 "note: --video-decoder diffusion size check skipped — the frame count is "
                 "auto-predicted; pass -f or --auto-duration MIN:MAX to check it up front.",
@@ -335,7 +351,29 @@ def _require_diffusion_decoder_preconditions(args: argparse.Namespace, model_dir
         num_frames = int(num_frames.max_seconds * args.frame_rate)
 
     f, h, w = compute_video_latent_shape(num_frames, args.height, args.width)
-    _DiffusionVideoDecoder.check_size((1, 128, f, h, w))
+    _validate_diffvae_tiling(path, f, h, w, override)
+
+
+def _validate_diffvae_tiling(path: Path, f: int, h: int, w: int, override: tuple[int, int, int] | None) -> None:
+    """Fail fast on an impossible tiling: no tile fits the budget, a bad override, or a forced one-tile decode over the guard."""
+    from ltx_core_mlx.model.video_vae.diffusion_decoder.config import LTX_2_5_DIFFUSION_DECODER
+    from ltx_core_mlx.model.video_vae.diffusion_decoder.tiling import (
+        DiffusionTileConfig,
+        DiffusionTileGeometry,
+        auto_tile_config,
+        padded_latent_fhw,
+    )
+    from ltx_pipelines_mlx.utils.blocks import _DiffusionVideoDecoder, diffusion_decode_budget_bytes
+
+    cfg = LTX_2_5_DIFFUSION_DECODER  # the only pack family shipping this decoder; avoids reading the header (tests use a stub file)
+    geometry = DiffusionTileGeometry.from_config(cfg)
+    fhw = padded_latent_fhw(cfg, (f, h, w))
+    if override is None:
+        auto_tile_config(geometry, fhw, budget_bytes=diffusion_decode_budget_bytes(), weight_bytes=path.stat().st_size)
+    elif override == (0, 0, 0):
+        _DiffusionVideoDecoder.check_size((1, 128, f, h, w))
+    else:
+        DiffusionTileConfig.from_pixels(geometry, *override)
 
 
 _RETAKE_COST_EPILOG = (
@@ -403,8 +441,20 @@ examples:
         default="conv",
         help=(
             "[experimental] Video VAE decoder: 'conv' (default) or 'diffusion' "
-            "(LTX 2.5 NADiffusionDecoder, sharper, slower, single-tile; needs "
+            "(LTX 2.5 NADiffusionDecoder, sharper, slower, tiled above the decode budget; needs "
             "vae_decoder_av.safetensors)"
+        ),
+    )
+    gen.add_argument(
+        "--diffvae-tile",
+        nargs=3,
+        type=int,
+        metavar=("FRAMES", "HEIGHT", "WIDTH"),
+        default=None,
+        help=(
+            "[experimental] Diffusion decoder tile size in pixel frames / pixels (multiples of 8 / 32; "
+            "0 disables tiling on that axis, '0 0 0' forces one tile). Default: sized automatically "
+            "from LTX2_VAE_DECODE_BUDGET_GB (or a quarter of unified memory). Requires --video-decoder diffusion."
         ),
     )
     gen.add_argument(
@@ -1015,6 +1065,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         pipe.stepwise = _build_stepwise(args)
         pipe.generate_audio = not args.no_audio
         pipe.video_decoder = args.video_decoder
+        pipe.diffvae_tile = tuple(args.diffvae_tile) if args.diffvae_tile else None
         if lora_paths:
             pipe._pending_loras = lora_paths
         kwargs: dict = dict(
@@ -1059,6 +1110,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         pipe.stepwise = _build_stepwise(args)
         pipe.generate_audio = not args.no_audio
         pipe.video_decoder = args.video_decoder
+        pipe.diffvae_tile = tuple(args.diffvae_tile) if args.diffvae_tile else None
         if lora_paths:
             pipe._pending_loras = lora_paths
         kwargs: dict = dict(
@@ -1108,6 +1160,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         pipe.stepwise = _build_stepwise(args)
         pipe.generate_audio = not args.no_audio
         pipe.video_decoder = args.video_decoder
+        pipe.diffvae_tile = tuple(args.diffvae_tile) if args.diffvae_tile else None
         if lora_paths:
             pipe._pending_loras = lora_paths
         # two-stage / HQ accept the upstream-iso multi-image conditioning list.

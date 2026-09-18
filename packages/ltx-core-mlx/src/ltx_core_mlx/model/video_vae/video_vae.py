@@ -133,6 +133,15 @@ def _media_write_overlap_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+#: Peak-memory budget of a VAE decode in GB; shared by the conv and diffusion decoders.
+VAE_DECODE_BUDGET_ENV = "LTX2_VAE_DECODE_BUDGET_GB"
+
+
+def decode_budget_bytes(default_gb: float = 8.0) -> int:
+    """``LTX2_VAE_DECODE_BUDGET_GB`` in bytes, or ``default_gb`` when unset."""
+    return int(float(os.environ.get(VAE_DECODE_BUDGET_ENV, str(default_gb))) * 1024**3)
+
+
 def _compute_decode_tiling(
     latent_shape: tuple[int, ...],
     frame_rate: float = 24.0,
@@ -146,9 +155,8 @@ def _compute_decode_tiling(
     Budget is controlled by the ``LTX2_VAE_DECODE_BUDGET_GB`` environment variable
     (default 8.0 GB). Raise it on Mac Studio 64/128 GB to reduce or eliminate tiling.
     """
-    peak_budget_gb = float(os.environ.get("LTX2_VAE_DECODE_BUDGET_GB", "8.0"))
     _, _, F_lat, H_lat, W_lat = latent_shape
-    budget_bytes = int(peak_budget_gb * 1024**3)
+    budget_bytes = decode_budget_bytes()
 
     # Block-3 peak tensor: 512ch x 4 temporal x (4H spatial) x (4W spatial) x 2 bytes (bf16).
     block3_bytes_per_lat_frame = 512 * 4 * (H_lat * 4) * (W_lat * 4) * 2

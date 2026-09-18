@@ -54,14 +54,25 @@ from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
 from ltx_core_mlx.model.transformer.model import LTXModelConfig
 from ltx_core_mlx.model.upsampler.model import LatentUpsampler
 from ltx_core_mlx.model.video_vae.diffusion_decoder import load_diffusion_decoder
-from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder as _VideoVAEDecoder
-from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder as _VideoVAEEncoder
+from ltx_core_mlx.model.video_vae.diffusion_decoder.config import LTX_2_5_DIFFUSION_DECODER
+from ltx_core_mlx.model.video_vae.diffusion_decoder.tiling import (
+    DiffusionTileConfig,
+    DiffusionTileGeometry,
+    auto_tile_config,
+    describe_tiling,
+    output_fhw,
+    padded_latent_fhw,
+)
 from ltx_core_mlx.model.video_vae.video_vae import (
+    VAE_DECODE_BUDGET_ENV,
     _compute_decode_tiling,
     _ffmpeg_sink,
     build_ffmpeg_command,
+    decode_budget_bytes,
     stream_chunks_to_ffmpeg,
 )
+from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder as _VideoVAEDecoder
+from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder as _VideoVAEEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
 from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
@@ -72,6 +83,7 @@ from ltx_pipelines_mlx.utils.types import AutoDuration
 
 if TYPE_CHECKING:
     from ltx_core_mlx.model.video_vae.diffusion_decoder import NADiffusionDecoder
+    from ltx_core_mlx.model.video_vae.diffusion_decoder.config import DiffusionDecoderConfig
     from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
 
 logger = logging.getLogger(__name__)
@@ -86,6 +98,18 @@ DIFFVAE_MAX_TOKENS_DEFAULT = 1_204_224
 VIDEO_DECODER_CHOICES = ("conv", "diffusion")
 
 _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags the literal mx.eval pattern
+
+
+def diffvae_max_tokens() -> int:
+    """The forced-untiled guard: ``LTX2_DIFFVAE_MAX_TOKENS`` or the verified default."""
+    return int(os.environ.get(DIFFVAE_MAX_TOKENS_ENV, DIFFVAE_MAX_TOKENS_DEFAULT))
+
+
+def diffusion_decode_budget_bytes() -> int:
+    """Decode budget for the diffusion decoder: the shared env var, else a quarter of unified memory."""
+    if VAE_DECODE_BUDGET_ENV in os.environ:
+        return decode_budget_bytes()
+    return int(mx.device_info()["memory_size"]) // 4
 
 
 def _video_vae_names(model_dir: str | Path) -> tuple[str, str]:
@@ -276,34 +300,83 @@ class ImageConditioner:
 
 
 class _DiffusionVideoDecoder:
-    """Streams a diffusion-decoder decode to ffmpeg through the shared plumbing (single tile in PR A).
+    """Streams a (tiled) diffusion-decoder decode to ffmpeg through the shared plumbing.
 
     Wraps an :class:`~ltx_core_mlx.model.video_vae.diffusion_decoder.NADiffusionDecoder`
     and exposes the same ``decode_and_stream`` surface as the conv
     :class:`~ltx_core_mlx.model.video_vae.video_vae.VideoDecoder`, so
     :class:`VideoDecoder` can dispatch to either interchangeably.
+
+    Args:
+        decoder: The loaded ``NADiffusionDecoder``.
+        weight_bytes: Size of its weights (charged against the decode budget).
+        tile_override: ``--diffvae-tile`` value: ``None`` = automatic sizing from the budget,
+            ``(0, 0, 0)`` = force one tile (the ``LTX2_DIFFVAE_MAX_TOKENS`` guard applies),
+            otherwise explicit tile sizes in frames / pixels with the recommended overlaps.
+        verbose: Print the tile schedule and the measured peak Metal memory to stderr.
     """
 
-    def __init__(self, decoder: NADiffusionDecoder) -> None:
+    def __init__(
+        self,
+        decoder: NADiffusionDecoder,
+        *,
+        weight_bytes: int,
+        tile_override: tuple[int, int, int] | None = None,
+        verbose: bool = False,
+    ) -> None:
         self._decoder = decoder
+        self.weight_bytes = weight_bytes
+        self.tile_override = tile_override
+        self.verbose = verbose
+
+    @staticmethod
+    def _stage5_tokens_for_config(cfg: DiffusionDecoderConfig, latent_shape: tuple[int, ...]) -> int:
+        """Stage-5 token count of a ``(B, C, F, H, W)`` latent after the size floor, for ``cfg``'s geometry."""
+        geometry = DiffusionTileGeometry.from_config(cfg)
+        fhw = padded_latent_fhw(cfg, tuple(latent_shape[2:]))  # type: ignore[arg-type]
+        f_px, h_px, w_px = output_fhw(geometry, fhw)
+        p = geometry.patch_size
+        return f_px * (h_px // p) * (w_px // p)
 
     @staticmethod
     def estimate_stage5_tokens(latent_shape: tuple[int, ...]) -> int:
-        """Estimate the diffusion decoder's stage-5 token count for a ``(B, C, F, H, W)`` latent shape."""
-        _, _, f, h, w = latent_shape
-        return (8 * f - 7) * (8 * h) * (8 * w)
+        """Stage-5 token count of a ``(B, C, F, H, W)`` latent after the size floor (2.5 geometry).
 
-    @classmethod
-    def check_size(cls, latent_shape: tuple[int, ...]) -> None:
-        """Raise if the stage-5 token count for ``latent_shape`` exceeds the configured guard."""
-        limit = int(os.environ.get(DIFFVAE_MAX_TOKENS_ENV, DIFFVAE_MAX_TOKENS_DEFAULT))
-        tokens = cls.estimate_stage5_tokens(latent_shape)
+        Used by the CLI preflight check (:func:`~ltx_pipelines_mlx.cli._validate_diffvae_tiling`),
+        which runs before any decoder is loaded and so must assume the LTX-2.5 production geometry.
+        At decode time, :meth:`resolve_tiling` instead sizes the guard from the loaded decoder's
+        own config.
+        """
+        return _DiffusionVideoDecoder._stage5_tokens_for_config(LTX_2_5_DIFFUSION_DECODER, latent_shape)
+
+    @staticmethod
+    def _raise_if_over_guard(tokens: int, limit: int) -> None:
+        """Raise the ``LTX2_DIFFVAE_MAX_TOKENS`` error for a forced one-tile decode, if ``tokens`` is over."""
         if tokens > limit:
             raise ValueError(
                 f"diffusion decoder: stage-5 token count {tokens:,} exceeds {DIFFVAE_MAX_TOKENS_ENV}={limit:,} "
-                "(single-tile decode; tiling lands in a follow-up). Lower the resolution / frame count, use "
-                "--video-decoder conv, or raise the limit if you have the memory (~6 x tokens x 512 bytes peak)."
+                "for a forced one-tile decode (--diffvae-tile 0 0 0). Drop the override to tile automatically, "
+                "lower the resolution / frame count, or raise the limit if you have the memory."
             )
+
+    @classmethod
+    def check_size(cls, latent_shape: tuple[int, ...]) -> None:
+        """Raise if a forced one-tile decode of ``latent_shape`` exceeds the token guard (2.5 geometry)."""
+        cls._raise_if_over_guard(cls.estimate_stage5_tokens(latent_shape), diffvae_max_tokens())
+
+    def resolve_tiling(self, latent_shape: tuple[int, ...]) -> DiffusionTileConfig | None:
+        """Tiling for ``latent_shape`` from the override or the budget (see the class docstring)."""
+        geometry = DiffusionTileGeometry.from_config(self._decoder.config)
+        fhw = padded_latent_fhw(self._decoder.config, tuple(latent_shape[2:]))  # type: ignore[arg-type]
+        if self.tile_override is None:
+            return auto_tile_config(
+                geometry, fhw, budget_bytes=diffusion_decode_budget_bytes(), weight_bytes=self.weight_bytes
+            )
+        if self.tile_override == (0, 0, 0):
+            tokens = self._stage5_tokens_for_config(self._decoder.config, latent_shape)
+            self._raise_if_over_guard(tokens, diffvae_max_tokens())
+            return None
+        return DiffusionTileConfig.from_pixels(geometry, *self.tile_override)
 
     def decode_and_stream(
         self,
@@ -315,12 +388,26 @@ class _DiffusionVideoDecoder:
         seed: int = 0,
     ) -> str:
         """Stream-decode ``video_latent`` into ``output_path`` with optional audio mux."""
-        self.check_size(tuple(video_latent.shape))
+        tiling = self.resolve_tiling(tuple(video_latent.shape))
+        if self.verbose:
+            fhw = padded_latent_fhw(self._decoder.config, tuple(video_latent.shape[2:]))  # type: ignore[arg-type]
+            geometry = DiffusionTileGeometry.from_config(self._decoder.config)
+            summary = describe_tiling(geometry, fhw, tiling) if tiling is not None else "tiles=1 (untiled)"
+            print(
+                f"[diffvae tiling] {summary} budget={diffusion_decode_budget_bytes() / 2**30:.1f} GB",
+                file=sys.stderr,
+                flush=True,
+            )
         _, _, _f, h, w = video_latent.shape
         sh, sw = self._decoder.spatial_scale
         cmd = build_ffmpeg_command(find_ffmpeg(), w * sw, h * sh, frame_rate, audio_path, output_path)
+        mx.reset_peak_memory()
         with _ffmpeg_sink(cmd) as proc:
-            stream_chunks_to_ffmpeg(self._decoder.tiled_decode(video_latent, seed=seed), proc)
+            stream_chunks_to_ffmpeg(self._decoder.tiled_decode(video_latent, tiling, seed=seed), proc)
+        if self.verbose:
+            print(
+                f"[diffvae tiling] peak Metal memory {mx.get_peak_memory() / 2**30:.2f} GB", file=sys.stderr, flush=True
+            )
         return output_path
 
 
@@ -336,8 +423,11 @@ class VideoDecoder:
         verbose: If True, print tiling info to stderr.
         video_decoder: Which decoder backend to load -- ``"conv"`` (default,
             the standard causal-conv VAE decoder) or ``"diffusion"`` (the
-            LTX-2.5 ``NADiffusionDecoder``, sharper but slower and
-            single-tile; requires ``vae_decoder_av.safetensors``).
+            LTX-2.5 ``NADiffusionDecoder``, sharper but slower; tiled
+            automatically above the decode budget; requires
+            ``vae_decoder_av.safetensors``).
+        diffvae_tile: ``--diffvae-tile`` override for the diffusion decoder
+            (``None`` = automatic sizing from the decode budget).
     """
 
     def __init__(self, model_dir: str | Path, verbose: bool = True, video_decoder: str = "conv") -> None:
@@ -346,6 +436,7 @@ class VideoDecoder:
         self.model_dir = _resolve_model_dir(model_dir)
         self.verbose = verbose
         self.video_decoder = video_decoder
+        self.diffvae_tile: tuple[int, int, int] | None = None
         self._decoder: _VideoVAEDecoder | _DiffusionVideoDecoder | None = None
 
     def load(self) -> _VideoVAEDecoder | _DiffusionVideoDecoder:
@@ -356,8 +447,11 @@ class VideoDecoder:
             if not path.exists():
                 raise FileNotFoundError(f"{path} — the diffusion video decoder ships with LTX 2.5 packs only")
             decoder = load_diffusion_decoder(path)
-            decoder.set_dtype(mx.bfloat16)
-            self._decoder = _DiffusionVideoDecoder(decoder)
+            if hasattr(decoder, "set_dtype"):
+                decoder.set_dtype(mx.bfloat16)
+            self._decoder = _DiffusionVideoDecoder(
+                decoder, weight_bytes=path.stat().st_size, tile_override=self.diffvae_tile, verbose=self.verbose
+            )
             aggressive_cleanup()
             return self._decoder
         self._decoder = _VideoVAEDecoder()
