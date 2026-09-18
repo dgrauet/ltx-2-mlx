@@ -26,7 +26,7 @@ from ltx_core_mlx.conditioning.types.keyframe_slots import extract_generated_key
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule
+from ltx_pipelines_mlx.scheduler import ltx2_schedule, stage2_sigmas
 from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TI2VidTwoStagesPipeline
 from ltx_pipelines_mlx.utils.helpers import create_noised_state, generated_keyframe_conditionings
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, res2s_denoise_loop
@@ -302,7 +302,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         # --- Stage 2: Refine at full resolution (no CFG) ---
         video_tokens, _ = self.video_patchifier.patchify(video_upscaled)
 
-        sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
+        sigmas_2 = stage2_sigmas(stage2_steps)
         start_sigma = sigmas_2[0]
 
         video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)

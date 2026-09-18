@@ -44,7 +44,7 @@ from .scheduler import (
     DISTILLED_SIGMAS,
     LTX_2_5_DISTILLED_SIGMAS,
     LTX_2_5_STAGE_2_DISTILLED_SIGMAS,
-    STAGE_2_SIGMAS,
+    stage2_sigmas,
 )
 from .ti2vid_two_stages import TI2VidTwoStagesPipeline
 from .utils.helpers import create_noised_state
@@ -408,8 +408,14 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
 
         # --- Stage 2: full resolution refine (no LoRA swap — already distilled) ---
         video_tokens, _ = self.video_patchifier.patchify(video_upscaled)
-        stage2_table = LTX_2_5_STAGE_2_DISTILLED_SIGMAS if self._is_25 else STAGE_2_SIGMAS
-        sigmas_2 = stage2_table[: stage2_steps + 1] if stage2_steps else stage2_table
+        if self._is_25:
+            # Upstream's 2.5 path keeps its own slice: its tests assert both the
+            # truncation and the table's object identity, and #33's speckle was
+            # never reproduced on a 2.5 pack. See scheduler.stage2_sigmas.
+            stage2_table = LTX_2_5_STAGE_2_DISTILLED_SIGMAS
+            sigmas_2 = stage2_table[: stage2_steps + 1] if stage2_steps else stage2_table
+        else:
+            sigmas_2 = stage2_sigmas(stage2_steps)
         # Upstream renoises the upscaled stage-1 latent at ``stage_2_sigmas[0]``
         # (``ModalitySpec(noise_scale=stage_2_sigmas[0].item())``); our
         # ``create_noised_state(sigma=...)`` below is that same mechanism.
