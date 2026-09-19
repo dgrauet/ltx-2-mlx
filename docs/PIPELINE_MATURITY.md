@@ -46,7 +46,7 @@ backwards compatibility is best-effort, not guaranteed, on this tier.
 | Pipeline | CLI subcommand | Status & limitations |
 |---|---|---|
 | `LipDubPipeline` | `lipdub` | Lip-dub uses `Lightricks/LTX-2.3-22b-IC-LoRA-LipDub` (currently v0.9). Audio output is **VAE+vocoder reconstruction** of the reference audio — perceptually similar but not bit-identical (spectral artifacts visible on rich musical content). Lip-sync quality depends on prompt-audio alignment. Workaround for music: remux original audio over the output mp4 via ffmpeg (loses fine lip-sync but preserves source music). |
-| Diffusion video decoder | `generate --video-decoder diffusion` (LTX 2.5 packs only) | Opt-in alternative to the default conv VAE decoder; sharper output, several times slower. Single tile in v1 — `LTX2_DIFFVAE_MAX_TOKENS` refuses decodes above 1,204,224 stage-5 tokens, the largest shape validated end to end (512×768×49 on an M2 Pro 32 GB, 102.5s decode phase); tiling lands in a follow-up. Reproduces upstream's default `chunked_eager` mode, including its edge-replicated borders. |
+| Diffusion video decoder | `generate --video-decoder diffusion` (LTX 2.5 packs only) | Opt-in alternative to the default conv VAE decoder; sharper output, several times slower. Tiled automatically above the decode budget (upstream schedule, 40-frame / 160-px overlaps); validated up to 768×1152×49 tiled and 512×768×97 untiled on an M2 Pro 32 GB (see CLAUDE.md for timings). Still Experimental until a downstream consumer validates it. Reproduces upstream's default `chunked_eager` mode, including its edge-replicated borders. |
 
 ## Stability guarantees by tier
 

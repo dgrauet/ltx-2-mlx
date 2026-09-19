@@ -1082,7 +1082,7 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
 | Modality tiling, Prompt Relay | validated on 2.3 only |
 | Generated keyframe slots (`--num-generated-keyframes N`) | supported on `generate` (all four modes, stage 1 only); refused up front on 2.3 packs (no `use_keyframes_abs_pos_embedding`) |
 | DFR (`DFRPipeline`) | not yet ported — needs the diffusion decoder (now shipped, see below) + `Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler` |
-| Diffusion video decoder | opt-in `--video-decoder diffusion` (experimental, single tile, size-guarded); conv remains default |
+| Diffusion video decoder | opt-in `--video-decoder diffusion` (experimental; tiled automatically above the decode budget, `--diffvae-tile` override); conv remains default |
 
 The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once
 Lightricks publishes the official 2.5 task IC-LoRAs.
@@ -1097,8 +1097,20 @@ Reproduces upstream's **default** `chunked_eager` mode exactly: stage-5 attentio
 width slabs with a 5-cell halo, edge-replicated at the true image borders (the first/last 20 px
 of each row differ from full-volume attention — same as upstream). Neighborhood attention is exact
 blocked dense attention with a boolean window mask (`diffusion_decoder/neighborhood_attention.py`).
-Single tile in v1: `LTX2_DIFFVAE_MAX_TOKENS` (default 1,204,224 stage-5 tokens = 512×768×49, the
-largest shape validated end to end) refuses larger decodes until upstream's tiling is ported. Decoder noise seed = `seed + 30000`; not
+Tiled decode (upstream `diffusion_tiling.py`, ported in `diffusion_decoder/tiling.py`): stages 1–3
+run once on the whole latent; stages 4–5 run per tile on the stage-4 grid (one cell = 2 frames ×
+8 × 8 px) with recommended overlaps of 40 frames / 160 px, per-tile fresh noise (key
+`seed + 30000 + tile_index`), trapezoid blending in an fp16 accumulator and temporal-group
+streaming to ffmpeg. Tiling is automatic: the decode is untiled when its estimated activations
+(`stage-5 tokens × 256 × 2 × 17.5` (calibrated on MLX, see the e2e numbers) + fp16 output) fit
+`LTX2_VAE_DECODE_BUDGET_GB` (default: half of unified memory for this decoder; the conv decoder
+keeps 8 GB), otherwise the least-redundant tile on the (8, 32, 32) px grid ≥ 80 frames / 320 px
+that fits is chosen. `--diffvae-tile FRAMES HEIGHT WIDTH` overrides it (0 = axis untiled);
+`--diffvae-tile 0 0 0` forces one tile, the only case where the `LTX2_DIFFVAE_MAX_TOKENS` guard
+(default 1,204,224) still applies. Overlaps make tiled decodes cost several times the untiled
+token count (the `[diffvae tiling]` stderr line prints the redundancy factor); a bigger budget
+means fewer, larger tiles. Tiled and untiled renders of the same seed differ in fine texture
+(different noise), as upstream. Decoder noise seed = `seed + 30000`; not
 bit-comparable with torch's generator. Parity: per-stage torch goldens
 (`tests/parity_diffvae_reference.py`, disposable env) at 1e-4 (det stages) / 1e-3 (diffusion).
 Conv stays the default. Key files: `model/video_vae/diffusion_decoder/`, `utils/blocks.py::_DiffusionVideoDecoder`.
@@ -1112,7 +1124,19 @@ also complete: 512×768×25 (614,400 stage-5 tokens) in 175.3s total / 50.8s dec
 ~10.5 GB peak RSS. `na3d` materializes its accumulator once per block group, which bounds live
 Metal buffers and is what lifted the earlier `[metal::malloc] Resource limit (499000) exceeded`
 ceiling. 512×768×49 is the largest shape measured and is now the `LTX2_DIFFVAE_MAX_TOKENS`
-default; beyond it the single-tile decode is unverified (tiling follow-up, PR B).
+default.
+
+Tiling validated end to end on the same pack (M2 Pro 32 GB, `--distilled --low-ram --no-audio`,
+seed 5). At 512×768×49 the default 16 GB budget decodes untiled, byte-identical (sha256) to the
+pre-tiling decoder: 101.4s decode phase, 10.58 GB peak Metal memory. The same target forced to a
+80/320/320 tile size splits into 1×3×4 = 12 tiles (redundancy ×5.1): 287.1s, 3.65 GB peak, PSNR
+45.84 dB against the untiled decode with no seam visible (the seam-profile spikes don't line up
+with tile boundaries). 512×768×97 untiled at a 12 GB budget — the calibration run, previously
+refused by the token guard — takes 193.6s at 20.07 GB peak, which is what drove the stage-5 memory
+coefficient recalibration above. 768×1152×49 at an 8 GB budget splits into 1×4×6 = 24 tiles
+(redundancy ×5.0): 627.6s, 4.28 GB peak Metal memory, 11.25 GB max RSS. As with the untiled
+decoder, tiled and untiled decodes of the same seed differ in fine texture (different per-tile
+noise), matching upstream.
 
 ### Key Files
 
