@@ -248,6 +248,9 @@ class _TinyDec:
     config = TINY
     spatial_scale = (32, 32)
 
+    def set_dtype(self, dtype) -> None:
+        """No-op stand-in for ``NADiffusionDecoder.set_dtype``."""
+
 
 def test_decode_budget_helpers(monkeypatch):
     monkeypatch.delenv("LTX2_VAE_DECODE_BUDGET_GB", raising=False)

@@ -294,15 +294,16 @@ class NADiffusionDecoder(nn.Module):
                 return None
             return chunk[:, :, :keep, hb : hb + h_px, wb : wb + w_px]
 
+        if len(tiles) > 1 and not masks_are_complementary(tiles, (f_full, h_full, w_full)):
+            raise ValueError("diffusion decoder tile masks are not complementary; refusing to blend")
         feat_s4 = self.forward_stages_1_to_3(padded)
         mx.eval(feat_s4)
         if len(tiles) == 1:
             chunk = crop(self.decode_tile(feat_s4, tiles[0], seed=seed).astype(latent.dtype), 0)
-            assert chunk is not None
+            if chunk is None:
+                raise RuntimeError("diffusion decoder: one-tile decode produced no content frames")
             yield chunk
             return
-        if not masks_are_complementary(tiles, (f_full, h_full, w_full)):
-            raise ValueError("diffusion decoder tile masks are not complementary; refusing to blend")
         acc_dtype = mx.float16 if feat_s4.dtype == mx.bfloat16 else feat_s4.dtype
         groups = group_tiles_by_temporal_slice(tiles)
         starts = [g[0].out_t.start for g in groups]
@@ -311,16 +312,20 @@ class NADiffusionDecoder(nn.Module):
             g_start, g_stop = group[0].out_t.start, group[0].out_t.stop
             buffer = mx.zeros((1, self.config.out_channels, g_stop - g_start, h_full, w_full), dtype=acc_dtype)
             for tile in group:
-                px = self.decode_tile(feat_s4, tile, seed=seed).astype(mx.float32)
-                weighted = px * tile.mask_t[None, None, :, None, None] * tile.mask_h[None, None, None, :, None]
-                weighted = weighted * tile.mask_w[None, None, None, None, :]
+                px = self.decode_tile(feat_s4, tile, seed=seed)
+                w = tile.mask_t[:, None, None] * tile.mask_h[None, :, None] * tile.mask_w[None, None, :]
                 coords = (slice(None), slice(None), slice(None), tile.out_h, tile.out_w)
-                buffer[coords] = (buffer[coords] + weighted).astype(acc_dtype)
+                buffer[coords] = (buffer[coords] + px * w[None, None]).astype(acc_dtype)
                 mx.eval(buffer)
-                del px, weighted
+                del px, w
                 aggressive_cleanup()
             if stub is not None:
                 n = stub.shape[2]
+                if n > buffer.shape[2]:
+                    raise ValueError(
+                        f"diffusion decoder tiling: overlap stub of {n} frames exceeds the next "
+                        f"temporal group ({buffer.shape[2]} frames)"
+                    )
                 buffer[:, :, :n] = (buffer[:, :, :n] + stub).astype(acc_dtype)
             if gi < len(groups) - 1:
                 exclusive = min(max(0, starts[gi + 1] - g_start), g_stop - g_start)

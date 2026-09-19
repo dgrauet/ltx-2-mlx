@@ -90,9 +90,11 @@ logger = logging.getLogger(__name__)
 
 #: Env var overriding the diffusion decoder's stage-5 token-count guard.
 DIFFVAE_MAX_TOKENS_ENV = "LTX2_DIFFVAE_MAX_TOKENS"
-#: Largest stage-5 token count validated end to end (512x768x49 on an M2 Pro 32 GB:
-#: 49 x 128 x 192). Above it the single-tile decode is unverified; raise via
-#: ``LTX2_DIFFVAE_MAX_TOKENS`` if you have the memory.
+#: Ceiling for a forced one-tile decode (``--diffvae-tile 0 0 0``): the largest
+#: stage-5 token count validated end to end when this default was set (512x768x49
+#: on an M2 Pro 32 GB: 49 x 128 x 192). Automatic sizing never consults this guard;
+#: raise it via ``LTX2_DIFFVAE_MAX_TOKENS`` if you have the memory for a bigger
+#: forced one-tile decode.
 DIFFVAE_MAX_TOKENS_DEFAULT = 1_204_224
 #: Valid ``--video-decoder`` / ``VideoDecoder(video_decoder=...)`` choices.
 VIDEO_DECODER_CHOICES = ("conv", "diffusion")
@@ -401,7 +403,8 @@ class _DiffusionVideoDecoder:
         _, _, _f, h, w = video_latent.shape
         sh, sw = self._decoder.spatial_scale
         cmd = build_ffmpeg_command(find_ffmpeg(), w * sw, h * sh, frame_rate, audio_path, output_path)
-        mx.reset_peak_memory()
+        if self.verbose:
+            mx.reset_peak_memory()
         with _ffmpeg_sink(cmd) as proc:
             stream_chunks_to_ffmpeg(self._decoder.tiled_decode(video_latent, tiling, seed=seed), proc)
         if self.verbose:
@@ -447,8 +450,7 @@ class VideoDecoder:
             if not path.exists():
                 raise FileNotFoundError(f"{path} — the diffusion video decoder ships with LTX 2.5 packs only")
             decoder = load_diffusion_decoder(path)
-            if hasattr(decoder, "set_dtype"):
-                decoder.set_dtype(mx.bfloat16)
+            decoder.set_dtype(mx.bfloat16)
             self._decoder = _DiffusionVideoDecoder(
                 decoder, weight_bytes=path.stat().st_size, tile_override=self.diffvae_tile, verbose=self.verbose
             )

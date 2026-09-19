@@ -452,7 +452,7 @@ examples:
         metavar=("FRAMES", "HEIGHT", "WIDTH"),
         default=None,
         help=(
-            "[experimental] Diffusion decoder tile size in pixel frames / pixels (multiples of 8 / 32; "
+            "[experimental] Diffusion decoder tile size in pixel frames / pixels (multiples of 2 frames / 8 px; "
             "0 disables tiling on that axis, '0 0 0' forces one tile). Default: sized automatically "
             "from LTX2_VAE_DECODE_BUDGET_GB (or half of unified memory). Requires --video-decoder diffusion."
         ),
