@@ -446,7 +446,12 @@ def describe_tiling(geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel, 
 
 
 #: Upstream ``chunked_eager`` stage-5 activation coefficient: bytes per token = channels * 2 * coef.
-STAGE5_MEM_COEF = 5.0
+#: Calibrated 2026-09-19 against a measured decode (LTX-2.5 q8, 512x768x97, M2 Pro 32 GB): the prior
+#: value of 5.0 estimated 5.90 GB against a measured peak Metal memory of 20.07 GB (ratio 0.29, and the
+#: same under-estimate made the automatic budget picker leave a 512x768x49 decode untiled at an 8 GB
+#: budget even though it measured 10.58 GB peak — a real budget-violation bug, not just an accuracy
+#: gap). 17.5 estimates 20.11 GB for that shape (ratio 1.002 against the measurement).
+STAGE5_MEM_COEF = 17.5
 #: Headroom kept free on top of the model and activations.
 RESERVE_BYTES = 1 << 30
 #: Weights are charged at least this much (upstream ``dt:77``).

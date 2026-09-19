@@ -264,9 +264,9 @@ def test_resolve_tiling_auto_untiled_when_it_fits(monkeypatch):
 
 
 def test_resolve_tiling_auto_tiles_when_over_budget(monkeypatch):
-    # usable 2,000,000 -> DiffusionTileConfig(16, 8, 64, 32, 64, 32) (see test_diffvae_tiling)
+    # usable 2,500,000 -> DiffusionTileConfig(16, 8, 64, 32, 64, 32) (see test_diffvae_tiling)
     s4 = (17 + 8) * 12 * 12 * 8 * 2
-    monkeypatch.setattr(B, "diffusion_decode_budget_bytes", lambda: 2_000_000 + 2 * 2**30 + s4)
+    monkeypatch.setattr(B, "diffusion_decode_budget_bytes", lambda: 2_500_000 + 2 * 2**30 + s4)
     w = B._DiffusionVideoDecoder(_TinyDec(), weight_bytes=0)
     assert w.resolve_tiling((1, 8, 5, 3, 3)) == DiffusionTileConfig(16, 8, 64, 32, 64, 32)
 
