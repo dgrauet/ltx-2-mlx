@@ -63,16 +63,18 @@ from ltx_core_mlx.model.video_vae.diffusion_decoder.tiling import (
     output_fhw,
     padded_latent_fhw,
 )
+from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder as _VideoVAEDecoder
+from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder as _VideoVAEEncoder
 from ltx_core_mlx.model.video_vae.video_vae import (
-    VAE_DECODE_BUDGET_ENV,
     _compute_decode_tiling,
     _ffmpeg_sink,
     build_ffmpeg_command,
     decode_budget_bytes,
+    decode_cache_limit,
+    describe_decode_tiling,
+    estimate_decode_peak_bytes,
     stream_chunks_to_ffmpeg,
 )
-from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder as _VideoVAEDecoder
-from ltx_core_mlx.model.video_vae.video_vae import VideoEncoder as _VideoVAEEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
 from ltx_core_mlx.text_encoders.gemma.encoders.encoder_configurator import select_text_encoder
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
@@ -108,10 +110,8 @@ def diffvae_max_tokens() -> int:
 
 
 def diffusion_decode_budget_bytes() -> int:
-    """Decode budget for the diffusion decoder: the shared env var, else half of unified memory."""
-    if VAE_DECODE_BUDGET_ENV in os.environ:
-        return decode_budget_bytes()
-    return int(mx.device_info()["memory_size"]) // 2
+    """Decode budget shared by both decoders: ``LTX2_VAE_DECODE_BUDGET_GB``, else half of unified memory."""
+    return decode_budget_bytes()
 
 
 def _video_vae_names(model_dir: str | Path) -> tuple[str, str]:
@@ -405,7 +405,7 @@ class _DiffusionVideoDecoder:
         cmd = build_ffmpeg_command(find_ffmpeg(), w * sw, h * sh, frame_rate, audio_path, output_path)
         if self.verbose:
             mx.reset_peak_memory()
-        with _ffmpeg_sink(cmd) as proc:
+        with decode_cache_limit(), _ffmpeg_sink(cmd) as proc:
             stream_chunks_to_ffmpeg(self._decoder.tiled_decode(video_latent, tiling, seed=seed), proc)
         if self.verbose:
             print(
@@ -481,17 +481,25 @@ class VideoDecoder:
         ``seed`` is forwarded to the loaded decoder; the conv decoder ignores
         it (deterministic), the diffusion decoder uses it to seed its noise draw.
         """
-        if self.verbose and self.video_decoder == "conv":
+        conv_verbose = self.verbose and self.video_decoder == "conv"
+        if conv_verbose:
             tiling = _compute_decode_tiling(video_latent.shape, frame_rate=frame_rate)
-            if tiling is not None and tiling.temporal_config is not None:
-                tc = tiling.temporal_config
-                print(
-                    f"[vae-decode tiled: tile_frames={tc.tile_size_in_frames} overlap={tc.tile_overlap_in_frames}]",
-                    file=sys.stderr,
-                    flush=True,
-                )
+            summary = describe_decode_tiling(tiling) if tiling is not None else "untiled"
+            print(
+                f"[vae-decode tiling] {summary} est. {estimate_decode_peak_bytes(video_latent.shape, tiling) / 2**30:.1f} GB "
+                f"budget={decode_budget_bytes() / 2**30:.1f} GB",
+                file=sys.stderr,
+                flush=True,
+            )
+            mx.reset_peak_memory()
         decoder = self.load()
         decoder.decode_and_stream(video_latent, output_path, frame_rate=frame_rate, audio_path=audio_path, seed=seed)
+        if conv_verbose:
+            print(
+                f"[vae-decode tiling] peak Metal memory {mx.get_peak_memory() / 2**30:.2f} GB",
+                file=sys.stderr,
+                flush=True,
+            )
         return output_path
 
 

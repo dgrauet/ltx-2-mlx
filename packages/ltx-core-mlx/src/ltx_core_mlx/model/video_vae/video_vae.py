@@ -49,6 +49,7 @@ from ltx_core_mlx.model.video_vae.sampling import (
     unpatchify_spatial,
 )
 from ltx_core_mlx.model.video_vae.tiling import (
+    SpatialTilingConfig,
     TemporalTilingConfig,
     Tile,
     TilingConfig,
@@ -137,52 +138,144 @@ def _media_write_overlap_enabled() -> bool:
 VAE_DECODE_BUDGET_ENV = "LTX2_VAE_DECODE_BUDGET_GB"
 
 
-def decode_budget_bytes(default_gb: float = 8.0) -> int:
-    """``LTX2_VAE_DECODE_BUDGET_GB`` in bytes, or ``default_gb`` when unset."""
-    return int(float(os.environ.get(VAE_DECODE_BUDGET_ENV, str(default_gb))) * 1024**3)
+#: Set to a truthy value to leave MLX's allocator cache alone during a VAE decode.
+VAE_DECODE_KEEP_CACHE_ENV = "LTX2_VAE_DECODE_KEEP_CACHE"
+
+#: Peak activation bytes of the conv decoder per output pixel-frame, measured on an M2 Pro 32 GB
+#: with the LTX-2.5 q8 pack (issue #142): 740-900 B untiled, ~530-750 B inside temporal /
+#: spatial tiles. The peak sits in the last up-blocks at full pixel resolution, not at block 3.
+CONV_DECODE_BYTES_PER_PIXEL_FRAME = 750
+#: Bytes per pixel of the fp32 accumulation state of the tiled path: ``buffer`` + ``weights``
+#: for the current temporal group and the previous group's pair kept for blending.
+_TILED_ACCUMULATOR_BYTES_PER_PIXEL = 4 * 3 * 4
+#: Upstream ``TileSizeConfig.default()``: 80 frames / 24 overlap, 768 px / 64 overlap.
+DECODE_TILE_FRAMES_MAX = 80
+DECODE_TILE_FRAMES_PREFERRED_MIN = 40
+DECODE_TILE_FRAMES_MIN = 16
+DECODE_SPATIAL_TILE_LADDER: tuple[tuple[int, int], ...] = ((768, 64), (512, 32), (256, 32))
+
+
+def decode_budget_bytes() -> int:
+    """Peak-memory budget of a VAE decode: ``LTX2_VAE_DECODE_BUDGET_GB``, else half of unified memory."""
+    if VAE_DECODE_BUDGET_ENV in os.environ:
+        return int(float(os.environ[VAE_DECODE_BUDGET_ENV]) * 1024**3)
+    return int(mx.device_info()["memory_size"]) // 2
+
+
+@contextlib.contextmanager
+def decode_cache_limit() -> Iterator[None]:
+    """Disable MLX's allocator cache for the duration of a decode, then restore it.
+
+    The decoder's large, short-lived activations otherwise stay parked in the free
+    list between tiles and inflate the process footprint by tens of GB (issue #142
+    measured 44 -> 26 GB physical peak on the same decode, pixels identical).
+    A no-op when the cache is already disabled (``--low-ram``) or when
+    ``LTX2_VAE_DECODE_KEEP_CACHE`` is set.
+    """
+    if os.environ.get(VAE_DECODE_KEEP_CACHE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+        yield
+        return
+    previous = mx.set_cache_limit(0)
+    try:
+        yield
+    finally:
+        mx.set_cache_limit(previous)
+
+
+def _spatial_tile_px(latent_axis: int, long_side: int, cfg: SpatialTilingConfig) -> int:
+    """Pixel extent of one spatial tile on an axis, mirroring ``prepare_tiles_for_decoding``."""
+    tile_lat = cfg.tile_size_in_pixels // 32
+    overlap_lat = cfg.tile_overlap_in_pixels // 32
+    adjusted = max(max(2, overlap_lat + 1), round(tile_lat * latent_axis / long_side))
+    return min(latent_axis, adjusted) * 32
+
+
+def estimate_decode_peak_bytes(latent_shape: tuple[int, ...], tiling: TilingConfig | None) -> int:
+    """Estimated peak activation bytes of decoding ``latent_shape`` with ``tiling``.
+
+    ``CONV_DECODE_BYTES_PER_PIXEL_FRAME`` times the pixel-frames of one tile, plus the
+    fp32 accumulation buffers of the tiled path (which span the whole frame).
+    """
+    _, _, f_lat, h_lat, w_lat = latent_shape
+    f_px, h_px, w_px = 8 * f_lat - 7, 32 * h_lat, 32 * w_lat
+    if tiling is None:
+        return CONV_DECODE_BYTES_PER_PIXEL_FRAME * f_px * h_px * w_px
+    tile_f, tile_h, tile_w = f_px, h_px, w_px
+    if tiling.temporal_config is not None:
+        tile_f = min(f_px, tiling.temporal_config.tile_size_in_frames)
+    if tiling.spatial_config is not None:
+        long_side = max(h_lat, w_lat)
+        tile_h = _spatial_tile_px(h_lat, long_side, tiling.spatial_config)
+        tile_w = _spatial_tile_px(w_lat, long_side, tiling.spatial_config)
+    activations = CONV_DECODE_BYTES_PER_PIXEL_FRAME * tile_f * tile_h * tile_w
+    accumulators = tile_f * h_px * w_px * _TILED_ACCUMULATOR_BYTES_PER_PIXEL
+    return activations + accumulators
+
+
+def describe_decode_tiling(tiling: TilingConfig) -> str:
+    """Short human summary of a decode tiling, e.g. ``frames=40/8 px=512/32``."""
+    parts = []
+    if tiling.temporal_config is not None:
+        tc = tiling.temporal_config
+        parts.append(f"frames={tc.tile_size_in_frames}/{tc.tile_overlap_in_frames}")
+    if tiling.spatial_config is not None:
+        sc = tiling.spatial_config
+        parts.append(f"px={sc.tile_size_in_pixels}/{sc.tile_overlap_in_pixels}")
+    return " ".join(parts) or "untiled"
+
+
+def _temporal_tile(frames: int, frame_rate: float) -> TemporalTilingConfig:
+    """Temporal tile of ``frames`` with a blend of ~1 s capped at 30 % of the tile (80 -> 24 like upstream)."""
+    one_second = max(8, (int(frame_rate) // 8) * 8)
+    overlap = min(one_second, (int(frames * 0.3) // 8) * 8)
+    return TemporalTilingConfig(tile_size_in_frames=frames, tile_overlap_in_frames=overlap)
 
 
 def _compute_decode_tiling(
     latent_shape: tuple[int, ...],
     frame_rate: float = 24.0,
+    budget_bytes: int | None = None,
 ) -> TilingConfig | None:
-    """Return a TilingConfig that keeps peak VAE decode memory under budget, or None.
+    """Return a TilingConfig whose estimated peak fits the decode budget, or None.
 
-    Peak memory occurs at the block-3 intermediate tensor (the second
-    DepthToSpaceUpsample), shape (1, 512, F_lat*4, H_lat*4, W_lat*4) in bf16.
-    Returns None when the full video fits within budget — no tiling, no overhead.
-
-    Budget is controlled by the ``LTX2_VAE_DECODE_BUDGET_GB`` environment variable
-    (default 8.0 GB). Raise it on Mac Studio 64/128 GB to reduce or eliminate tiling.
+    ``None`` when the whole clip fits (no tiling, no overhead). Otherwise the
+    first rung of a ladder that fits: temporal tiles from the upstream default
+    (80 frames) down to 40, then spatial tiles 768 -> 512 -> 256 px at 40 frames,
+    then temporal tiles down to 16 frames at 256 px. Nothing fitting returns the
+    smallest rung with a warning. Budget: ``budget_bytes`` or :func:`decode_budget_bytes`.
     """
-    _, _, F_lat, H_lat, W_lat = latent_shape
-    budget_bytes = decode_budget_bytes()
+    budget = decode_budget_bytes() if budget_bytes is None else budget_bytes
+    if estimate_decode_peak_bytes(latent_shape, None) <= budget:
+        return None
+    f_px = 8 * latent_shape[2] - 7
 
-    # Block-3 peak tensor: 512ch x 4 temporal x (4H spatial) x (4W spatial) x 2 bytes (bf16).
-    block3_bytes_per_lat_frame = 512 * 4 * (H_lat * 4) * (W_lat * 4) * 2
+    def fits(cfg: TilingConfig) -> bool:
+        return estimate_decode_peak_bytes(latent_shape, cfg) <= budget
 
-    if block3_bytes_per_lat_frame * F_lat <= budget_bytes:
-        return None  # Full video fits in budget — no tiling needed
-
-    # How many latent frames fit within the budget?
-    max_lat_frames = max(2, budget_bytes // block3_bytes_per_lat_frame)
-
-    # Convert latent frames -> output pixel frames (8x temporal upsampling), with a 16-frame minimum
-    tile_frames = max(16, max_lat_frames * 8)
-
-    # Overlap ≈ 1 second of pixel frames at the given frame rate, rounded down to a multiple of 8,
-    # at most 25% of tile size. Scaling with frame_rate keeps the blend window a consistent
-    # duration regardless of fps (e.g. 24→24 frames, 30→24, 48→40, 60→56).
-    one_second_frames = max(8, (int(frame_rate) // 8) * 8)
-    overlap = min(one_second_frames, (tile_frames // 32) * 8)
-    assert overlap < tile_frames, f"overlap {overlap} >= tile_frames {tile_frames}"
-
-    return TilingConfig(
-        temporal_config=TemporalTilingConfig(
-            tile_size_in_frames=tile_frames,
-            tile_overlap_in_frames=overlap,
+    temporal_sizes = [n for n in range(DECODE_TILE_FRAMES_MAX, DECODE_TILE_FRAMES_MIN - 1, -8) if n < f_px]
+    preferred = [n for n in temporal_sizes if n >= DECODE_TILE_FRAMES_PREFERRED_MIN]
+    smallest = [n for n in temporal_sizes if n < DECODE_TILE_FRAMES_PREFERRED_MIN]
+    candidates: list[TilingConfig] = [TilingConfig(temporal_config=_temporal_tile(n, frame_rate)) for n in preferred]
+    base_temporal = _temporal_tile(preferred[-1], frame_rate) if preferred else None
+    for px, overlap in DECODE_SPATIAL_TILE_LADDER:
+        candidates.append(TilingConfig(spatial_config=SpatialTilingConfig(px, overlap), temporal_config=base_temporal))
+    last_px, last_overlap = DECODE_SPATIAL_TILE_LADDER[-1]
+    for n in smallest:
+        candidates.append(
+            TilingConfig(
+                spatial_config=SpatialTilingConfig(last_px, last_overlap),
+                temporal_config=_temporal_tile(n, frame_rate),
+            )
         )
+    for cfg in candidates:
+        if fits(cfg):
+            return cfg
+    logger.warning(
+        "vae-decode: no tiling fits the %.1f GB budget (smallest rung estimates %.1f GB); decoding anyway",
+        budget / 2**30,
+        estimate_decode_peak_bytes(latent_shape, candidates[-1]) / 2**30,
     )
+    return candidates[-1]
 
 
 def _add_at(buffer: mx.array, coords: tuple[slice, ...], values: mx.array) -> mx.array:
@@ -546,8 +639,11 @@ class VideoDecoder(nn.Module):
         previous_weights: mx.array | None = None
         previous_temporal_slice: slice | None = None
 
+        f_px = 8 * F_lat - 7
         for temporal_group_tiles in temporal_groups:
-            curr_temporal_slice = temporal_group_tiles[0].out_coords[2]
+            # Spatial-only tiling leaves the temporal slice as slice(None): normalise it to the
+            # clip's frame range so the offsets below work for every tiling shape.
+            curr_temporal_slice = slice(*temporal_group_tiles[0].out_coords[2].indices(f_px)[:2])
             temporal_len = curr_temporal_slice.stop - curr_temporal_slice.start
 
             # Initialize accumulation buffers for this temporal group.
@@ -564,8 +660,9 @@ class VideoDecoder(nn.Module):
 
                 mask = tile.blend_mask
 
-                temporal_offset = tile.out_coords[2].start - curr_temporal_slice.start
-                expected_temporal_len = tile.out_coords[2].stop - tile.out_coords[2].start
+                tile_t_start, tile_t_stop = tile.out_coords[2].indices(f_px)[:2]
+                temporal_offset = tile_t_start - curr_temporal_slice.start
+                expected_temporal_len = tile_t_stop - tile_t_start
                 decoded_temporal_len = decoded_tile.shape[2]
                 actual_temporal_len = min(
                     expected_temporal_len, decoded_temporal_len, buffer.shape[2] - temporal_offset
@@ -643,19 +740,15 @@ class VideoDecoder(nn.Module):
     ) -> None:
         """Decode latent and stream frames to ffmpeg.
 
-        Automatically applies temporal tiling when the full-volume decode would
-        exceed the memory budget (``LTX2_VAE_DECODE_BUDGET_GB``, default 8 GB).
-        Budget is measured against the block-3 bf16 activation
-        (512 x 4 x 4H_lat x 4W_lat x 2 bytes per latent frame). At 8 GB:
-
-        - 720p  (H_lat=22, W_lat=40): ~55 MB/frame → tiling at ~47s @25fps
-        - 1080p (H_lat=33, W_lat=60): ~124 MB/frame → tiling at ~22s @25fps
-
-        Note: the budget covers the block-3 activation of a single tile decode.
-        The tiling accumulation buffer (fp32, B x 3 x T x H x W) and its weights
-        twin live on top of this; at 1080p / >100 frames they add several GB.
-
-        Falls through to a single-pass decode with no overhead for shorter clips.
+        Automatically applies temporal, then spatial, tiling when the estimated
+        peak of a full-volume decode exceeds the memory budget
+        (``LTX2_VAE_DECODE_BUDGET_GB``, default half of unified memory); see
+        :func:`estimate_decode_peak_bytes` and :func:`_compute_decode_tiling`.
+        The peak is ~750 bytes per output pixel-frame (issue #142), e.g. ~14 GB
+        for 512x768x49 and ~150 GB for 1080p x 97 frames untiled. MLX's
+        allocator cache is disabled for the duration of the decode
+        (:func:`decode_cache_limit`). Falls through to a single-pass decode with
+        no overhead for clips that fit.
 
         Args:
             latent: (B, C, F, H, W) latent.
@@ -669,13 +762,8 @@ class VideoDecoder(nn.Module):
         del seed
         ffmpeg = find_ffmpeg()
         tiling = _compute_decode_tiling(latent.shape, frame_rate=frame_rate)
-        if tiling is not None and tiling.temporal_config is not None:
-            tc = tiling.temporal_config
-            logger.info(
-                "vae-decode tiled: tile_frames=%d overlap=%d",
-                tc.tile_size_in_frames,
-                tc.tile_overlap_in_frames,
-            )
+        if tiling is not None:
+            logger.info("vae-decode tiled: %s", describe_decode_tiling(tiling))
 
         # Estimate output dimensions from latent
         _, _, _F_lat, H_lat, W_lat = latent.shape
@@ -685,7 +773,7 @@ class VideoDecoder(nn.Module):
         cmd = build_ffmpeg_command(ffmpeg, out_W, out_H, frame_rate, audio_path, output_path)
 
         try:
-            with _ffmpeg_sink(cmd) as proc:
+            with decode_cache_limit(), _ffmpeg_sink(cmd) as proc:
                 self._stream_frames(latent, tiling, proc)
         finally:
             aggressive_cleanup()

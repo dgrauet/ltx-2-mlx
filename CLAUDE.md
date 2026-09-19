@@ -1087,6 +1087,31 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
 The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once
 Lightricks publishes the official 2.5 task IC-LoRAs.
 
+### Conv VAE decode budget and auto tiling
+
+`VideoDecoder.decode_and_stream` estimates the peak of a decode as **~750 bytes per output
+pixel-frame** (`CONV_DECODE_BYTES_PER_PIXEL_FRAME`, measured on an M2 Pro 32 GB with the 2.5 q8
+pack: 13.3 GB for 512×768×49, 10.2 GB for 768×1152×17; issue #142 measured 33.9 GB for
+768×512×121 on an M3 Max) plus the fp32 accumulation buffers of the tiled path. The peak sits in
+the last up-blocks at full pixel resolution — the previous block-3 estimate was ~80× too low and
+the conv decoder effectively never tiled. When the estimate exceeds `LTX2_VAE_DECODE_BUDGET_GB`
+(default half of unified memory) `_compute_decode_tiling` walks a ladder: temporal tiles from
+upstream's default 80 frames / 24 overlap down to 40 frames, then spatial tiles 768/64 → 512/32 →
+256/32 px (upstream `TileSizeConfig.default()` is 768/64) at 40 frames, then 16–32-frame tiles at
+256 px as a last resort (a warning if even that exceeds the budget). MLX's allocator cache is
+disabled for the duration of the decode (`decode_cache_limit`; opt out with
+`LTX2_VAE_DECODE_KEEP_CACHE=1`): pixels are identical, only the free-list retention changes.
+Spatial-only `TilingConfig`s decode correctly (they crashed before). Verbose runs print
+`[vae-decode tiling] frames=… px=… est. X GB budget=Y GB` and the measured peak Metal memory.
+
+Validated (M2 Pro 32 GB, 2.5 q8, `--distilled --low-ram --no-audio`, seed 5): 512×768×49 stays
+untiled at the default 16 GB budget and is byte-identical (sha256) to the v0.15.7 render, 7.0 s
+decode, 14.0 GB peak Metal memory (13.5 estimated); 768×1152×25 untiled 15.7 GB peak (15.4
+estimated) vs forced tiled at an 8 GB budget (768/64 spatial, 2×2 tiles) 8.9 GB peak, 10.7 s vs
+8.0 s, PSNR 45.0 dB, seam lines at most 1.8/255 mean abs diff (nothing visible); 768×1152×49 at
+16 GB picks 40-frame × 768-px tiles: 8.8 GB peak (12.6 estimated), 23 s on a random latent.
+Disabling the allocator cache left the pixels identical and the decode 20 % faster (9.2 → 7.2 s).
+
 ### Diffusion video decoder (`--video-decoder diffusion`, 2.5 packs, experimental)
 
 Port of upstream `NADiffusionDecoder` (`vae_decoder_av.safetensors`, already in every 2.5 pack):
@@ -1103,8 +1128,7 @@ run once on the whole latent; stages 4–5 run per tile on the stage-4 grid (one
 `seed + 30000 + tile_index`), trapezoid blending in an fp16 accumulator and temporal-group
 streaming to ffmpeg. Tiling is automatic: the decode is untiled when its estimated activations
 (`stage-5 tokens × 256 × 2 × 17.5` (calibrated on MLX, see the e2e numbers) + fp16 output) fit
-`LTX2_VAE_DECODE_BUDGET_GB` (default: half of unified memory for this decoder; the conv decoder
-keeps 8 GB), otherwise the least-redundant tile on the (8, 32, 32) px grid ≥ 80 frames / 320 px
+`LTX2_VAE_DECODE_BUDGET_GB` (default: half of unified memory, shared with the conv decoder), otherwise the least-redundant tile on the (8, 32, 32) px grid ≥ 80 frames / 320 px
 that fits is chosen. `--diffvae-tile FRAMES HEIGHT WIDTH` overrides it (0 = axis untiled);
 `--diffvae-tile 0 0 0` forces one tile, the only case where the `LTX2_DIFFVAE_MAX_TOKENS` guard
 (default 1,204,224) still applies. Overlaps make tiled decodes cost several times the untiled

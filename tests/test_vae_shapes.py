@@ -8,7 +8,7 @@ from ltx_core_mlx.model.video_vae.convolution import Conv3dBlock
 from ltx_core_mlx.model.video_vae.ops import PerChannelStatistics
 from ltx_core_mlx.model.video_vae.resnet import ResBlock3d, ResBlockStage
 from ltx_core_mlx.model.video_vae.sampling import DepthToSpaceUpsample as UpsampleConv
-from ltx_core_mlx.model.video_vae.tiling import TemporalTilingConfig, TilingConfig
+from ltx_core_mlx.model.video_vae.tiling import SpatialTilingConfig, TemporalTilingConfig, TilingConfig
 from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 
 # ---------------------------------------------------------------------------
@@ -246,6 +246,27 @@ class TestVideoDecoder:
         mx.eval(baseline)
         assert tiled_out.shape == baseline.shape
         # Blend produced finite values (no NaN/inf from weight accumulation)
+        assert mx.isfinite(tiled_out).all().item()
+
+    def test_tiled_decode_spatial_only(self):
+        """A spatial-only TilingConfig (no temporal split) must decode the whole clip (issue #142 fix).
+
+        Before the fix the temporal group's slice was ``slice(None)`` and the offsets
+        raised ``TypeError``. 96x96 output with 64-px tiles / 32-px overlap gives
+        2x2 spatial tiles; the blend is exercised in both spatial axes.
+        """
+        mx.random.seed(0)
+        decoder = VideoDecoder()
+        mx.eval(decoder.parameters())
+        latent = mx.random.normal((1, 128, 2, 3, 3))
+        mx.eval(latent)
+        cfg = TilingConfig(spatial_config=SpatialTilingConfig(tile_size_in_pixels=64, tile_overlap_in_pixels=32))
+        chunks = list(decoder.tiled_decode(latent, cfg))
+        tiled_out = mx.concatenate(chunks, axis=2) if len(chunks) > 1 else chunks[0]
+        mx.eval(tiled_out)
+        baseline = decoder.decode(latent)
+        mx.eval(baseline)
+        assert tiled_out.shape == baseline.shape
         assert mx.isfinite(tiled_out).all().item()
 
 
