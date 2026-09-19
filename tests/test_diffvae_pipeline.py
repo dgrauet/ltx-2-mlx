@@ -252,7 +252,7 @@ class _TinyDec:
 def test_decode_budget_helpers(monkeypatch):
     monkeypatch.delenv("LTX2_VAE_DECODE_BUDGET_GB", raising=False)
     assert decode_budget_bytes() == 8 * 1024**3
-    assert B.diffusion_decode_budget_bytes() == mx.device_info()["memory_size"] // 4
+    assert B.diffusion_decode_budget_bytes() == mx.device_info()["memory_size"] // 2
     monkeypatch.setenv("LTX2_VAE_DECODE_BUDGET_GB", "2.5")
     assert decode_budget_bytes() == int(2.5 * 1024**3) == B.diffusion_decode_budget_bytes()
 

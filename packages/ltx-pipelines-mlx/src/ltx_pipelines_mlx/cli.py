@@ -454,7 +454,7 @@ examples:
         help=(
             "[experimental] Diffusion decoder tile size in pixel frames / pixels (multiples of 8 / 32; "
             "0 disables tiling on that axis, '0 0 0' forces one tile). Default: sized automatically "
-            "from LTX2_VAE_DECODE_BUDGET_GB (or a quarter of unified memory). Requires --video-decoder diffusion."
+            "from LTX2_VAE_DECODE_BUDGET_GB (or half of unified memory). Requires --video-decoder diffusion."
         ),
     )
     gen.add_argument(

@@ -106,10 +106,10 @@ def diffvae_max_tokens() -> int:
 
 
 def diffusion_decode_budget_bytes() -> int:
-    """Decode budget for the diffusion decoder: the shared env var, else a quarter of unified memory."""
+    """Decode budget for the diffusion decoder: the shared env var, else half of unified memory."""
     if VAE_DECODE_BUDGET_ENV in os.environ:
         return decode_budget_bytes()
-    return int(mx.device_info()["memory_size"]) // 4
+    return int(mx.device_info()["memory_size"]) // 2
 
 
 def _video_vae_names(model_dir: str | Path) -> tuple[str, str]:
