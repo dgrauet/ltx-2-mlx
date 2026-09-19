@@ -45,6 +45,7 @@ from .scheduler import (
     LTX_2_5_DISTILLED_SIGMAS,
     LTX_2_5_STAGE_2_DISTILLED_SIGMAS,
     STAGE_2_SIGMAS,
+    shorten_schedule,
 )
 from .ti2vid_two_stages import TI2VidTwoStagesPipeline
 from .utils.helpers import create_noised_state
@@ -341,7 +342,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         )
 
         stage1_table = LTX_2_5_DISTILLED_SIGMAS if self._is_25 else DISTILLED_SIGMAS
-        sigmas_1 = stage1_table[: stage1_steps + 1] if stage1_steps else stage1_table
+        sigmas_1 = shorten_schedule(stage1_table, stage1_steps, keep="head")
 
         stage1_dit = self.dit
         if self._tile_count is not None:
@@ -409,7 +410,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         # --- Stage 2: full resolution refine (no LoRA swap — already distilled) ---
         video_tokens, _ = self.video_patchifier.patchify(video_upscaled)
         stage2_table = LTX_2_5_STAGE_2_DISTILLED_SIGMAS if self._is_25 else STAGE_2_SIGMAS
-        sigmas_2 = stage2_table[: stage2_steps + 1] if stage2_steps else stage2_table
+        sigmas_2 = shorten_schedule(stage2_table, stage2_steps, keep="tail")
         # Upstream renoises the upscaled stage-1 latent at ``stage_2_sigmas[0]``
         # (``ModalitySpec(noise_scale=stage_2_sigmas[0].item())``); our
         # ``create_noised_state(sigma=...)`` below is that same mechanism.

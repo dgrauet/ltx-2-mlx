@@ -7,6 +7,7 @@ from ltx_pipelines_mlx.scheduler import (
     STAGE_2_SIGMAS,
     get_sigma_schedule,
     ltx2_schedule,
+    shorten_schedule,
     sigma_to_timestep,
 )
 
@@ -183,3 +184,36 @@ class TestLtx2Schedule:
         sigmas = ltx2_schedule(steps=50)
         for s in sigmas:
             assert 0.0 <= s <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# shorten_schedule
+# ---------------------------------------------------------------------------
+
+
+class TestShortenSchedule:
+    def test_full_or_unset_returns_table(self):
+        for steps in (None, 0, len(DISTILLED_SIGMAS) - 1, 99):
+            assert shorten_schedule(DISTILLED_SIGMAS, steps) is DISTILLED_SIGMAS
+
+    def test_every_shortened_schedule_ends_at_zero(self):
+        for table in (DISTILLED_SIGMAS, STAGE_2_SIGMAS):
+            for steps in range(1, len(table) - 1):
+                for keep in ("head", "tail"):
+                    sigmas = shorten_schedule(table, steps, keep=keep)
+                    assert len(sigmas) == steps + 1
+                    assert sigmas[-1] == 0.0
+                    assert sigmas == sorted(sigmas, reverse=True)
+
+    def test_head_keeps_the_starting_sigma(self):
+        assert shorten_schedule(DISTILLED_SIGMAS, 3) == [1.0, 0.99375, 0.9875, 0.0]
+
+    def test_tail_matches_the_refine_convention(self):
+        assert shorten_schedule(STAGE_2_SIGMAS, 1, keep="tail") == [0.421875, 0.0]
+        assert shorten_schedule(STAGE_2_SIGMAS, 2, keep="tail") == [0.725, 0.421875, 0.0]
+
+    def test_rejects_bad_arguments(self):
+        with pytest.raises(ValueError):
+            shorten_schedule(STAGE_2_SIGMAS, -1)
+        with pytest.raises(ValueError):
+            shorten_schedule(STAGE_2_SIGMAS, 1, keep="middle")

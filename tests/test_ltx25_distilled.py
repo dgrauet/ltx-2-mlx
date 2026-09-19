@@ -230,12 +230,17 @@ def test_23_pack_keeps_the_deterministic_euler_loop(tmp_path, monkeypatch):
 
 
 def test_stage_step_truncation_applies_to_the_25_tables(tmp_path, monkeypatch):
-    pipe, euler, ancestral, _ = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
+    pipe, euler, ancestral, noised_calls = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
 
     _run(pipe, stage1_steps=3, stage2_steps=2)
 
-    assert ancestral.calls[0]["sigmas"] == LTX_2_5_DISTILLED_SIGMAS[:4]
-    assert euler.calls[0]["sigmas"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS[:3]
+    # Stage 1 starts from pure noise, so it keeps the head of the table and
+    # still jumps to the terminal sigma; stage 2 takes the tail.
+    assert ancestral.calls[0]["sigmas"] == [*LTX_2_5_DISTILLED_SIGMAS[:3], 0.0]
+    assert euler.calls[0]["sigmas"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS[1:]
+    for call in (ancestral.calls[0], euler.calls[0]):
+        assert call["sigmas"][-1] == 0.0
+    assert [c["sigma"] for c in noised_calls[2:]] == [LTX_2_5_STAGE_2_DISTILLED_SIGMAS[1]] * 2
 
 
 def test_teacache_rejected_on_25_pack(tmp_path, monkeypatch):
