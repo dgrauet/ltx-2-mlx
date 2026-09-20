@@ -56,22 +56,22 @@ Not sure which pipeline to reach for? See [docs/PIPELINES.md § Which pipeline?]
 # NOTE: -f/--frames is required on 2.3 packs (the default model below) — it
 # only defaults to an auto-predicted duration on LTX-2.5 packs. See "LTX-2.5"
 # and "CLI Reference" below.
-ltx-2-mlx generate --prompt "A sunset over the ocean" --two-stage -f 97 -o sunset.mp4
+ltx-2-mlx generate --prompt "A sunset over the ocean" --two-stage -f 97 --frame-rate 24 -o sunset.mp4
 
 # Image-to-Video (any mode supports --image)
-ltx-2-mlx generate --prompt "Animate this" --image photo.jpg --two-stage -f 97 -o animated.mp4
+ltx-2-mlx generate --prompt "Animate this" --image photo.jpg --two-stage -f 97 --frame-rate 24 -o animated.mp4
 
 # HQ (res_2s sampler, highest quality)
-ltx-2-mlx generate --prompt "A scene" --two-stages-hq --stage1-steps 20 -f 97 -o hq.mp4
+ltx-2-mlx generate --prompt "A scene" --two-stages-hq --stage1-steps 20 -f 97 --frame-rate 24 -o hq.mp4
 
 # Distilled two-stage (fastest, mirrors upstream DistilledPipeline)
-ltx-2-mlx generate --prompt "A scene" --distilled -H 720 -W 1280 -f 97 -o distilled.mp4
+ltx-2-mlx generate --prompt "A scene" --distilled -H 720 -W 1280 -f 97 --frame-rate 24 -o distilled.mp4
 
 # One-stage dev + CFG (full target res, mirrors upstream TI2VidOneStagePipeline)
-ltx-2-mlx generate --prompt "A scene" --one-stage -f 97 -o one_stage.mp4
+ltx-2-mlx generate --prompt "A scene" --one-stage -f 97 --frame-rate 24 -o one_stage.mp4
 
 # Audio-to-Video
-ltx-2-mlx a2v --prompt "Music video" --audio music.wav -o a2v.mp4
+ltx-2-mlx a2v --prompt "Music video" --audio music.wav --frame-rate 24 -o a2v.mp4
 
 # Retake (regenerate frames 1-3 of a video)
 ltx-2-mlx retake --prompt "New action" --video source.mp4 --start 1 --end 3 -o retake.mp4
@@ -80,41 +80,41 @@ ltx-2-mlx retake --prompt "New action" --video source.mp4 --start 1 --end 3 -o r
 ltx-2-mlx extend --prompt "Continue the scene" --video source.mp4 --extend-frames 2 -o extended.mp4
 
 # Keyframe interpolation
-ltx-2-mlx keyframe --prompt "Smooth transition" --start frame1.png --end frame2.png -o transition.mp4
+ltx-2-mlx keyframe --prompt "Smooth transition" --start frame1.png --end frame2.png --frame-rate 24 -o transition.mp4
 
 # Prompt enhancement
 ltx-2-mlx enhance --prompt "a cat" --mode t2v
 
 # Use int4 model (fits 16GB)
-ltx-2-mlx generate -p "A cat" --distilled -f 97 -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q4
+ltx-2-mlx generate -p "A cat" --distilled -f 97 --frame-rate 24 -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q4
 
 # Block streaming: bf16 model on 32 GB Mac
-ltx-2-mlx generate -p "A cat" --two-stage -f 97 -o cat.mp4 --model dgrauet/ltx-2.3-mlx --low-ram
+ltx-2-mlx generate -p "A cat" --two-stage -f 97 --frame-rate 24 -o cat.mp4 --model dgrauet/ltx-2.3-mlx --low-ram
 
 # Block streaming: q8 model on 16 GB Mac
-ltx-2-mlx generate -p "A cat" --distilled -f 97 -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q8 --low-ram
+ltx-2-mlx generate -p "A cat" --distilled -f 97 --frame-rate 24 -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q8 --low-ram
 
 # Block streaming works on every generate mode + a2v / keyframe / ic-lora
-ltx-2-mlx generate -p "A cat" -f 97 -o cat.mp4 --two-stage --low-ram
-ltx-2-mlx generate -p "A cat" -f 97 -o cat.mp4 --two-stages-hq --low-ram
-ltx-2-mlx a2v -p "music video" --audio music.wav -o a2v.mp4 --low-ram
-ltx-2-mlx keyframe -p "transition" --start a.png --end b.png -o kf.mp4 --low-ram
-ltx-2-mlx ic-lora -p "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 --low-ram -o out.mp4
+ltx-2-mlx generate -p "A cat" -f 97 --frame-rate 24 -o cat.mp4 --two-stage --low-ram
+ltx-2-mlx generate -p "A cat" -f 97 --frame-rate 24 -o cat.mp4 --two-stages-hq --low-ram
+ltx-2-mlx a2v -p "music video" --audio music.wav --frame-rate 24 -o a2v.mp4 --low-ram
+ltx-2-mlx keyframe -p "transition" --start a.png --end b.png --frame-rate 24 -o kf.mp4 --low-ram
+ltx-2-mlx ic-lora -p "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 --frame-rate 24 --low-ram -o out.mp4
 
 # HDR IC-LoRA — V2V upgrade an SDR video to linear HDR (saves out.mp4 + out.hdr.npz)
 ltx-2-mlx hdr-ic-lora -p "cinematic golden hour" \
     --lora Lightricks/LTX-2.3-22b-IC-LoRA-HDR 1.0 \
-    --video-conditioning source_sdr.mp4 1.0 --low-ram -o out.mp4
+    --video-conditioning source_sdr.mp4 1.0 --frame-rate 24 --low-ram -o out.mp4
 
 # HDR IC-LoRA — pure T2V (no conditioning video)
 ltx-2-mlx hdr-ic-lora -p "a sunset over the ocean, vivid HDR" \
-    --lora Lightricks/LTX-2.3-22b-IC-LoRA-HDR 1.0 --low-ram -o out.mp4
+    --lora Lightricks/LTX-2.3-22b-IC-LoRA-HDR 1.0 --frame-rate 24 --low-ram -o out.mp4
 
 # Modality tiling: split video tokens for long/HD scenarios that exceed attention memory.
 # Stack with --low-ram for max memory savings on big targets.
-ltx-2-mlx generate -p "long scene" --two-stage --low-ram -f 97 \
+ltx-2-mlx generate -p "long scene" --two-stage --low-ram -f 97 --frame-rate 24 \
     --tile-frames 2 --tile-overlap 4 -o long.mp4
-ltx-2-mlx generate -p "1080p scene" --two-stages-hq --low-ram -f 97 \
+ltx-2-mlx generate -p "1080p scene" --two-stages-hq --low-ram -f 97 --frame-rate 24 \
     --tile-spatial 2 --tile-overlap 4 -H 1080 -W 1920 -o hd.mp4
 
 # Model info
@@ -125,11 +125,11 @@ ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q8
 
 ```bash
 ltx-2-mlx generate --distilled --model /path/to/ltx-2.5-mlx-q8 \
-    --prompt "a heavy wooden door creaks slowly open" -o out.mp4
+    --prompt "a heavy wooden door creaks slowly open" --frame-rate 24 -o out.mp4
 
 # Clamp the auto-predicted duration to 2-4 seconds instead of the default [1, 20]s
 ltx-2-mlx generate --distilled --model /path/to/ltx-2.5-mlx-q8 \
-    --prompt "a heavy wooden door creaks slowly open" --auto-duration 2:4 -o out.mp4
+    --prompt "a heavy wooden door creaks slowly open" --auto-duration 2:4 --frame-rate 24 -o out.mp4
 ```
 
 The 2.5 generation is **auto-detected from the model pack** (no new CLI
@@ -156,7 +156,7 @@ The dev model + CFG two-stage pipeline also works on 2.5 packs:
 
 ```bash
 ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
-    --prompt "a heavy wooden door creaks slowly open" -o out.mp4
+    --prompt "a heavy wooden door creaks slowly open" --frame-rate 24 -o out.mp4
 ```
 
 **v1 limits on 2.5 packs**:

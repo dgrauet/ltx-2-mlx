@@ -12,16 +12,24 @@ from ltx_pipelines_mlx.cli import _build_parser
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "PIPELINES.md"
 SUBCOMMANDS = ("generate", "a2v", "keyframe", "ic-lora", "hdr-ic-lora", "lipdub", "retake", "extend")
-#: Flags shared by every subcommand that the guide documents once, under "Common flags".
 FLAG_RE = re.compile(r"`(--[a-z0-9][a-z0-9-]*)")
 
 
-def _subparser(name: str) -> argparse.ArgumentParser:
+def _subparsers_action() -> argparse._SubParsersAction:
     parser = _build_parser()
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
-            return action.choices[name]
+            return action
     raise AssertionError("no subparsers")
+
+
+def _subparser(name: str) -> argparse.ArgumentParser:
+    return _subparsers_action().choices[name]
+
+
+def all_subcommand_names() -> set[str]:
+    """Every subcommand the CLI defines, not just the ones the guide documents."""
+    return set(_subparsers_action().choices)
 
 
 def parser_flags(subcommand: str) -> set[str]:
@@ -50,7 +58,7 @@ def test_every_cli_flag_is_documented(subcommand, doc_text):
 
 
 def test_every_documented_flag_exists(doc_text):
-    known = set().union(*(parser_flags(s) for s in SUBCOMMANDS))
+    known = set().union(*(parser_flags(s) for s in all_subcommand_names()))
     unknown = documented_flags(doc_text) - known
     assert not unknown, f"docs/PIPELINES.md mentions flags the CLI does not have: {sorted(unknown)}"
 

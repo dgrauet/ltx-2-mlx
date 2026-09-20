@@ -44,7 +44,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** T2V / I2V mp4 with audio. Dev model + CFG at half resolution, 2× upsample, distilled 3-step refine.
 - **Packs:** 2.3 and 2.5. **Tier:** Stable. Best default quality per minute.
 - **Required:** `--prompt`, `--output`, `--frame-rate`; `--frames` on 2.3 packs.
-- **Own flags:** `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--stg-scale` (1.0), `--dev-transformer` (`transformer-dev.safetensors`), `--distilled-lora`, `--distilled-lora-strength` (1.0), `--enable-teacache`, `--teacache-thresh`.
+- **Own flags:** `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--stg-scale` (1.0; each unit above 0 adds one extra forward pass per step — pass `--stg-scale 0` on 32 GB Macs for long clips), `--dev-transformer` (`transformer-dev.safetensors`), `--distilled-lora`, `--distilled-lora-strength` (1.0), `--enable-teacache`, `--teacache-thresh`.
 - **Example:** `ltx-2-mlx generate --two-stage -p "a fox in the forest" -H 480 -W 704 -f 97 --frame-rate 24 --low-ram -o fox.mp4`
 - **Cost (M2 Pro 32 GB, q8):** 704 × 480, 97 frames ≈ 1374 s, or ≈ 942 s with `--enable-teacache`. [Details](../CLAUDE.md#teacache-opt-in-stage-1-acceleration).
 
@@ -149,7 +149,7 @@ Everything else is in [Common flags](#common-flags).
 
 These subcommands do not generate video and have no column in the matrix below.
 
-- **`enhance`** rewrites a prompt with Gemma and prints it. Takes `--prompt`, `--gemma`, `--seed`, and a mode selector. Gemma 3 only, so it raises on 2.5 packs, which ship Gemma 4.
+- **`enhance`** rewrites a prompt with Gemma and prints it. Takes `--prompt`, `--gemma`, `--seed`, and `--mode`. Gemma 3 only, so it raises on 2.5 packs, which ship Gemma 4.
 - **`info`** prints the configuration and memory estimate of a model directory. Takes `--model`.
 - **`train`** trains a LoRA or a full model from a YAML config file. Takes a config path and `--low-ram`.
 - **`preprocess`** encodes raw videos into latents and conditions for training. Takes a video directory, a caption directory and extension, an output directory, `--model`, `--gemma`, `--height`, `--width`, `--frame-rate`, a maximum frame count, and an audio switch.
@@ -207,7 +207,7 @@ would otherwise not fit. On a 32 GB Mac at typical token counts, prefer `--low-r
 | `--teacache-thresh F` | 0.5 Euler, 1.0 res_2s | How aggressively steps are skipped. Higher is faster and lossier. Ignored without `--enable-teacache`. | with `--enable-teacache` |
 | `LTX2_GEMMA_EVAL_EVERY` | 1 | Per-layer flush cadence in the Gemma forward, which keeps each Metal command buffer under the macOS GPU watchdog deadline. Set to `0` only if you have never seen a watchdog crash. [Details](../CLAUDE.md#metal-watchdog-mitigation). | all pipelines |
 | `LTX2_DIT_EVAL_EVERY` | 8 | Same guard for the DiT block loop: flush every N of the 48 blocks. `0` disables it. | all pipelines |
-| `LTX2_GEMMA_MAX_LENGTH` | 1024 | Cap on the padded Gemma sequence length. Lowering it halves the encode time but shifts the padded RoPE positions away from the training distribution, so quality suffers. Last resort. | all pipelines |
+| `LTX2_GEMMA_MAX_LENGTH` | 1024 | Cap on the padded Gemma sequence length. Lowering it halves the encode time but shifts the text positions away from what the model was trained with (quality risk). Last resort. | all pipelines |
 | `AGX_RELAX_CDM_CTXSTORE_TIMEOUT` | unset | An AGX driver knob, not an LTX-2 variable, and never set automatically. It relaxes the watchdog eviction timeout for the process that sets it, working around a macOS 26.x and MLX 0.31.x regression. The UI may stutter during the run, and on some machines running with the display off is the only reliable workaround. | all pipelines |
 
 ### Previews and prompt gating
@@ -289,6 +289,6 @@ All CLI progress goes to **stderr** so stdout stays clean for callers that pipe 
 - HDR LoRA can be combined with regular IC-LoRA control LoRAs in theory but untested — single HDR LoRA per pipeline is the validated path.
 - Modality tiling overhead dominates over memory benefit at default Nv (1650-3168). Use only when targeting 1080p / 8s+ on Mac Studio 64-128 GB; on 32 GB Mac, prefer `--low-ram` alone.
 - `generate` requires a mode flag (`--one-stage`, `--two-stage`, `--two-stages-hq`, or `--distilled`). There is **no implicit default** — every pipeline maps 1:1 to an upstream Lightricks/LTX-2 class.
-- `generate --one-stage` vs `generate --two-stage`: same dev model + CFG, but `--one-stage` runs **once at the target resolution** (no upscaler dependency, simpler latents for downstream). `--two-stage` runs at half-res then upscales 2× and refines (typically faster overall and better at large targets). Pick `--one-stage` for native res ≤ 480×704 or if you don't trust the upsampler; pick `--two-stage` for everything else.
+- `generate --one-stage` vs `generate --two-stage`: same dev model + CFG, but `--one-stage` runs **once at the target resolution** (no upscaler dependency, simpler latents for downstream). `--two-stage` runs at half-res then upscales 2× and refines (typically faster overall and better at large targets). Pick `--one-stage` for native res ≤ 704 × 480 or if you don't trust the upsampler; pick `--two-stage` for everything else.
 - `generate --distilled` vs `generate --two-stage`: same half-res + upscale structure, but `--distilled` skips CFG entirely (8 stage 1 steps × 1 forward instead of 30 × 2-4). Fastest mode; quality slightly below the dev+CFG variants.
 - `--video-decoder diffusion` (LTX 2.5 packs only, experimental) reproduces upstream's **default** `chunked_eager` stage-5 mode exactly: the neighborhood-attention stage runs on four width slabs with a halo, so the first/last ~20 px of each row are edge-replicated rather than attending over the full volume — identical to upstream's own default-mode output, not a port shortfall. Decodes above the memory budget are tiled automatically (`--diffvae-tile` to override); conv remains the default decoder.

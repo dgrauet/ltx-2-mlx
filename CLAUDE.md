@@ -354,7 +354,7 @@ Audio latent (B, 8, T, 16)
 
 ## CLI Commands
 
-The user-facing pipelines guide (decision tree, per-pipeline cards, flag matrix) lives at docs/PIPELINES.md; `tests/test_docs_flags.py` keeps its flag lists in sync with `cli.py`. Quick reference:
+The user-facing pipelines guide (decision tree, per-pipeline cards, flag matrix) lives at [docs/PIPELINES.md](docs/PIPELINES.md); `tests/test_docs_flags.py` keeps its flag lists in sync with `cli.py`. Quick reference:
 
 Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 
@@ -600,7 +600,7 @@ The non-distilled (dev) model uses multi-modal guidance with up to 4 forward pas
 Default reference params (LTX_2_3_PARAMS): `cfg_scale=3.0`, `stg_scale=1.0`, `stg_blocks=[28]`, `rescale_scale=0.7`, `modality_scale=3.0`. Audio: `cfg_scale=7.0`.
 HQ params (LTX_2_3_HQ_PARAMS): `cfg_scale=3.0`, `stg_scale=0.0`, `stg_blocks=[]`, `rescale_scale=0.45`. Audio: `cfg_scale=7.0`, `rescale_scale=1.0`.
 
-**Default `stg_scale=0.0`**: STG requires a 3rd forward pass per step. On 32GB Mac, this causes OOM for videos longer than ~33 frames at 480x704. All pipelines default to `stg_scale=0.0` (CFG-only) for 32GB compatibility. Use `--stg-scale 1.0` for short videos only.
+**`stg_scale` defaults differ by pipeline**: the dev + CFG pipelines (`--two-stage`, `--one-stage`, `a2v`, `keyframe`, `retake`/`extend`) default to `stg_scale=1.0` (`utils/constants.py`, `ti2vid_two_stages.py:377`); `--two-stages-hq` defaults to `stg_scale=0.0` (`ti2vid_two_stages_hq.py:103`). STG requires a 3rd forward pass per step. On 32GB Mac, this causes OOM for videos longer than ~33 frames at 480x704. Pass `--stg-scale 0` on 32GB machines for long clips.
 
 **Memory impact**: Each extra pass doubles/triples/quadruples memory. On 32GB Mac with dev model at 480x704: CFG-only supports ~97 frames at half-res (two-stage), full guidance (4 passes) supports ~17 frames.
 
