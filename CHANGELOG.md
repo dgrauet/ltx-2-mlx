@@ -10,6 +10,13 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.8](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.7...v0.15.8) (2026-09-20)
+
+
+### Bug Fixes
+
+* **core:** conv VAE decode tiling estimate measured, spatial tiles in the auto path ([#146](https://github.com/dgrauet/ltx-2-mlx/issues/146)) ([8dc80b4](https://github.com/dgrauet/ltx-2-mlx/commit/8dc80b483a5144f8ef39c5a40b5b74694c0b6625))
+
 ## [0.15.7](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.6...v0.15.7) (2026-09-19)
 
 
