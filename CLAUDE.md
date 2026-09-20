@@ -354,7 +354,7 @@ Audio latent (B, 8, T, 16)
 
 ## CLI Commands
 
-Full pipeline ↔ option matrix lives at [docs/PIPELINES.md](docs/PIPELINES.md). Quick reference:
+The user-facing pipelines guide (decision tree, per-pipeline cards, flag matrix) lives at docs/PIPELINES.md; `tests/test_docs_flags.py` keeps its flag lists in sync with `cli.py`. Quick reference:
 
 Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 

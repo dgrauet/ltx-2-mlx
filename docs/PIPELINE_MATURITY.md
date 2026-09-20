@@ -2,7 +2,8 @@
 
 This document classifies each `ltx-2-mlx` pipeline by stability and production
 readiness. Downstream consumers should read this before relying on a pipeline
-in their app.
+in their app. For per-pipeline usage (flags, defaults, when to reach for
+each one), see the cards in [docs/PIPELINES.md § Pipelines](PIPELINES.md#pipelines).
 
 ## Tiers
 
