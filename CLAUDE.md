@@ -1107,7 +1107,9 @@ duration after stage 2 — the padding never reaches the saved file, only its ke
   (`iclora_utils.reference_conditioning_from_latent`, strength 1.0, downscale factor read from
   the detailing LoRA's own metadata).
 
-**Detailing LoRA attach.** `_attach_detailing_lora` resolves (downloads on first use) and attaches
+**Detailing LoRA attach.** The LoRA repo is gated on HuggingFace: `_resolve_detailing_lora` runs
+before any model load and turns `GatedRepoError` into a `PermissionError` naming the licence page
+(accept it once with the logged-in account). `_attach_detailing_lora` then resolves (downloads on first use) and attaches
 `Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler` at a fixed strength of 0.5
 (`DETAILING_LORA_STRENGTH`, not a user knob) to the resident distilled transformer right before
 stage 2, mirroring `ICLoraPipeline._fuse_loras`: under `--low-ram` it appends a `BlockLoraSource`

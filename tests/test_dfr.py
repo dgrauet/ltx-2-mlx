@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import ClassVar
 
 import mlx.core as mx
@@ -199,6 +200,23 @@ def test_attach_detailing_lora_fuses_in_place_when_not_streaming(tmp_path, monke
     # The fused weights must be materialized in place, before the pre-fuse state dicts are
     # dropped — the lazy dequantize->fuse->requantize graph must not defer to stage 2.
     assert len(materialized) == 1
+
+
+def test_gated_detailing_lora_explains_the_licence_before_any_load(tmp_path, monkeypatch):
+    """A gated HF repo (licence not accepted) must fail with the licence URL, before stage 1."""
+    from huggingface_hub.errors import GatedRepoError
+
+    pipe, *_ = _make(tmp_path, monkeypatch)
+    pipe._detailing_lora_path = None
+    pipe.detailing_lora = "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler"
+    pipe._load_text_encoder = lambda: (_ for _ in ()).throw(AssertionError("must not load"))  # type: ignore[method-assign]
+    gated = GatedRepoError.__new__(GatedRepoError)  # the real ctor needs an HTTP response; only the type matters
+    Exception.__init__(gated, "403 Client Error: gated repo")
+    monkeypatch.setattr(dfr_mod, "resolve_lora_path", lambda path: (_ for _ in ()).throw(gated))
+    with pytest.raises(
+        PermissionError, match=re.escape("huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler")
+    ):
+        _run(pipe)
 
 
 def test_attach_detailing_lora_streaming_appends_a_block_source(tmp_path, monkeypatch):

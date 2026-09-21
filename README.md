@@ -180,6 +180,9 @@ Lightricks publishes the official 2.5 task IC-LoRAs.
 
 For maximum detail on a 2.5 pack, `generate --dfr` (experimental) runs a base DFR pass with
 the official detailing IC-LoRA — see the [`generate --dfr` card](docs/PIPELINES.md#generate---dfr-experimental-ltx-25-packs-only) in the pipelines guide.
+That LoRA (`Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler`) is a **gated** HuggingFace
+repo: accept its licence on the model page once, with the account `huggingface-cli login` uses,
+before the first `--dfr` run (the run fails before loading any model otherwise).
 
 ### Python API
 

@@ -14,6 +14,7 @@ import logging
 from collections.abc import Sequence
 
 import mlx.core as mx
+from huggingface_hub.errors import GatedRepoError
 
 from ltx_core_mlx.conditioning.types.keyframe_slots import VideoGeneratedKeyframeSlots
 from ltx_core_mlx.loader import (
@@ -93,7 +94,14 @@ class DFRPipeline(DistilledPipeline):
             Local path to the detailing LoRA ``.safetensors`` file.
         """
         if self._detailing_lora_path is None:
-            self._detailing_lora_path = resolve_lora_path(self.detailing_lora)
+            try:
+                self._detailing_lora_path = resolve_lora_path(self.detailing_lora)
+            except GatedRepoError as exc:
+                raise PermissionError(
+                    f"The detailing IC-LoRA '{self.detailing_lora}' is a gated HuggingFace repo: accept its "
+                    f"licence once at https://huggingface.co/{self.detailing_lora} with the account you are "
+                    "logged in as (huggingface-cli login), then rerun. No model was loaded."
+                ) from exc
             self._detailing_downscale = read_lora_reference_downscale_factor(self._detailing_lora_path)
         return self._detailing_lora_path
 

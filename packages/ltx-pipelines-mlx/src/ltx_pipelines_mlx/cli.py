@@ -550,14 +550,19 @@ examples:
             "[experimental] DFR (Diffusion Fidelity Rendering) base path, LTX 2.5 packs only: distilled "
             "half-res stage with keyframe slots on a segment-aligned canvas, then a full-res detailing "
             "stage with the official detailing IC-LoRA guided by the stage-1 latent. Mirrors upstream "
-            "DFRPipeline (spatial_upscalings=1, temporal_upscalings=0)."
+            "DFRPipeline (spatial_upscalings=1, temporal_upscalings=0). The detailing LoRA is a gated "
+            "HuggingFace repo: accept its licence on the model page once before the first run."
         ),
     )
     gen.add_argument(
         "--detailing-lora",
         default=DEFAULT_DETAILING_LORA,
         metavar="PATH_OR_REPO",
-        help="Detailing IC-LoRA for --dfr (local .safetensors or HF repo id). Default: the official LTX-2.5 detailing LoRA.",
+        help=(
+            "Detailing IC-LoRA for --dfr (local .safetensors or HF repo id). Default: the official LTX-2.5 "
+            "detailing LoRA (Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler, gated: accept its licence "
+            "on HuggingFace once, or pass a local file)."
+        ),
     )
     gen.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30 standard, 15 HQ)")
     gen.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 steps (default: 3)")
