@@ -8,6 +8,7 @@ Public pipeline classes mirror upstream Lightricks/LTX-2 pipelines 1:1:
 | ``TI2VidTwoStagesPipeline`` | ``ti2vid_two_stages.TI2VidTwoStagesPipeline`` |
 | ``TI2VidTwoStagesHQPipeline`` | ``ti2vid_two_stages_hq.TI2VidTwoStagesHQPipeline`` |
 | ``DistilledPipeline`` | ``distilled.DistilledPipeline`` |
+| ``DFRPipeline`` | ``dfr_pipeline.DFRPipeline`` |
 | ``ICLoraPipeline`` | ``ic_lora.ICLoraPipeline`` |
 | ``HDRICLoraPipeline`` | ``hdr_ic_lora.HDRICLoraPipeline`` |
 | ``LipDubPipeline`` | ``lipdub.LipDubPipeline`` |
@@ -24,6 +25,7 @@ supported on every public pipeline by passing ``image=...`` to
 
 from ltx_pipelines_mlx._base import BasePipeline
 from ltx_pipelines_mlx.a2vid_two_stage import A2VidPipelineTwoStage
+from ltx_pipelines_mlx.dfr import DFRPipeline
 from ltx_pipelines_mlx.distilled import DistilledPipeline
 from ltx_pipelines_mlx.hdr_ic_lora import HDRICLoraPipeline
 from ltx_pipelines_mlx.ic_lora import ICLoraPipeline
@@ -49,6 +51,7 @@ __all__ = [
     "AudioConditioner",
     "AudioDecoder",
     "BasePipeline",
+    "DFRPipeline",
     "DistilledPipeline",
     "DurationPredictor",
     "HDRICLoraPipeline",

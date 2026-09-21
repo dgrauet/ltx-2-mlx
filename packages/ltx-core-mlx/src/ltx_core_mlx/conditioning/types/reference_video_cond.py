@@ -81,4 +81,9 @@ class VideoConditionByReferenceLatent:
             keyframes_mask=extend_keyframes_mask(
                 state, num_new_tokens=new_latent.shape[1] - state.latent.shape[1], marked=False
             ),
+            # Carried, not owned: appending after generated keyframe slots must not erase
+            # the layout that locates them (DFR appends a reference on top of its slots).
+            # Reference tokens go after the existing ones, so the recorded slot range stays valid.
+            generated_keyframe_layout=state.generated_keyframe_layout,
+            generated_keyframes=state.generated_keyframes,
         )

@@ -316,6 +316,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         prompt_relay,
         generated_keyframes: int | Sequence[int],
         enable_teacache: bool,
+        canvas_for: Callable[[int], tuple[int, list[int]]] | None = None,
     ) -> tuple[Stage1Result, int, int, int]:
         """Encode the prompt and denoise stage 1 at half resolution.
 
@@ -332,6 +333,11 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             prompt_relay: Optional Prompt Relay segment specs.
             generated_keyframes: ``0`` (off), an ``int``, or explicit pixel-frame indices.
             enable_teacache: Whether TeaCache was requested (rejected on 2.5 packs).
+            canvas_for: Optional hook called with the resolved ``num_frames``, returning
+                ``(canvas_frames, slot_pixel_indices)``. Used by :class:`DFRPipeline` to pad
+                the clip to whole keyframe segments and place one slot per boundary; the
+                returned canvas length replaces ``num_frames`` for the rest of stage 1 and is
+                what this method returns. ``None`` (every other caller) leaves both untouched.
 
         Returns:
             Tuple of (stage1 result, resolved num_frames, resolved height, resolved width).
@@ -361,6 +367,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         num_frames = self._resolve_num_frames(
             num_frames, video_encoding=video_embeds, audio_encoding=audio_embeds, frame_rate=frame_rate
         )
+        if canvas_for is not None:
+            num_frames, generated_keyframes = canvas_for(num_frames)
         if self.low_memory:
             self.prompt_encoder.free()
             aggressive_cleanup()
@@ -620,6 +628,18 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         )
         if self.low_memory:
             aggressive_cleanup()
+
+        # Stage-2 slot content, extracted before the conditioning tokens are cut. Only
+        # assigned when stage 2 actually carried slots (``extra_conditionings`` from
+        # :class:`DFRPipeline`): the parent's stage 2 has none, and its
+        # ``self.generated_keyframes`` from stage 1 must not be clobbered with ``None``.
+        if video_state_2.generated_keyframe_layout is not None:
+            self.generated_keyframes = extract_generated_keyframes(
+                output_2.video_latent,
+                video_state_2.generated_keyframe_layout,
+                self.video_patchifier,
+                (H_full, W_full),
+            )
 
         gen_tokens_2 = output_2.video_latent[:, : F * H_full * W_full, :]
         video_latent = self.video_patchifier.unpatchify(gen_tokens_2, (F, H_full, W_full))
