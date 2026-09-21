@@ -246,6 +246,11 @@ def test_cli_dfr_flag_parses_with_defaults(tmp_path):
 
 
 def test_cli_dfr_reaches_the_pipeline(monkeypatch, tmp_path):
+    # `--video-decoder diffusion` goes through the CLI's `_validate_diffvae_tiling` preflight,
+    # which sizes the decode budget from host memory (mx.device_info()["memory_size"] // 2) unless
+    # overridden here. Pin it well above any CI runner's RAM so this test doesn't depend on the
+    # host's memory size.
+    monkeypatch.setenv("LTX2_VAE_DECODE_BUDGET_GB", "64")
     seen = {}
 
     class _FakePipe:
