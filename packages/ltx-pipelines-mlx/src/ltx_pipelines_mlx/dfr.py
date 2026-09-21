@@ -40,6 +40,8 @@ from ltx_pipelines_mlx.utils.types import DEFAULT_AUTO_DURATION, AutoDuration
 
 logger = logging.getLogger(__name__)
 
+_materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags mx.eval pattern
+
 #: Official LTX-2.5 detailing IC-LoRA (creative x2 spatial upsampler), ``reference_downscale_factor: 2``.
 DEFAULT_DETAILING_LORA = "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler"
 #: Upstream ``_DETAILING_LORA_STRENGTH``; not a user knob.
@@ -129,6 +131,11 @@ class DFRPipeline(DistilledPipeline):
             )
             apply_quantization(self.dit, fused.sd)
             self.dit.load_weights(list(fused.sd.items()))
+            # The fuse happens mid-pipeline with the stage-1 latents resident, so the lazy
+            # dequantize -> fuse -> requantize graph must not be deferred to the first stage-2
+            # forward: materialize the fused weights here, then drop the pre-fuse state dicts.
+            _materialize(self.dit.parameters())
+            del model_sd, lora_sd, fused
             aggressive_cleanup()
             logger.info("Fused detailing LoRA: %s (strength=%s)", path, DETAILING_LORA_STRENGTH)
 

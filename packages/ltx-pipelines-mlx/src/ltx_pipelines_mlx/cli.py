@@ -1262,12 +1262,13 @@ def _cmd_generate(args: argparse.Namespace) -> None:
 
     else:
         raise SystemExit(
-            "generate requires one of --one-stage, --two-stage, --two-stages-hq, --distilled. "
+            "generate requires one of --one-stage, --two-stage, --two-stages-hq, --distilled, --dfr. "
             "Each maps to an upstream pipeline class:\n"
             "  --one-stage : TI2VidOneStagePipeline (dev + CFG, full target res)\n"
             "  --two-stage : TI2VidTwoStagesPipeline (dev + CFG, half-res + upscale, recommended)\n"
             "  --two-stages-hq        : TI2VidTwoStagesHQPipeline (res_2s + CFG, half-res + upscale)\n"
-            "  --distilled : DistilledPipeline (distilled half-res + upscale, fastest)"
+            "  --distilled : DistilledPipeline (distilled half-res + upscale, fastest)\n"
+            "  --dfr       : DFRPipeline (LTX 2.5 packs, detailing IC-LoRA at full res)"
         )
 
     _print_result(args.output, t0, args.quiet)

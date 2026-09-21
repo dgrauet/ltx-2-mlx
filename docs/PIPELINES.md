@@ -23,8 +23,8 @@ Then pick by constraint: 16–32 GB machines add `--low-ram`; 1080p or clips ove
 add `--tile-spatial 2`; a sharper decode on 2.5 packs adds `--video-decoder diffusion`;
 **maximum detail on 2.5 packs** → `generate` `--dfr` (experimental).
 
-`generate` has no implicit mode. One of `--one-stage`, `--two-stage`, `--two-stages-hq`
-or `--distilled` is mandatory, because each maps 1:1 to an upstream pipeline class.
+`generate` has no implicit mode. One of `--one-stage`, `--two-stage`, `--two-stages-hq`,
+`--distilled` or `--dfr` is mandatory, because each maps 1:1 to an upstream pipeline class.
 
 ## Pipelines
 
@@ -76,7 +76,7 @@ Everything else is in [Common flags](#common-flags).
 - **Own flags:** `--detailing-lora PATH_OR_REPO` (official LoRA, downloaded on first use), `--stage1-steps` (8), `--stage2-steps` (3), `--image PATH FRAME STRENGTH` (repeatable). Not accepted: `--num-generated-keyframes` (slots come from the canvas), `--enable-teacache`, `--cfg-scale`, `--stg-scale`.
 - **Example:** `ltx-2-mlx generate --dfr --model /path/to/ltx-2.5-mlx-q8 -p "a fox in the forest" -H 512 -W 768 -f 49 --frame-rate 24 --low-ram -o fox.mp4`
 - **Cost (M2 Pro 32 GB, q8, `--low-ram`):** 768 × 512, 49 frames ≈ 277 s (8-step stage 1 at ~10.7 s/forward over 864 video tokens, 3-step stage 2 at ~53.5 s/forward over 4128 tokens — target + 2 keyframe slots + the half-res reference), peak Metal 14.0 GB, max RSS 10.8 GB. Frame 24 is visibly sharper (tree crowns, haze texture) than the plain `--distilled` render at the same seed. `--image` (I2V, frame 0 anchor) adds ~7 s. A 137-frame request pads to a 145-frame canvas (6 slots) and costs ≈ 783 s. `--video-decoder diffusion` at 1152 × 768, 25 frames runs untiled at ≈ 465 s, 22.2 GB peak Metal.
-- **Notes:** on I2V, the first-frame keyframe marker is now applied consistently (see [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental)). [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental).
+- **Notes:** on I2V, the first-frame keyframe marker is now applied consistently (see [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental)). `--segment` (Prompt Relay) auto-distributes over the padded canvas, not the requested duration (e.g. 145 frames for `-f 137`), so segment boundaries shift by the padding before the tail is trimmed — pass explicit segment lengths for exact boundaries. [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental).
 
 ### `keyframe`
 

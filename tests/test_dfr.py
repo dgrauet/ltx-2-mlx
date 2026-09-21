@@ -186,6 +186,8 @@ def test_attach_detailing_lora_fuses_in_place_when_not_streaming(tmp_path, monke
     monkeypatch.setattr(dfr_mod, "apply_loras", lambda **kw: seen.update(apply_loras=kw) or _Fused())
     quantized: list = []
     monkeypatch.setattr(dfr_mod, "apply_quantization", lambda dit, sd: quantized.append((dit, sd)))
+    materialized: list = []
+    monkeypatch.setattr(dfr_mod, "_materialize", lambda *a: materialized.append(a))
 
     pipe._attach_detailing_lora()
 
@@ -194,6 +196,9 @@ def test_attach_detailing_lora_fuses_in_place_when_not_streaming(tmp_path, monke
     assert with_strength.strength == DETAILING_LORA_STRENGTH == 0.5
     assert quantized and quantized[0][0] is pipe.dit
     assert pipe.dit.loaded == [list(_Fused.sd.items())]
+    # The fused weights must be materialized in place, before the pre-fuse state dicts are
+    # dropped — the lazy dequantize->fuse->requantize graph must not defer to stage 2.
+    assert len(materialized) == 1
 
 
 def test_attach_detailing_lora_streaming_appends_a_block_source(tmp_path, monkeypatch):

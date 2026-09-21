@@ -1114,8 +1114,11 @@ stage 2, mirroring `ICLoraPipeline._fuse_loras`: under `--low-ram` it appends a 
 (fused per block bind); otherwise it fuses in place and re-quantizes, since stage 1 is finished
 and the transformer is never reused clean afterward.
 
-**Audio.** Only stage 1 produces audio; DFR ships that audio as-is (unpatchified and trimmed to
-the requested duration in audio tokens), matching upstream — there is no stage-2 audio refine.
+**Audio.** A stage-2 audio state is created and denoised jointly with the video (as upstream), but
+its result is discarded; the shipped audio is stage 1's (unpatchified and trimmed to the
+requested duration in audio tokens), matching upstream. Under `--low-ram`, stage 2's per-forward
+time also includes the per-bind detailing LoRA fusion (dequantize -> fuse -> requantize on every
+block bind of every step).
 
 **Not ported yet:** temporal rounds (`TemporalTilePlan`, sub-project 4c), the spatial epilogue,
 and the keyframe-aware decode (the stage-2 slot latents are captured in
