@@ -41,6 +41,9 @@ def _make(tmp_path, monkeypatch, *, low_ram=False):
     pipe.dit = object()  # type: ignore[assignment]
     pipe.vae_encoder = _FakeVaeEncoder()  # type: ignore[assignment]
     pipe.upsampler = _fake_upsampler  # type: ignore[assignment]
+    # Pre-resolved: generate_two_stage resolves the LoRA up front, which would otherwise
+    # read the empty stub file and reset the downscale factor to the default 1.
+    pipe._detailing_lora_path = str(tmp_path / "detail.safetensors")
     pipe._detailing_downscale = 2
     attached: list = []
     monkeypatch.setattr(pipe, "_attach_detailing_lora", lambda: attached.append(("attach", pipe.dit)))
@@ -132,6 +135,63 @@ def test_refuses_generated_keyframes_and_teacache_kwargs(tmp_path, monkeypatch):
         _run(pipe, generated_keyframes=3)
     with pytest.raises(ValueError, match="TeaCache"):
         _run(pipe, enable_teacache=True)
+
+
+def test_refuses_an_unresolvable_detailing_lora_before_any_load(tmp_path, monkeypatch):
+    """A bad --detailing-lora must fail before stage 1, not after a full half-res render.
+
+    ``resolve_lora_path`` treats a non-existent local path as an HF repo id, so the stub
+    stands in for its failure instead of reaching the network.
+    """
+    pipe, *_ = _make(tmp_path, monkeypatch)
+    pipe._detailing_lora_path = None  # force a real resolve
+    pipe._load_text_encoder = lambda: (_ for _ in ()).throw(AssertionError("must not load"))  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        dfr_mod,
+        "resolve_lora_path",
+        lambda path: (_ for _ in ()).throw(FileNotFoundError(f"no such LoRA: {path}")),
+    )
+    with pytest.raises(FileNotFoundError, match="no such LoRA"):
+        _run(pipe)
+
+
+def test_attach_detailing_lora_fuses_in_place_when_not_streaming(tmp_path, monkeypatch):
+    _write_25_pack(tmp_path)
+    pipe = DFRPipeline(str(tmp_path), low_memory=False, detailing_lora=str(tmp_path / "detail.safetensors"))
+
+    class _Dit:
+        def __init__(self):
+            self.loaded: list = []
+
+        def parameters(self):
+            return {"w": mx.zeros((2, 2))}
+
+        def load_weights(self, items):
+            self.loaded.append(items)
+
+    pipe.dit = _Dit()  # type: ignore[assignment]
+    seen: dict = {}
+
+    class _Loader:
+        def load(self, path, sd_ops=None):
+            seen["loaded_path"] = path
+            return {"lora": 1}
+
+    class _Fused:
+        sd: ClassVar[dict] = {"w": mx.ones((2, 2))}
+
+    monkeypatch.setattr(dfr_mod, "SafetensorsStateDictLoader", _Loader)
+    monkeypatch.setattr(dfr_mod, "apply_loras", lambda **kw: seen.update(apply_loras=kw) or _Fused())
+    quantized: list = []
+    monkeypatch.setattr(dfr_mod, "apply_quantization", lambda dit, sd: quantized.append((dit, sd)))
+
+    pipe._attach_detailing_lora()
+
+    assert seen["loaded_path"] == str(tmp_path / "detail.safetensors")
+    (with_strength,) = seen["apply_loras"]["lora_sd_and_strengths"]
+    assert with_strength.strength == DETAILING_LORA_STRENGTH == 0.5
+    assert quantized and quantized[0][0] is pipe.dit
+    assert pipe.dit.loaded == [list(_Fused.sd.items())]
 
 
 def test_attach_detailing_lora_streaming_appends_a_block_source(tmp_path, monkeypatch):

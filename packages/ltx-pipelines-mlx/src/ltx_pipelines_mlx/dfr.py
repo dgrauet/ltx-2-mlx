@@ -176,6 +176,10 @@ class DFRPipeline(DistilledPipeline):
         Raises:
             ValueError: on a pack without the keyframe embedding, when ``generated_keyframes``
                 is passed (DFR places its own slots from the canvas) or when TeaCache is requested.
+            FileNotFoundError: when the detailing LoRA cannot be resolved (raised up front,
+                before any prompt encoding).
+            RuntimeError: when ``_stage1`` did not run the canvas hook, leaving the requested
+                duration unknown.
         """
         if generated_keyframes:
             raise ValueError("DFR places its keyframe slots from the canvas; --num-generated-keyframes does not apply")
@@ -183,15 +187,19 @@ class DFRPipeline(DistilledPipeline):
             raise ValueError("TeaCache is not available on the DFR path (distilled flow)")
         self._require_generated_keyframes_support([1])  # DFR always uses slots: refuse 2.3 packs up front
         self._require_num_frames_source(num_frames)
+        # Resolve (and download) the detailing LoRA before any text encoding: it is required
+        # by stage 2, so a bad path must fail here rather than after a full stage-1 render.
+        self._resolve_detailing_lora()
 
         # Stage 1 on the padded canvas. AutoDuration is resolved inside _stage1; the canvas is
         # derived from the resolved value through the `canvas_for` hook below.
-        canvas_positions: dict[str, int] = {}
+        requested = 0
 
         def canvas_for(resolved_frames: int) -> tuple[int, list[int]]:
             """Pad the resolved clip length to whole keyframe segments (``_stage1`` hook)."""
+            nonlocal requested
             canvas_frames, segment, positions = resolve_canvas(resolved_frames)
-            canvas_positions["requested"] = resolved_frames
+            requested = resolved_frames
             if self.verbose:
                 print(
                     f"[dfr] canvas {canvas_frames} frames (requested {resolved_frames}), segment {segment}, "
@@ -217,7 +225,11 @@ class DFRPipeline(DistilledPipeline):
             enable_teacache=False,
             canvas_for=canvas_for,
         )
-        requested = canvas_positions["requested"]  # resolved by _stage1 (AutoDuration or explicit)
+        if not requested:
+            raise RuntimeError(
+                "_stage1 returned without calling the canvas_for hook, so the requested duration "
+                "is unknown and the canvas padding cannot be trimmed back off."
+            )
 
         # Upsample the stage-1 latent and the slots (one call each, as upstream).
         video_half = self.video_patchifier.unpatchify(stage1.video_tokens, stage1.latent_dims)

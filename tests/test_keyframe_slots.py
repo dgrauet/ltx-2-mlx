@@ -12,7 +12,11 @@ import pytest
 
 from ltx_core_mlx.conditioning.mask_utils import extend_keyframes_mask
 from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
-from ltx_core_mlx.conditioning.types.latent_cond import LatentState, create_initial_state
+from ltx_core_mlx.conditioning.types.latent_cond import (
+    LatentState,
+    VideoConditionByLatentIndex,
+    create_initial_state,
+)
 from ltx_core_mlx.conditioning.types.reference_video_cond import VideoConditionByReferenceLatent
 from ltx_core_mlx.utils.positions import compute_video_positions
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
@@ -351,6 +355,49 @@ def test_extract_generated_keyframes_unpatchifies_each_slot_standalone():
     assert extract_generated_keyframes(tokens, None, VideoLatentPatchifier(), (H, W)) is None
     with pytest.raises(ValueError, match="tokens per keyframe"):
         extract_generated_keyframes(tokens, s.generated_keyframe_layout, VideoLatentPatchifier(), (H, W + 1))
+
+
+def _item_applied_after_slots(name: str):
+    """One conditioning item of each kind that rebuilds the state, keyed by name."""
+    if name == "reference":
+        return VideoConditionByReferenceLatent(
+            reference_latent=mx.zeros((1, TPF, C)),
+            reference_positions=compute_video_positions(1, H, W, frame_rate=24.0),
+            downscale_factor=1,
+        )
+    if name == "keyframe":
+        return VideoConditionByKeyframeIndex(
+            frame_idx=9,
+            keyframe_latent=mx.zeros((1, TPF, C)),
+            spatial_dims=(F, H, W),
+            frame_rate=24.0,
+        )
+    return VideoConditionByLatentIndex(frame_indices=[0], clean_latent=mx.zeros((1, TPF, C)))
+
+
+@pytest.mark.parametrize("name", ["reference", "keyframe", "latent_index"])
+def test_items_applied_after_slots_keep_the_slot_layout_and_marker(name):
+    """No item may erase state it does not own.
+
+    Every one of these rebuilds ``LatentState`` rather than mutating a clone the way
+    upstream does, so each has to carry ``generated_keyframe_layout`` (and the keyframes
+    mask) forward. DFR's stage 2 applies slots first and a reference second, which is
+    exactly this shape; without the carry the slot content becomes unlocatable.
+    """
+    with_slots = create_noised_state((1, N, C), [_slots(5, 11)], (F, H, W), _positions(), seed=0)
+    assert with_slots.generated_keyframe_layout is not None
+    before = with_slots.generated_keyframe_layout
+    marked_before = with_slots.keyframes_mask
+
+    after = _item_applied_after_slots(name).apply(with_slots, (F, H, W))
+
+    assert after.generated_keyframe_layout == before, "the slot layout must survive"
+    assert after.generated_keyframe_layout.first_token == N
+    # The slot range still holds the slot tokens: appending items add tokens after it,
+    # and the in-place item replaces frame 0, which sits before it.
+    assert mx.array_equal(after.latent[:, before.token_slice], with_slots.latent[:, before.token_slice])
+    assert after.keyframes_mask is not None, "the first-frame + slot marker must survive"
+    assert mx.array_equal(after.keyframes_mask[:, : marked_before.shape[1]], marked_before)
 
 
 def test_evenly_spaced_positions_match_upstream_linspace_round():

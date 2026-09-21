@@ -123,13 +123,11 @@ class VideoConditionByLatentIndex:
             frame_mask = mx.full((state.denoise_mask.shape[0], tokens_per_frame, 1), mask_value)
             new_mask = mx.concatenate([new_mask[:, :start, :], frame_mask, new_mask[:, end:, :]], axis=1)
 
-        return LatentState(
-            latent=new_latent,
-            clean_latent=new_clean,
-            denoise_mask=new_mask,
-            positions=state.positions,
-            attention_mask=state.attention_mask,
-        )
+        # Token count is unchanged (frames are replaced in place), so every field this
+        # item does not own stays valid: ``keyframes_mask`` (incl. the first-frame marker
+        # every 2.5 state carries), ``generated_keyframe_layout`` and ``generated_keyframes``.
+        # Upstream gets this for free by mutating ``latent_state.clone()`` in place.
+        return replace(state, latent=new_latent, clean_latent=new_clean, denoise_mask=new_mask)
 
 
 class TemporalRegionMask:
