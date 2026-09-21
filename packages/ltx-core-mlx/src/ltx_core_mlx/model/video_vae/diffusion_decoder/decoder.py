@@ -88,6 +88,10 @@ class NADiffusionDecoder(nn.Module):
         self.temporal_scale = st
         self.spatial_scale = (sh * c.patch_size, sw * c.patch_size)
 
+    def weights_dtype(self) -> mx.Dtype:
+        """dtype the decoder runs in (its parameters'); inputs are cast to it on entry."""
+        return self.conv_in.weight.dtype
+
     # ---- geometry -----------------------------------------------------------------
     def denormalize_latent(self, z: mx.array) -> mx.array:
         s, m = self.per_channel_statistics.std, self.per_channel_statistics.mean
@@ -245,6 +249,10 @@ class NADiffusionDecoder(nn.Module):
         """
         if latent.shape[0] != 1:
             raise ValueError("NADiffusionDecoder decodes one video at a time (batch size 1)")
+        # Run in the weights' dtype whatever the caller hands over (an fp32 latent would
+        # otherwise promote every activation and double the peak), restore it on the output.
+        output_dtype = latent.dtype
+        latent = latent.astype(self.weights_dtype())
         _, _, f, h, w = latent.shape
         # T pads live at the end (repeat-last-frame) and are removed by the [:f_px] crop below.
         padded, (_t_pad, h_b, _h_a, w_b, _w_a) = self.pad_to_floor(latent)
@@ -259,7 +267,7 @@ class NADiffusionDecoder(nn.Module):
         sh, sw = self.spatial_scale
         f_px, h_px, w_px = (f - 1) * self.temporal_scale + 1, h * sh, w * sw
         hb, wb = h_b * sh, w_b * sw
-        return pixels[:, :, :f_px, hb : hb + h_px, wb : wb + w_px]
+        return pixels[:, :, :f_px, hb : hb + h_px, wb : wb + w_px].astype(output_dtype)
 
     def tiled_decode(
         self,
@@ -278,6 +286,8 @@ class NADiffusionDecoder(nn.Module):
         """
         if latent.shape[0] != 1:
             raise ValueError("NADiffusionDecoder decodes one video at a time (batch size 1)")
+        output_dtype = latent.dtype
+        latent = latent.astype(self.weights_dtype())  # see decode()
         _, _, f, h, w = latent.shape
         padded, (_t_pad, h_b, _h_a, w_b, _w_a) = self.pad_to_floor(latent)
         geometry = DiffusionTileGeometry.from_config(self.config)
@@ -299,7 +309,7 @@ class NADiffusionDecoder(nn.Module):
         feat_s4 = self.forward_stages_1_to_3(padded)
         mx.eval(feat_s4)
         if len(tiles) == 1:
-            chunk = crop(self.decode_tile(feat_s4, tiles[0], seed=seed).astype(latent.dtype), 0)
+            chunk = crop(self.decode_tile(feat_s4, tiles[0], seed=seed).astype(output_dtype), 0)
             if chunk is None:
                 raise RuntimeError("diffusion decoder: one-tile decode produced no content frames")
             yield chunk
@@ -329,10 +339,10 @@ class NADiffusionDecoder(nn.Module):
                 buffer[:, :, :n] = (buffer[:, :, :n] + stub).astype(acc_dtype)
             if gi < len(groups) - 1:
                 exclusive = min(max(0, starts[gi + 1] - g_start), g_stop - g_start)
-                chunk = crop(buffer[:, :, :exclusive].astype(latent.dtype), g_start)
+                chunk = crop(buffer[:, :, :exclusive].astype(output_dtype), g_start)
                 stub = buffer[:, :, exclusive:]
             else:
-                chunk = crop(buffer.astype(latent.dtype), g_start)
+                chunk = crop(buffer.astype(output_dtype), g_start)
             mx.eval(chunk if chunk is not None else buffer, *([stub] if stub is not None else []))
             del buffer
             if chunk is not None:

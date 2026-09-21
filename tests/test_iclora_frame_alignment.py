@@ -65,6 +65,7 @@ def _invoke(num_frames: int, scale: int = 2) -> None:
         num_frames=num_frames,
         video_encoder=_FakeEncoder(),
         reference_downscale_factor=scale,
+        frame_rate=24.0,
     )
 
 
@@ -107,6 +108,7 @@ class TestFrameAlignment:
             num_frames=121,
             video_encoder=_FakeEncoder(),
             reference_downscale_factor=2,
+            frame_rate=24.0,
         )
         # 72 → k=8 → 65; 49 → k=6 → 49
         assert captured_load == [65, 49]
@@ -117,3 +119,27 @@ class TestFrameAlignment:
         monkeypatch.setattr(iclora_utils, "probe_video_info", lambda _p: _FakeVideoInfo(num_frames=1))
         _invoke(num_frames=121)
         assert captured_load == [9]
+
+
+def test_reference_positions_follow_the_target_frame_rate(captured_load, monkeypatch):
+    """Upstream divides the reference's temporal positions by the target fps; 24 must not be assumed."""
+    from ltx_core_mlx.utils.positions import compute_video_positions
+
+    monkeypatch.setattr(iclora_utils, "probe_video_info", lambda _p: _FakeVideoInfo(num_frames=49))
+    for fps in (24.0, 30.0):
+        conds: list = []
+        iclora_utils.append_ic_lora_reference_video_conditionings(
+            conditionings=conds,
+            video_conditioning=[("/fake/path.mp4", 1.0)],
+            height=704,
+            width=1280,
+            num_frames=49,
+            video_encoder=_FakeEncoder(),
+            reference_downscale_factor=2,
+            frame_rate=fps,
+        )
+        cond = conds[0]
+        ref_f, ref_h, ref_w = 7, 1, 1  # the fake encoder returns (1, 128, 7, 1, 1) for a 49-frame reference
+        expected = compute_video_positions(ref_f, ref_h, ref_w, frame_rate=fps)
+        assert cond.reference_positions.shape == expected.shape
+        assert mx.array_equal(cond.reference_positions, expected), fps

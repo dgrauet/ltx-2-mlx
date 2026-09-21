@@ -396,7 +396,8 @@ class _DiffusionVideoDecoder:
             geometry = DiffusionTileGeometry.from_config(self._decoder.config)
             summary = describe_tiling(geometry, fhw, tiling) if tiling is not None else "tiles=1 (untiled)"
             print(
-                f"[diffvae tiling] {summary} budget={diffusion_decode_budget_bytes() / 2**30:.1f} GB",
+                f"[diffvae tiling] {summary} budget={diffusion_decode_budget_bytes() / 2**30:.1f} GB "
+                f"resident={mx.get_active_memory() / 2**30:.2f} GB before decode latent={video_latent.dtype}",
                 file=sys.stderr,
                 flush=True,
             )

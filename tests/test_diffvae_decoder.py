@@ -213,3 +213,17 @@ def test_tiled_decode_crops_padding_and_content():
     z = mx.random.normal((1, 8, 4, 2, 3))  # H below floor -> padded to 3 then cropped back; 25 frames
     video = mx.concatenate(list(dec.tiled_decode(z, TINY_CFG, seed=1)), axis=2)
     assert video.shape == (1, 3, 25, 64, 96)
+
+
+def test_decoder_runs_in_its_weights_dtype_and_restores_the_callers():
+    """An fp32 latent must not promote the decode to fp32 (2x peak memory): cast on entry, restore on exit."""
+    dec = NADiffusionDecoder(TINY)
+    dec.set_dtype(mx.bfloat16)
+    assert dec.weights_dtype() == mx.bfloat16
+    z = mx.random.normal((1, 8, 2, 2, 3)).astype(mx.bfloat16)
+    ref = dec.decode(z, seed=3)
+    out = dec.decode(z.astype(mx.float32), seed=3)
+    assert ref.dtype == mx.bfloat16 and out.dtype == mx.float32
+    assert mx.array_equal(ref.astype(mx.float32), out)
+    chunks = list(dec.tiled_decode(z.astype(mx.float32), None, seed=3))
+    assert chunks[0].dtype == mx.float32 and mx.array_equal(chunks[0], out)

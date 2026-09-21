@@ -1134,7 +1134,10 @@ and the keyframe-aware decode (the stage-2 slot latents are captured in
 (tree crowns, haze texture) than the plain distilled render at the same seed. `--dfr --image`
 (I2V, frame-0 anchor) at the same shape: 283.8 s, first frame matches the source image. `--dfr -f
 137`: canvas pads to 145 frames / 6 slots, 782.6 s, output trimmed back to 137 frames. `--dfr` at
-768×1152×25 with `--video-decoder diffusion`: 464.5 s, decoded untiled, peak Metal 22.2 GB.
+768×1152×25 with `--video-decoder diffusion`: 464.5 s, decoded untiled, peak Metal 22.2 GB when first
+measured — that was the decode promoted to fp32 by the fp32 stage-2 latent the sampler produces on
+conditioned states (per-token sigma path); the diffusion decoder now casts its input to its weights'
+dtype on entry (like the conv decoder) and the same decode peaks at ~12 GB (5.8 GB at 512×768×25).
 
 **Key files:** `dfr_layout.py` (canvas), `dfr.py` (`DFRPipeline`), `distilled.py` (`_stage1` /
 `_upsample_latent` / `_stage2`), `iclora_utils.py` (`reference_conditioning_from_latent`),
@@ -1208,7 +1211,10 @@ that fits is chosen. `--diffvae-tile FRAMES HEIGHT WIDTH` overrides it (0 = axis
 (default 1,204,224) still applies. Overlaps make tiled decodes cost several times the untiled
 token count (the `[diffvae tiling]` stderr line prints the redundancy factor); a bigger budget
 means fewer, larger tiles. Tiled and untiled renders of the same seed differ in fine texture
-(different noise), as upstream. Decoder noise seed = `seed + 30000`; not
+(different noise), as upstream. The decoder runs in its weights' dtype (bf16 packs) whatever dtype the
+caller's latent has and restores that dtype on the output, mirroring the conv decoder: an fp32 latent
+(every conditioned render's sampler state ends fp32) would otherwise promote every activation and
+double the peak. Decoder noise seed = `seed + 30000`; not
 bit-comparable with torch's generator. Parity: per-stage torch goldens
 (`tests/parity_diffvae_reference.py`, disposable env) at 1e-4 (det stages) / 1e-3 (diffusion).
 Conv stays the default. Key files: `model/video_vae/diffusion_decoder/`, `utils/blocks.py::_DiffusionVideoDecoder`.
