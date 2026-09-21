@@ -21,7 +21,8 @@ For dev model + CFG quality, see :class:`TI2VidTwoStagesPipeline` /
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 import mlx.core as mx
 
@@ -65,6 +66,35 @@ ANCESTRAL_S_NOISE = 1.0
 # pull mx.random.normal at the same shape/dtype from a freshly seeded
 # generator, so reusing the raw seed would correlate the two draws.
 ANCESTRAL_NOISE_SEED_OFFSET = 10000
+
+
+@dataclass
+class Stage1Result:
+    """What stage 1 hands to stage 2 (see :meth:`DistilledPipeline._stage1`).
+
+    Attributes:
+        video_tokens: Generated video tokens at half resolution, `(1, F*H_half*W_half, 128)`,
+            with any appended slot/conditioning tokens already stripped.
+        audio_tokens: Generated audio tokens at half resolution.
+        generated_keyframes: Extracted generated-keyframe slot content,
+            `(1, 128, K, H_half, W_half)`, or ``None`` when no slots were requested.
+        latent_dims: Stage 1 latent dimensions `(F, H_half, W_half)`.
+        resolved_images: Resolved multi-anchor I2V conditioning inputs.
+        video_embeds: Video text embeddings from prompt encoding.
+        audio_embeds: Audio text embeddings from prompt encoding.
+        relay_mask: Prompt Relay cross-attention mask builder.
+        x0_model: The stage 1 X0 model, reused for stage 2 when tiling is off.
+    """
+
+    video_tokens: mx.array
+    audio_tokens: mx.array
+    generated_keyframes: mx.array | None
+    latent_dims: tuple[int, int, int]
+    resolved_images: list
+    video_embeds: mx.array
+    audio_embeds: mx.array
+    relay_mask: Callable
+    x0_model: X0Model
 
 
 class DistilledPipeline(TI2VidTwoStagesPipeline):
@@ -245,6 +275,70 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         Raises:
             ValueError: when ``enable_teacache`` is requested on an LTX-2.5 pack.
         """
+        stage1, num_frames, height, width = self._stage1(
+            prompt,
+            height,
+            width,
+            num_frames,
+            frame_rate=frame_rate,
+            seed=seed,
+            stage1_steps=stage1_steps,
+            image=image,
+            images=images,
+            prompt_relay=prompt_relay,
+            generated_keyframes=generated_keyframes,
+            enable_teacache=enable_teacache,
+        )
+        video_half = self.video_patchifier.unpatchify(stage1.video_tokens, stage1.latent_dims)
+        video_upscaled = self._upsample_latent(video_half)
+        return self._stage2(
+            stage1,
+            video_upscaled,
+            num_frames=num_frames,
+            frame_rate=frame_rate,
+            seed=seed,
+            stage2_steps=stage2_steps,
+            extra_conditionings=[],
+        )
+
+    def _stage1(
+        self,
+        prompt: str,
+        height: int,
+        width: int,
+        num_frames: int | AutoDuration,
+        *,
+        frame_rate: float,
+        seed: int,
+        stage1_steps: int | None,
+        image: str | None,
+        images,
+        prompt_relay,
+        generated_keyframes: int | Sequence[int],
+        enable_teacache: bool,
+    ) -> tuple[Stage1Result, int, int, int]:
+        """Encode the prompt and denoise stage 1 at half resolution.
+
+        Args:
+            prompt: Text prompt.
+            height: Requested video height (before dimension snapping).
+            width: Requested video width (before dimension snapping).
+            num_frames: Number of frames, or an :class:`AutoDuration` request.
+            frame_rate: Video frame rate.
+            seed: Random seed.
+            stage1_steps: Stage 1 steps (default: full stage-1 sigma table).
+            image: Optional reference image for I2V conditioning.
+            images: Optional multi-anchor I2V conditioning inputs.
+            prompt_relay: Optional Prompt Relay segment specs.
+            generated_keyframes: ``0`` (off), an ``int``, or explicit pixel-frame indices.
+            enable_teacache: Whether TeaCache was requested (rejected on 2.5 packs).
+
+        Returns:
+            Tuple of (stage1 result, resolved num_frames, resolved height, resolved width).
+
+        Raises:
+            ValueError: when ``enable_teacache`` is requested on an LTX-2.5 pack.
+        """
         self._require_num_frames_source(num_frames)
         self._require_generated_keyframes_support(generated_keyframes)
         if enable_teacache and self._is_25:
@@ -374,7 +468,33 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             output_1.video_latent, video_state.generated_keyframe_layout, self.video_patchifier, (H_half, W_half)
         )
         gen_tokens_1 = output_1.video_latent[:, : F * H_half * W_half, :]
-        video_half = self.video_patchifier.unpatchify(gen_tokens_1, (F, H_half, W_half))
+
+        return (
+            Stage1Result(
+                video_tokens=gen_tokens_1,
+                audio_tokens=output_1.audio_latent,
+                generated_keyframes=self.generated_keyframes,
+                latent_dims=(F, H_half, W_half),
+                resolved_images=resolved_images,
+                video_embeds=video_embeds,
+                audio_embeds=audio_embeds,
+                relay_mask=relay_mask,
+                x0_model=x0_model,
+            ),
+            num_frames,
+            height,
+            width,
+        )
+
+    def _upsample_latent(self, video_half: mx.array) -> mx.array:
+        """Denormalize, spatially upsample 2x, and renormalize a stage-1 latent.
+
+        Args:
+            video_half: Stage 1 video latent, `(1, 128, F, H_half, W_half)`.
+
+        Returns:
+            Upscaled video latent, `(1, 128, F, 2*H_half, 2*W_half)`, materialized.
+        """
         video_mlx = video_half.transpose(0, 2, 3, 4, 1)
         video_denorm = self.vae_encoder.denormalize_latent(video_mlx)
         video_denorm = video_denorm.transpose(0, 4, 1, 2, 3)
@@ -383,6 +503,40 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         video_upscaled = self.vae_encoder.normalize_latent(video_up_mlx)
         video_upscaled = video_upscaled.transpose(0, 4, 1, 2, 3)
         _materialize(video_upscaled)
+        return video_upscaled
+
+    def _stage2(
+        self,
+        stage1: Stage1Result,
+        video_upscaled: mx.array,
+        *,
+        num_frames: int,
+        frame_rate: float,
+        seed: int,
+        stage2_steps: int | None,
+        extra_conditionings: list,
+    ) -> tuple[mx.array, mx.array]:
+        """Denoise stage 2 at full resolution and unpatchify the result.
+
+        Args:
+            stage1: Result of :meth:`_stage1`.
+            video_upscaled: Upscaled video latent from :meth:`_upsample_latent`.
+            num_frames: Resolved number of frames.
+            frame_rate: Video frame rate.
+            seed: Random seed.
+            stage2_steps: Stage 2 steps (default: full stage-2 sigma table).
+            extra_conditionings: Additional conditioning items appended after the
+                re-encoded I2V anchors (e.g. generated-keyframe slots in later tasks).
+
+        Returns:
+            Tuple of (video_latent, audio_latent) at full resolution.
+        """
+        F, H_half, W_half = stage1.latent_dims
+        resolved_images = stage1.resolved_images
+        video_embeds = stage1.video_embeds
+        audio_embeds = stage1.audio_embeds
+        relay_mask = stage1.relay_mask
+        x0_model = stage1.x0_model
 
         H_full = H_half * 2
         W_full = W_half * 2
@@ -390,6 +544,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         # I2V conditioning at full resolution (re-encode at upscaled dims)
         conditionings_2: list = []
         if resolved_images:
+            from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
+
             enc_h_full = H_full * 32
             enc_w_full = W_full * 32
             conditionings_2 = combined_image_conditionings(
@@ -416,10 +572,12 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         start_sigma = sigmas_2[0]
 
         video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
+        audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
+        audio_positions = compute_audio_positions(audio_T)
 
         video_state_2 = create_noised_state(
             base_shape=video_tokens.shape,
-            conditionings=conditionings_2,
+            conditionings=[*conditionings_2, *extra_conditionings],
             spatial_dims=(F, H_full, W_full),
             positions=video_positions_2,
             seed=seed + 2,
@@ -428,7 +586,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             legacy_scalar_blend=True,
         )
 
-        audio_tokens_1 = output_1.audio_latent
+        audio_tokens_1 = stage1.audio_tokens
         audio_state_2 = create_noised_state(
             base_shape=audio_tokens_1.shape,
             conditionings=[],

@@ -356,3 +356,19 @@ def test_auto_duration_raises_early_on_23(tmp_path, monkeypatch):
 
     assert euler.calls == []
     assert ancestral.calls == []
+
+
+def test_generate_two_stage_is_composed_of_stage1_upsample_stage2(tmp_path, monkeypatch):
+    """The split must keep the exact collaborator call order and shapes of the monolithic version."""
+    pipe, euler, ancestral, noised_calls = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
+    video, audio = _run(pipe)
+    assert len(ancestral.calls) == 1 and len(euler.calls) == 1
+    # 128x128 -> half 64x64 -> latent (2, 2, 2) at 9 frames; stage 2 at (2, 4, 4)
+    assert video.shape == (1, 128, 2, 4, 4)
+    assert [c["sigma"] for c in noised_calls] == [
+        1.0,
+        1.0,
+        LTX_2_5_STAGE_2_DISTILLED_SIGMAS[0],
+        LTX_2_5_STAGE_2_DISTILLED_SIGMAS[0],
+    ]
+    assert [c["seed"] for c in noised_calls] == [7, 8, 9, 9]
