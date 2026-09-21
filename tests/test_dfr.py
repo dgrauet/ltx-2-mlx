@@ -12,6 +12,7 @@ import ltx_pipelines_mlx.dfr as dfr_mod
 import ltx_pipelines_mlx.distilled as distilled_mod
 from ltx_core_mlx.conditioning.types.keyframe_slots import VideoGeneratedKeyframeSlots
 from ltx_core_mlx.conditioning.types.reference_video_cond import VideoConditionByReferenceLatent
+from ltx_pipelines_mlx.cli import _build_parser, _cmd_generate
 from ltx_pipelines_mlx.dfr import DEFAULT_DETAILING_LORA, DETAILING_LORA_STRENGTH, DFRPipeline
 from ltx_pipelines_mlx.scheduler import LTX_2_5_STAGE_2_DISTILLED_SIGMAS
 from tests.test_ltx25_distilled import _fake_upsampler, _FakeVaeEncoder, _LoopSpy
@@ -21,6 +22,7 @@ def _write_25_pack(tmp_path):
     cfg = {"transformer": {"num_layers": 48, "ff_bias": False, "use_keyframes_abs_pos_embedding": True}}
     (tmp_path / "embedded_config.json").write_text(json.dumps(cfg))
     (tmp_path / "detail.safetensors").write_bytes(b"")
+    (tmp_path / "vae_decoder_av.safetensors").write_bytes(b"")
     return tmp_path
 
 
@@ -212,3 +214,71 @@ def test_attach_detailing_lora_streaming_appends_a_block_source(tmp_path, monkey
     pipe._attach_detailing_lora()
     assert made[0][0] == str(tmp_path / "detail.safetensors") and made[0][1]["strength"] == 0.5
     assert object.__getattribute__(pipe.dit, "_lora_sources") == [("src", str(tmp_path / "detail.safetensors"))]
+
+
+def _argv(tmp_path, *extra):
+    return [
+        "generate",
+        "-p",
+        "x",
+        "-o",
+        "o.mp4",
+        "--frame-rate",
+        "24",
+        "-f",
+        "49",
+        "--model",
+        str(_write_25_pack(tmp_path)),
+        *extra,
+    ]
+
+
+def test_cli_dfr_flag_parses_with_defaults(tmp_path):
+    args = _build_parser().parse_args(_argv(tmp_path, "--dfr"))
+    assert args.dfr is True and args.detailing_lora == DEFAULT_DETAILING_LORA
+    args = _build_parser().parse_args(_argv(tmp_path, "--dfr", "--detailing-lora", "/x/y.safetensors"))
+    assert args.detailing_lora == "/x/y.safetensors"
+
+
+def test_cli_dfr_reaches_the_pipeline(monkeypatch, tmp_path):
+    seen = {}
+
+    class _FakePipe:
+        def __init__(self, *a, **k):
+            seen["init"] = k
+
+        def generate_and_save(self, **kwargs):
+            seen["kwargs"] = kwargs
+            seen["video_decoder"] = getattr(self, "video_decoder", None)
+
+    monkeypatch.setattr(dfr_mod, "DFRPipeline", _FakePipe)
+    _cmd_generate(
+        _build_parser().parse_args(
+            _argv(
+                tmp_path, "--dfr", "--detailing-lora", "/x/y.safetensors", "--low-ram", "--video-decoder", "diffusion"
+            )
+        )
+    )
+    assert seen["init"]["detailing_lora"] == "/x/y.safetensors" and seen["init"]["low_ram_streaming"] is True
+    assert seen["kwargs"]["num_frames"] == 49 and "generated_keyframes" not in seen["kwargs"]
+    assert seen["video_decoder"] == "diffusion"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ["--num-generated-keyframes", "2"],
+        ["--enable-teacache"],
+        ["--cfg-scale", "3"],
+        ["--stg-scale", "1"],
+        ["--distilled"],
+    ],
+)
+def test_cli_dfr_rejects_incompatible_flags(tmp_path, bad):
+    with pytest.raises(SystemExit):
+        _cmd_generate(_build_parser().parse_args(_argv(tmp_path, "--dfr", *bad)))
+
+
+def test_cli_detailing_lora_requires_dfr(tmp_path):
+    with pytest.raises(SystemExit):
+        _cmd_generate(_build_parser().parse_args(_argv(tmp_path, "--distilled", "--detailing-lora", "/x.safetensors")))

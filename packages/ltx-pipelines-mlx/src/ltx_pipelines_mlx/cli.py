@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ltx_pipelines_mlx.dfr import DEFAULT_DETAILING_LORA
 from ltx_pipelines_mlx.utils.blocks import VIDEO_DECODER_CHOICES
 from ltx_pipelines_mlx.utils.stepwise import DEFAULT_PREVIEW_FRAMES
 
@@ -519,7 +520,7 @@ examples:
         default=1.0,
         help="Prompt Relay penalty multiplier (higher = stricter segment isolation). Default: 1.0.",
     )
-    gen.add_argument("--steps", type=int, default=None, help="Denoising steps for one-stage (default: 8)")
+    gen.add_argument("--steps", type=int, default=None, help="Denoising steps for one-stage (default: 30)")
     gen.add_argument(
         "--two-stage",
         action="store_true",
@@ -541,6 +542,22 @@ examples:
         action="store_true",
         dest="one_stage",
         help="Dev model + CFG one-stage at full target resolution (no upsampler, no stage 2). Mirrors upstream TI2VidOneStagePipeline. Higher quality than --distilled at small resolutions; slower than --two-stage at large.",
+    )
+    gen.add_argument(
+        "--dfr",
+        action="store_true",
+        help=(
+            "[experimental] DFR (Diffusion Fidelity Rendering) base path, LTX 2.5 packs only: distilled "
+            "half-res stage with keyframe slots on a segment-aligned canvas, then a full-res detailing "
+            "stage with the official detailing IC-LoRA guided by the stage-1 latent. Mirrors upstream "
+            "DFRPipeline (spatial_upscalings=1, temporal_upscalings=0)."
+        ),
+    )
+    gen.add_argument(
+        "--detailing-lora",
+        default=DEFAULT_DETAILING_LORA,
+        metavar="PATH_OR_REPO",
+        help="Detailing IC-LoRA for --dfr (local .safetensors or HF repo id). Default: the official LTX-2.5 detailing LoRA.",
     )
     gen.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30 standard, 15 HQ)")
     gen.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 steps (default: 3)")
@@ -1043,8 +1060,17 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             "TeaCache (only 8 denoising steps)."
         )
 
-    if sum(map(bool, (args.two_stages_hq, args.two_stage, args.distilled, args.one_stage))) > 1:
-        raise SystemExit("Choose at most one of --two-stage, --two-stages-hq, --distilled, --one-stage.")
+    if sum(map(bool, (args.two_stages_hq, args.two_stage, args.distilled, args.one_stage, args.dfr))) > 1:
+        raise SystemExit("Choose at most one of --two-stage, --two-stages-hq, --distilled, --one-stage, --dfr.")
+    if args.dfr:
+        if args.num_generated_keyframes:
+            raise SystemExit("--dfr places its keyframe slots from the canvas; drop --num-generated-keyframes.")
+        if args.enable_teacache:
+            raise SystemExit("--dfr runs the distilled flow; TeaCache does not apply.")
+        if args.cfg_scale is not None or args.stg_scale is not None:
+            raise SystemExit("--dfr runs the distilled flow (no CFG / STG); drop --cfg-scale / --stg-scale.")
+    elif args.detailing_lora != DEFAULT_DETAILING_LORA:
+        raise SystemExit("--detailing-lora only applies with --dfr.")
 
     if args.one_stage:
         from ltx_pipelines_mlx.ti2vid_one_stage import TI2VidOneStagePipeline
@@ -1088,6 +1114,47 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["cfg_scale"] = args.cfg_scale
         if args.stg_scale is not None:
             kwargs["stg_scale"] = args.stg_scale
+        if relay is not None:
+            kwargs["prompt_relay"] = relay
+        pipe.generate_and_save(**kwargs)
+
+    elif args.dfr:
+        from ltx_pipelines_mlx.dfr import DFRPipeline
+
+        if not args.quiet:
+            print("Mode: DFR (half-res + keyframe slots -> detailing IC-LoRA at full res)")
+            print(f"  Model: {args.model}")
+            print(f"  Detailing LoRA: {args.detailing_lora}")
+
+        pipe = DFRPipeline(
+            model_dir=args.model,
+            gemma_model_id=args.gemma,
+            low_memory=True,
+            low_ram_streaming=getattr(args, "low_ram", False),
+            tile_count=_build_tile_count_config(args),
+            detailing_lora=args.detailing_lora,
+        )
+        pipe.verbose = not args.quiet
+        pipe.stepwise = _build_stepwise(args)
+        pipe.generate_audio = not args.no_audio
+        pipe.video_decoder = args.video_decoder
+        pipe.diffvae_tile = tuple(args.diffvae_tile) if args.diffvae_tile else None
+        if lora_paths:
+            pipe._pending_loras = lora_paths
+        kwargs: dict = dict(
+            prompt=prompt,
+            output_path=args.output,
+            height=args.height,
+            width=args.width,
+            num_frames=_resolve_num_frames_arg(args),
+            frame_rate=args.frame_rate,
+            seed=args.seed,
+            images=args.images,
+        )
+        if args.stage1_steps is not None:
+            kwargs["stage1_steps"] = args.stage1_steps
+        if args.stage2_steps is not None:
+            kwargs["stage2_steps"] = args.stage2_steps
         if relay is not None:
             kwargs["prompt_relay"] = relay
         pipe.generate_and_save(**kwargs)

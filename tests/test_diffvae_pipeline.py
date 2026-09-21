@@ -122,7 +122,7 @@ def _fake_pack(tmp_path):
     return str(tmp_path)
 
 
-@pytest.mark.parametrize("mode", ["--distilled", "--one-stage", "--two-stage", "--two-stages-hq"])
+@pytest.mark.parametrize("mode", ["--distilled", "--one-stage", "--two-stage", "--two-stages-hq", "--dfr"])
 def test_cli_flag_reaches_every_generate_mode(monkeypatch, tmp_path, mode):
     seen = {}
 
@@ -134,6 +134,7 @@ def test_cli_flag_reaches_every_generate_mode(monkeypatch, tmp_path, mode):
             seen["video_decoder"] = getattr(self, "video_decoder", "UNSET")
             seen["diffvae_tile"] = getattr(self, "diffvae_tile", "UNSET")
 
+    import ltx_pipelines_mlx.dfr as dfr
     import ltx_pipelines_mlx.distilled as d
     import ltx_pipelines_mlx.ti2vid_one_stage as o
     import ltx_pipelines_mlx.ti2vid_two_stages as t
@@ -143,6 +144,7 @@ def test_cli_flag_reaches_every_generate_mode(monkeypatch, tmp_path, mode):
     monkeypatch.setattr(o, "TI2VidOneStagePipeline", _FakePipe)
     monkeypatch.setattr(t, "TI2VidTwoStagesPipeline", _FakePipe)
     monkeypatch.setattr(hq, "TI2VidTwoStagesHQPipeline", _FakePipe)
+    monkeypatch.setattr(dfr, "DFRPipeline", _FakePipe)
     from ltx_pipelines_mlx.cli import _build_parser, _cmd_generate
 
     args = _build_parser().parse_args(
