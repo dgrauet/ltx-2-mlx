@@ -10,6 +10,18 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.9](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.8...v0.15.9) (2026-09-21)
+
+
+### Features
+
+* **pipelines:** dfr base path (generate --dfr) on ltx-2.5 packs ([#150](https://github.com/dgrauet/ltx-2-mlx/issues/150)) ([f848f77](https://github.com/dgrauet/ltx-2-mlx/commit/f848f77a8f6ceff8193c731a7bdafa91b9bdf2dd))
+
+
+### Documentation
+
+* pipelines guide with decision tree, per-pipeline cards and a flag matrix ([#148](https://github.com/dgrauet/ltx-2-mlx/issues/148)) ([4abe012](https://github.com/dgrauet/ltx-2-mlx/commit/4abe0129376117c11cc9f4560f2a2b65baf013da))
+
 ## [0.15.8](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.7...v0.15.8) (2026-09-20)
 
 
