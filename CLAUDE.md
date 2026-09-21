@@ -1037,6 +1037,19 @@ byte-identical. ``video_keyframes_mask`` kwarg on ``LTXModel.__call__``
 (``None`` = exact no-op) is threaded from the state by all four sampler loops,
 the TeaCache gate probe, ``Modality`` and the tiling wrapper.
 
+**I2V frame-0 anchor was dropping the marker (fixed, DFR sub-project 4).**
+``VideoConditionByLatentIndex.apply`` (the ``--image PATH 0 STRENGTH`` anchor)
+rebuilt the latent state without carrying ``keyframes_mask`` /
+``generated_keyframe_layout`` / ``generated_keyframes`` through, so the
+first-frame keyframe marker above was silently dropped on every 2.5 I2V
+render. It now carries the whole state through (``dataclasses.replace``, as
+upstream's ``clone()`` + in-place write). 2.5 I2V outputs change (frame 0 now
+gets the learned embedding, matching upstream); 2.3 packs are byte-identical.
+``VideoConditionByReferenceLatent.apply`` and
+``VideoConditionByKeyframeIndex.apply`` had the same hole for the
+generated-keyframe-slot layout specifically — only visible on the DFR path,
+where a reference conditioning follows the slots — and are fixed the same way.
+
 Key files: ``conditioning/types/keyframe_slots.py`` (item + extraction),
 ``conditioning/mask_utils.py`` (``first_frame_keyframes_mask`` /
 ``extend_keyframes_mask``), ``model/transformer/model.py``
@@ -1066,6 +1079,62 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
   --frame-rate 24 -o out.mp4
 ```
 
+### DFR base path (`generate --dfr`, 2.5 packs, experimental)
+
+Port of upstream `DFRPipeline` (spatial_upscalings=1, temporal_upscalings=0 — the base path
+only; temporal rounds and the spatial epilogue are follow-ups). Runs on top of `DistilledPipeline`'s
+`_stage1` / `_upsample_latent` / `_stage2` split.
+
+**Canvas layout** (`dfr_layout.py`). The requested clip is padded to a whole number of keyframe
+segments before stage 1 runs: candidate segment lengths are 24 and 32 pixel frames
+(`SEGMENT_CANDIDATES`), and `choose_segment_length` picks whichever needs the least padding,
+the larger candidate on a tie. One generated keyframe slot is placed at every segment boundary
+(`[segment, 2*segment, ...]`) up to the padded length. The output is trimmed back to the requested
+duration after stage 2 — the padding never reaches the saved file, only its keyframe slots do
+(e.g. a 137-frame request pads to a 145-frame / 6-slot canvas and still writes 137 frames).
+
+**Two stages.**
+- **Stage 1** (`_stage1`, half resolution, distilled/ancestral on 2.5): runs on the padded canvas
+  with the keyframe slots injected via the same `--num-generated-keyframes` mechanism
+  ([Generated keyframe slots](#generated-keyframe-slots---num-generated-keyframes-n-25-packs)),
+  driven internally rather than by the CLI flag (`--num-generated-keyframes` is refused on
+  `--dfr`). Optional I2V anchors (`--image`) apply as usual.
+- **Stage 2** (`_stage2`, full resolution, deterministic): the stage-1 video latent and its
+  extracted keyframe-slot latents are each upsampled once (2× spatial, matching upstream's
+  single-call-per-tensor shape), then denoised with two extra conditionings appended:
+  `VideoGeneratedKeyframeSlots` (the upsampled slots, at the same canvas pixel-frame positions)
+  and an IC-LoRA reference built from the pre-upsample stage-1 latent
+  (`iclora_utils.reference_conditioning_from_latent`, strength 1.0, downscale factor read from
+  the detailing LoRA's own metadata).
+
+**Detailing LoRA attach.** `_attach_detailing_lora` resolves (downloads on first use) and attaches
+`Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler` at a fixed strength of 0.5
+(`DETAILING_LORA_STRENGTH`, not a user knob) to the resident distilled transformer right before
+stage 2, mirroring `ICLoraPipeline._fuse_loras`: under `--low-ram` it appends a `BlockLoraSource`
+(fused per block bind); otherwise it fuses in place and re-quantizes, since stage 1 is finished
+and the transformer is never reused clean afterward.
+
+**Audio.** Only stage 1 produces audio; DFR ships that audio as-is (unpatchified and trimmed to
+the requested duration in audio tokens), matching upstream — there is no stage-2 audio refine.
+
+**Not ported yet:** temporal rounds (`TemporalTilePlan`, sub-project 4c), the spatial epilogue,
+and the keyframe-aware decode (the stage-2 slot latents are captured in
+`BasePipeline.generated_keyframes` for a future decode path but not decoded here).
+
+**Validated** (Task 6 e2e, M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5):
+`--distilled` at 512×768×49 is byte-identical (sha256) to `main` at 194 s, confirming the
+`_stage1`/`_stage2` split is additive. `--dfr` at 512×768×49: 276.9 s total (stage 1: 8 steps at
+10.7 s/forward over 864 video tokens; stage 2: 3 steps at 53.5 s/forward over 4128 tokens — target
++ 2 slots + the half-res reference), peak Metal 14.0 GB, max RSS 10.8 GB; frame 24 visibly sharper
+(tree crowns, haze texture) than the plain distilled render at the same seed. `--dfr --image`
+(I2V, frame-0 anchor) at the same shape: 283.8 s, first frame matches the source image. `--dfr -f
+137`: canvas pads to 145 frames / 6 slots, 782.6 s, output trimmed back to 137 frames. `--dfr` at
+768×1152×25 with `--video-decoder diffusion`: 464.5 s, decoded untiled, peak Metal 22.2 GB.
+
+**Key files:** `dfr_layout.py` (canvas), `dfr.py` (`DFRPipeline`), `distilled.py` (`_stage1` /
+`_upsample_latent` / `_stage2`), `iclora_utils.py` (`reference_conditioning_from_latent`),
+`tests/test_dfr*.py`.
+
 ### v1 limits (2.5 packs)
 
 | Feature | Status |
@@ -1081,7 +1150,7 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
 | `--enable-teacache` | raises `ValueError` — 2.3 polynomial isn't calibrated for 2.5 |
 | Modality tiling, Prompt Relay | validated on 2.3 only |
 | Generated keyframe slots (`--num-generated-keyframes N`) | supported on `generate` (all four modes, stage 1 only); refused up front on 2.3 packs (no `use_keyframes_abs_pos_embedding`) |
-| DFR (`DFRPipeline`) | not yet ported — needs the diffusion decoder (now shipped, see below) + `Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler` |
+| DFR (`DFRPipeline`) | base path shipped as `generate --dfr` (spatial detailing with the official 2.5 detailing IC-LoRA); temporal rounds / spatial epilogue / keyframe-aware decode pending |
 | Diffusion video decoder | opt-in `--video-decoder diffusion` (experimental; tiled automatically above the decode budget, `--diffvae-tile` override); conv remains default |
 
 The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once

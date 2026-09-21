@@ -48,6 +48,7 @@ backwards compatibility is best-effort, not guaranteed, on this tier.
 |---|---|---|
 | `LipDubPipeline` | `lipdub` | Lip-dub uses `Lightricks/LTX-2.3-22b-IC-LoRA-LipDub` (currently v0.9). Audio output is **VAE+vocoder reconstruction** of the reference audio — perceptually similar but not bit-identical (spectral artifacts visible on rich musical content). Lip-sync quality depends on prompt-audio alignment. Workaround for music: remux original audio over the output mp4 via ffmpeg (loses fine lip-sync but preserves source music). |
 | Diffusion video decoder | `generate --video-decoder diffusion` (LTX 2.5 packs only) | Opt-in alternative to the default conv VAE decoder; sharper output, several times slower. Tiled automatically above the decode budget (upstream schedule, 40-frame / 160-px overlaps); validated up to 768×1152×49 tiled and 512×768×97 untiled on an M2 Pro 32 GB (see CLAUDE.md for timings). Still Experimental until a downstream consumer validates it. Reproduces upstream's default `chunked_eager` mode, including its edge-replicated borders. |
+| `DFRPipeline` | `generate --dfr` (LTX 2.5 packs only) | DFR base path only (spatial ×2 detailing with the official detailing IC-LoRA); temporal rounds, spatial epilogue and keyframe-aware decode not ported. Validated e2e at 512×768×49 T2V/I2V and 137 frames (canvas padding). |
 
 ## Stability guarantees by tier
 

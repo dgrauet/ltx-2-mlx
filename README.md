@@ -178,6 +178,9 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once
 Lightricks publishes the official 2.5 task IC-LoRAs.
 
+For maximum detail on a 2.5 pack, `generate --dfr` (experimental) runs a base DFR pass with
+the official detailing IC-LoRA — see the [`generate --dfr` card](docs/PIPELINES.md#generate---dfr-experimental-ltx-25-packs-only) in the pipelines guide.
+
 ### Python API
 
 Pick the pipeline class matching your target — every public class

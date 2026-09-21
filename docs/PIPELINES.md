@@ -20,7 +20,8 @@ Start from what you have:
 - **A prompt to improve first** → the `enhance` subcommand.
 
 Then pick by constraint: 16–32 GB machines add `--low-ram`; 1080p or clips over 8 s
-add `--tile-spatial 2`; a sharper decode on 2.5 packs adds `--video-decoder diffusion`.
+add `--tile-spatial 2`; a sharper decode on 2.5 packs adds `--video-decoder diffusion`;
+**maximum detail on 2.5 packs** → `generate` `--dfr` (experimental).
 
 `generate` has no implicit mode. One of `--one-stage`, `--two-stage`, `--two-stages-hq`
 or `--distilled` is mandatory, because each maps 1:1 to an upstream pipeline class.
@@ -66,6 +67,16 @@ Everything else is in [Common flags](#common-flags).
 - **Example:** `ltx-2-mlx generate --one-stage -p "a fox in the forest" -H 480 -W 704 -f 33 --frame-rate 24 --low-ram -o fox.mp4`
 - **Cost (M2 Pro 32 GB, q8, `--low-ram`):** 704 × 480, 33 frames ≈ 2 min 31 s.
 - **Notes:** pick it for native resolutions up to 704 × 480, or when you would rather not depend on the neural upsampler. `--two-stage` is faster at larger targets.
+
+### `generate` `--dfr` *(experimental, LTX 2.5 packs only)*
+
+- **Produces:** T2V / I2V mp4 (+ audio) — the DFR base path: half-res distilled stage with keyframe slots on a segment-aligned canvas, 2× latent upsample, then a full-res detailing stage with the official detailing IC-LoRA (`Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler`, strength 0.5) guided by the stage-1 latent. Temporal rounds, the spatial epilogue and the keyframe-aware decode are not ported yet.
+- **Packs:** 2.5 only. **Tier:** Experimental.
+- **Required:** `--prompt`, `--output`, `--frame-rate` (`-f` optional: auto-predicted).
+- **Own flags:** `--detailing-lora PATH_OR_REPO` (official LoRA, downloaded on first use), `--stage1-steps` (8), `--stage2-steps` (3), `--image PATH FRAME STRENGTH` (repeatable). Not accepted: `--num-generated-keyframes` (slots come from the canvas), `--enable-teacache`, `--cfg-scale`, `--stg-scale`.
+- **Example:** `ltx-2-mlx generate --dfr --model /path/to/ltx-2.5-mlx-q8 -p "a fox in the forest" -H 512 -W 768 -f 49 --frame-rate 24 --low-ram -o fox.mp4`
+- **Cost (M2 Pro 32 GB, q8, `--low-ram`):** 768 × 512, 49 frames ≈ 277 s (8-step stage 1 at ~10.7 s/forward over 864 video tokens, 3-step stage 2 at ~53.5 s/forward over 4128 tokens — target + 2 keyframe slots + the half-res reference), peak Metal 14.0 GB, max RSS 10.8 GB. Frame 24 is visibly sharper (tree crowns, haze texture) than the plain `--distilled` render at the same seed. `--image` (I2V, frame 0 anchor) adds ~7 s. A 137-frame request pads to a 145-frame canvas (6 slots) and costs ≈ 783 s. `--video-decoder diffusion` at 1152 × 768, 25 frames runs untiled at ≈ 465 s, 22.2 GB peak Metal.
+- **Notes:** on I2V, the first-frame keyframe marker is now applied consistently (see [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental)). [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental).
 
 ### `keyframe`
 
@@ -174,7 +185,7 @@ Run `ltx-2-mlx <subcommand> --help` for the exact spelling of these options.
 | `--frame-rate` | required | Output frame rate. LTX-2.3 was trained at 24; values far from that drift out of distribution. | all except `retake` / `extend` / `lipdub` |
 | `--frames`, `-f` | 97, or auto on `generate` with a 2.5 pack | Frame count. Must satisfy `(frames - 1) % 8 == 0`. On `generate` with a 2.3 pack, omitting it fails immediately. | all except `retake` / `extend` / `lipdub` |
 | `--auto-duration MIN:MAX` | 1:20 | Clamp, in seconds, for the duration predicted by the 2.5 DurationHead. Ignored with a warning when `--frames` is given. [Details](../CLAUDE.md#auto-duration-durationhead--f-optional-on-25). | `generate` on 2.5 packs |
-| `--image`, `-i` | — | Reference image: `PATH [FRAME_IDX STRENGTH [CRF]]`. Repeatable, so you can anchor several pixel frames. Frame 0 replaces the first latent frame; later indices act as soft keyframes. [Details](../CLAUDE.md#multi-anchor-i2v---image-repeatable). | `generate` modes, `ic-lora`, `hdr-ic-lora`, `a2v` |
+| `--image`, `-i` | — | Reference image: `PATH [FRAME_IDX STRENGTH [CRF]]`. Repeatable, so you can anchor several pixel frames. Frame 0 replaces the first latent frame; later indices act as soft keyframes. On 2.5 packs, a frame-0 anchor now also carries the learned keyframe marker through, which shifts 2.5 I2V output slightly (2.3 unaffected). [Details](../CLAUDE.md#multi-anchor-i2v---image-repeatable). | `generate` modes, `ic-lora`, `hdr-ic-lora`, `a2v` |
 | `--num-generated-keyframes N` | 0 | Add N generated keyframe slots at evenly spaced interior frames in stage 1, which relaxes the temporal compression where motion is fast. Each slot costs a latent frame of tokens. Refused up front on 2.3 packs. [Details](../CLAUDE.md#generated-keyframe-slots---num-generated-keyframes-n-25-packs) | `generate` modes on 2.5 packs |
 | `--no-audio` | off | Skip the audio decode and mux. Video is unchanged; the DiT still produces audio latents jointly. | `generate` modes |
 | `--video-decoder {conv,diffusion}` | `conv` | Video VAE decoder. `diffusion` is sharper and slower and needs a 2.5 pack. [Details](../CLAUDE.md#diffusion-video-decoder---video-decoder-diffusion-25-packs-experimental). | `generate` modes |
@@ -227,42 +238,43 @@ would otherwise not fit. On a 32 GB Mac at typical token counts, prefer `--low-r
 Columns are the cards above. `enhance`, `info`, `train`, `preprocess` and `slice`
 are utilities and have no column.
 
-| Flag | distilled | two-stage | hq | one-stage | keyframe | ic-lora | hdr-ic-lora | a2v | retake | extend | lipdub |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| `--prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--output` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--model` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--gemma` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--seed` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--quiet` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--height` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `--width` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `--frame-rate` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `--frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `--auto-duration` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--image` | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `--num-generated-keyframes` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--no-audio` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--video-decoder` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--diffvae-tile` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--lora` | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
-| `--enhance-prompt` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--dev-transformer` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--distilled-lora` | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--distilled-lora-strength` | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--low-ram` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| `--tile-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `--tile-spatial` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `--tile-overlap` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `--enable-teacache` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--teacache-thresh` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--stepwise-image-output-dir` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--stepwise-interval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--stepwise-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--stepwise-frame` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--segment` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--relay-epsilon` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--relay-strength` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Flag | distilled | two-stage | hq | one-stage | dfr | keyframe | ic-lora | hdr-ic-lora | a2v | retake | extend | lipdub |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `--prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--output` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--model` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--gemma` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--seed` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--quiet` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--height` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| `--width` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| `--frame-rate` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `--frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `--auto-duration` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--image` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `--num-generated-keyframes` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--no-audio` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--video-decoder` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--diffvae-tile` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--lora` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| `--enhance-prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--dev-transformer` | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--distilled-lora` | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--distilled-lora-strength` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--detailing-lora` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--low-ram` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `--tile-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `--tile-spatial` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `--tile-overlap` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `--enable-teacache` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--teacache-thresh` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--stepwise-image-output-dir` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--stepwise-interval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--stepwise-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--stepwise-frame` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--segment` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--relay-epsilon` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--relay-strength` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 A ❌ means the flag is either rejected by the parser or accepted and inert for that
 mode. The four `generate` modes share one parser, so a flag marked ❌ on `distilled`
