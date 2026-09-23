@@ -603,6 +603,11 @@ Flags for `preprocess`: `--height`, `--width` (resize, must be divisible by 32),
 
 Flags for `train`: `--config` (required, path to YAML config). See `packages/ltx-trainer/configs/` for examples.
 
+**Programmatic hooks** (`LtxvTrainer(cfg).train(...)`, `ltx_trainer_mlx/trainer.py`):
+
+- `step_callback: StepCallback` — `(step, total_steps, sampled_video_paths)` once per optimizer step, after validation/checkpointing. Arity is fixed at 3 (downstream apps pin it); exceptions propagate and abort the run.
+- `metrics_callback: MetricsCallback` — `Callable[[StepMetrics], None]`, once per optimizer step right after the update + LR-scheduler tick (before validation/checkpointing). `StepMetrics` (frozen dataclass): `step` (1-based), `total_steps`, `loss` (mean of the step's gradient-accumulation micro-batch losses), `lr` (rate the optimizer applied for this update, read before `update`), `step_time_s` (first micro-batch forward to materialized update), `peak_memory_gb` (`mx.get_peak_memory()` in GiB: MLX high-water mark, not RSS; can exceed physical RAM). No extra GPU sync: the loop already materializes and `.item()`s every micro-batch loss. A raising `metrics_callback` is logged (warning + traceback) and disabled for the rest of the run; training continues. Tests: `tests/test_trainer_metrics_callback.py` (tiny real loop, no weights).
+
 ---
 
 ## Guidance System (STG / CFG / Modality)
