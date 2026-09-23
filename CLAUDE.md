@@ -392,7 +392,7 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 | `train` | Training | Stable | Train a LoRA or full model from YAML config (requires ltx-trainer-mlx) |
 | `preprocess` | Data preprocessing | Stable | Encode raw videos into latents + conditions for training |
 
-All pipelines except one-stage T2V/I2V use the dev model with CFG guidance. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet`. Every denoising stage prints an `[estimate]` work line (steps × passes × tokens = forwards) on stderr before step 1 and a time projection after the first computed step, refined once after the second (`utils/estimate.py`; retake/extend note that cost follows total clip length). Tier semantics + promotion criteria live in [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md).
+All pipelines except one-stage T2V/I2V use the dev model with CFG guidance. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet`. CFG modes (`generate --one-stage/--two-stage/--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend`) take `--negative-prompt TEXT` (default: upstream `DEFAULT_NEGATIVE_PROMPT`; `""` is encoded verbatim; always one global prompt, even with `--segment`); `--distilled` / `--dfr` reject it (no CFG), and the distilled-sampler IC-LoRA family (`ic-lora`, `hdr-ic-lora`, `lipdub`) does not expose it. Every denoising stage prints an `[estimate]` work line (steps × passes × tokens = forwards) on stderr before step 1 and a time projection after the first computed step, refined once after the second (`utils/estimate.py`; retake/extend note that cost follows total clip length). Tier semantics + promotion criteria live in [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md).
 
 ### Low-RAM Example
 

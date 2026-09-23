@@ -118,6 +118,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         stage2_steps: int | None = None,
         cfg_scale: float = 1.0,
         negative_prompt_embeds: tuple[mx.array, mx.array] | None = None,
+        negative_prompt: str | None = None,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
     ) -> tuple[mx.array, mx.array]:
@@ -139,10 +140,21 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
             stage2_steps: Stage 2 denoising steps.
             cfg_scale: CFG guidance scale for stage 1 (1.0 = no guidance).
             negative_prompt_embeds: Optional (video_neg, audio_neg) for CFG.
+            negative_prompt: Negative prompt for CFG. ``None`` (default) uses
+                ``DEFAULT_NEGATIVE_PROMPT``; any string (including ``""``) is
+                encoded verbatim. Only encoded when CFG is active
+                (``cfg_scale != 1.0`` or ``video_guider_params`` set).
+                Mutually exclusive with ``negative_prompt_embeds``.
 
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
+
+        Raises:
+            ValueError: If both ``negative_prompt`` and ``negative_prompt_embeds``
+                are given, or ``keyframe_strengths`` has the wrong length.
         """
+        if negative_prompt is not None and negative_prompt_embeds is not None:
+            raise ValueError("Pass either negative_prompt or negative_prompt_embeds, not both")
         if keyframe_strengths is None:
             keyframe_strengths = [1.0] * len(keyframe_images)
         elif len(keyframe_strengths) != len(keyframe_images):
@@ -180,8 +192,11 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
 
         # --- Text encoding (load Gemma, encode, free) ---
         use_dev = self._dev_transformer is not None
-        if cfg_scale != 1.0:
-            video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
+        # Encode the negative whenever the guided path below will run (same condition).
+        if cfg_scale != 1.0 or video_guider_params is not None:
+            video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(
+                prompt, negative_prompt
+            )
         else:
             self._load_text_encoder()
             video_embeds, audio_embeds = self._encode_text(prompt)
@@ -430,6 +445,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         cfg_scale: float = 1.0,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
+        negative_prompt: str | None = None,
         **kwargs: object,
     ) -> str:
         """Generate two-stage keyframe interpolation and save to file.
@@ -449,6 +465,8 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
             cfg_scale: CFG guidance scale for stage 1.
             video_guider_params: Full video guider params (STG, rescale, modality).
             audio_guider_params: Full audio guider params.
+            negative_prompt: Negative prompt for CFG (``None`` =
+                ``DEFAULT_NEGATIVE_PROMPT``). See :meth:`interpolate`.
 
         Returns:
             Path to output video file.
@@ -469,6 +487,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
             stage1_steps=stage1_steps,
             stage2_steps=stage2_steps,
             cfg_scale=cfg_scale,
+            negative_prompt=negative_prompt,
             video_guider_params=video_guider_params,
             audio_guider_params=audio_guider_params,
         )

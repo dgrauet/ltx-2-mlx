@@ -381,6 +381,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         image: str | None = None,
         images=None,
         prompt_relay=None,
+        negative_prompt: str | None = None,
         generated_keyframes: int | Sequence[int] = 0,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
@@ -406,6 +407,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             cfg_scale: CFG guidance scale for stage 1 (default: 3.0).
             stg_scale: STG guidance scale for stage 1 (default: 1.0, upstream LTX_2_3_PARAMS).
             image: Optional reference image for I2V conditioning.
+            negative_prompt: Negative prompt for CFG. ``None`` (default) uses
+                ``DEFAULT_NEGATIVE_PROMPT``; any string (including ``""``) is
+                encoded verbatim. Always a single global prompt, even with
+                Prompt Relay.
             video_guider_params: Optional full guider params for video.
             audio_guider_params: Optional full guider params for audio.
             enable_teacache: When True, instantiate a TeaCacheController
@@ -426,9 +431,11 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         self._check_teacache_supported(enable_teacache)
 
         # --- Text encoding (Prompt Relay: encode the combined prompt; the negative
-        # prompt is a fixed default, so it is unaffected by the local prompts) ---
+        # prompt is a single global prompt, unaffected by the local prompts) ---
         encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
-        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(encode_prompt)
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(
+            encode_prompt, negative_prompt
+        )
         num_frames = self._resolve_num_frames(
             num_frames, video_encoding=video_embeds, audio_encoding=audio_embeds, frame_rate=frame_rate
         )
@@ -707,6 +714,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         teacache_thresh: float | None = None,
         prompt_relay=None,
         generated_keyframes: int | Sequence[int] = 0,
+        negative_prompt: str | None = None,
     ) -> str:
         """Generate two-stage video+audio and save to file.
 
@@ -716,6 +724,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         ``prompt_relay`` (a ``PromptRelayInput``) is forwarded only when set;
         ``generate_two_stage`` wires the mask into both of its denoise loops.
+
+        ``negative_prompt`` is likewise forwarded only when set, so subclasses
+        whose ``generate_two_stage`` lacks the kwarg keep working. CFG-less
+        subclasses (distilled, DFR) raise ``ValueError`` when it is set.
         """
         gen_kwargs: dict = dict(
             prompt=prompt,
@@ -738,6 +750,8 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             gen_kwargs["stage1_steps"] = stage1_steps
         if prompt_relay is not None:
             gen_kwargs["prompt_relay"] = prompt_relay
+        if negative_prompt is not None:
+            gen_kwargs["negative_prompt"] = negative_prompt
         if has_generated_keyframes(generated_keyframes):
             gen_kwargs["generated_keyframes"] = generated_keyframes
         video_latent, audio_latent = self.generate_two_stage(**gen_kwargs)

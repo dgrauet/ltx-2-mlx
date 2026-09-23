@@ -164,6 +164,19 @@ def _build_tile_count_config(args: argparse.Namespace):
     )
 
 
+def _add_negative_prompt_arg(parser: argparse.ArgumentParser) -> None:
+    """Add ``--negative-prompt`` (CFG pipelines only)."""
+    parser.add_argument(
+        "--negative-prompt",
+        default=None,
+        help=(
+            "Negative prompt for CFG: what should not appear in the video. Default: the upstream "
+            "DEFAULT_NEGATIVE_PROMPT (common artifacts and quality issues). An empty string "
+            'encodes "" verbatim. CFG pipelines only: rejected by --distilled and --dfr.'
+        ),
+    )
+
+
 def _add_generation_args(parser: argparse.ArgumentParser, *, frames_default: int | None = 97) -> None:
     """Add generation-specific arguments (dimensions, steps) on top of base args.
 
@@ -598,6 +611,7 @@ examples:
     gen.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30 standard, 15 HQ)")
     gen.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 steps (default: 3)")
     gen.add_argument("--cfg-scale", type=float, default=None, help="CFG guidance scale (default: 3.0)")
+    _add_negative_prompt_arg(gen)
     gen.add_argument(
         "--stg-scale",
         type=float,
@@ -658,6 +672,7 @@ examples:
     a2v.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30)")
     a2v.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 steps (default: 3)")
     a2v.add_argument("--cfg-scale", type=float, default=None, help="CFG guidance scale (default: 3.0)")
+    _add_negative_prompt_arg(a2v)
     a2v.add_argument(
         "--stg-scale", type=float, default=None, help="STG guidance scale (default: 1.0 — upstream LTX_2_3_PARAMS)"
     )
@@ -688,6 +703,7 @@ examples:
     ret.add_argument("--end", type=int, required=True, help="End latent frame index (exclusive)")
     ret.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 30)")
     ret.add_argument("--cfg-scale", type=float, default=None, help="CFG guidance scale (default: 3.0)")
+    _add_negative_prompt_arg(ret)
     ret.add_argument(
         "--stg-scale", type=float, default=None, help="STG guidance scale (default: 1.0 — upstream LTX_2_3_PARAMS)"
     )
@@ -715,6 +731,7 @@ examples:
     )
     ext.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 30)")
     ext.add_argument("--cfg-scale", type=float, default=None, help="CFG guidance scale (default: 3.0)")
+    _add_negative_prompt_arg(ext)
     ext.add_argument(
         "--stg-scale", type=float, default=None, help="STG guidance scale (default: 1.0 — upstream LTX_2_3_PARAMS)"
     )
@@ -739,6 +756,7 @@ examples:
     kf.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
     kf.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
     kf.add_argument("--cfg-scale", type=float, default=None, help="Override CFG scale (default: 3.0 video, 7.0 audio)")
+    _add_negative_prompt_arg(kf)
     kf.add_argument("--stg-scale", type=float, default=None, help="Override STG scale (default: 1.0)")
     kf.add_argument(
         "--dev-transformer",
@@ -1113,6 +1131,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             raise SystemExit("--spatial-upscalings 2 does not support --segment (Prompt Relay).")
         if args.spatial_upscalings == 2 and _build_tile_count_config(args) is not None:
             raise SystemExit("--spatial-upscalings 2 does not support --tile-frames / --tile-spatial.")
+        if args.negative_prompt is not None:
+            raise SystemExit("--dfr runs the distilled flow (no CFG); drop --negative-prompt.")
     else:
         if args.detailing_lora != DEFAULT_DETAILING_LORA:
             raise SystemExit("--detailing-lora only applies with --dfr.")
@@ -1122,6 +1142,10 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             raise SystemExit("--temporal-upscalings only applies with --dfr.")
         if args.temporal_upsampler_path is not None:
             raise SystemExit("--temporal-upsampler-path only applies with --dfr.")
+    if args.distilled and args.negative_prompt is not None:
+        raise SystemExit(
+            "--distilled has no CFG; --negative-prompt requires --one-stage, --two-stage or --two-stages-hq."
+        )
 
     if args.one_stage:
         from ltx_pipelines_mlx.ti2vid_one_stage import TI2VidOneStagePipeline
@@ -1167,6 +1191,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["stg_scale"] = args.stg_scale
         if relay is not None:
             kwargs["prompt_relay"] = relay
+        if args.negative_prompt is not None:
+            kwargs["negative_prompt"] = args.negative_prompt
         pipe.generate_and_save(**kwargs)
 
     elif args.dfr:
@@ -1317,6 +1343,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
                 kwargs["teacache_thresh"] = args.teacache_thresh
         if relay is not None:
             kwargs["prompt_relay"] = relay
+        if args.negative_prompt is not None:
+            kwargs["negative_prompt"] = args.negative_prompt
         pipe.generate_and_save(**kwargs)
 
     else:
@@ -1376,6 +1404,8 @@ def _cmd_a2v(args: argparse.Namespace) -> None:
         kwargs["cfg_scale"] = args.cfg_scale
     if args.stg_scale is not None:
         kwargs["stg_scale"] = args.stg_scale
+    if args.negative_prompt is not None:
+        kwargs["negative_prompt"] = args.negative_prompt
     pipe.generate_and_save(**kwargs)
 
     _print_result(args.output, t0, args.quiet)
@@ -1417,6 +1447,8 @@ def _cmd_retake(args: argparse.Namespace) -> None:
         kwargs["cfg_scale"] = args.cfg_scale
     if args.stg_scale is not None:
         kwargs["stg_scale"] = args.stg_scale
+    if args.negative_prompt is not None:
+        kwargs["negative_prompt"] = args.negative_prompt
     video_latent, audio_latent = pipe.retake_from_video(**kwargs)
 
     _decode_and_save(pipe, video_latent, audio_latent, args)
@@ -1458,6 +1490,8 @@ def _cmd_extend(args: argparse.Namespace) -> None:
         kwargs["cfg_scale"] = args.cfg_scale
     if args.stg_scale is not None:
         kwargs["stg_scale"] = args.stg_scale
+    if args.negative_prompt is not None:
+        kwargs["negative_prompt"] = args.negative_prompt
     video_latent, audio_latent = pipe.extend_from_video(**kwargs)
 
     _decode_and_save(pipe, video_latent, audio_latent, args)
@@ -1525,6 +1559,7 @@ def _cmd_keyframe(args: argparse.Namespace) -> None:
         stage1_steps=args.stage1_steps,
         stage2_steps=args.stage2_steps,
         cfg_scale=cfg,
+        negative_prompt=args.negative_prompt,
         video_guider_params=video_gp,
         audio_guider_params=audio_gp,
     )

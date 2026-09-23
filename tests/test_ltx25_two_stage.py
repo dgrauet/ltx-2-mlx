@@ -262,7 +262,7 @@ def _stub_generate(pipe, monkeypatch, mod, stage1_name: str) -> tuple[_EchoLoop,
     pipe.vae_encoder = _IdentityVae()
     pipe.upsampler = lambda x: mx.repeat(mx.repeat(x, 2, axis=3), 2, axis=4)
     pipe._fuse_distilled_lora = lambda dit: None
-    pipe._encode_text_with_negative = lambda encode_prompt: (
+    pipe._encode_text_with_negative = lambda encode_prompt, negative_prompt=None: (
         mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
         mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
         mx.zeros((1, 8, 4096), dtype=mx.bfloat16),

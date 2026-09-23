@@ -54,6 +54,7 @@ from ltx_core_mlx.model.video_vae.tiling import DimensionTilingConfig, TileCount
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization
+from ltx_pipelines_mlx._base import reject_negative_prompt
 from ltx_pipelines_mlx.dfr_layout import TemporalTilePlan, pixel_to_latent_index, resolve_canvas
 from ltx_pipelines_mlx.distilled import DistilledPipeline, Stage1Result
 from ltx_pipelines_mlx.iclora_utils import (
@@ -511,6 +512,7 @@ class DFRPipeline(DistilledPipeline):
         prompt_relay=None,
         generated_keyframes: int | Sequence[int] = 0,
         enable_teacache: bool = False,
+        negative_prompt: str | None = None,
         **_unused_kwargs,
     ) -> tuple[mx.array, mx.array]:
         """DFR base path; returns ``(video_latent, audio_latent)`` trimmed to ``num_frames``.
@@ -529,6 +531,7 @@ class DFRPipeline(DistilledPipeline):
             prompt_relay: Optional Prompt Relay segment specs.
             generated_keyframes: Must stay falsy — DFR places its own slots.
             enable_teacache: Must stay ``False`` — not available on the DFR path.
+            negative_prompt: Must stay ``None`` — DFR runs the distilled flow (no CFG).
             **_unused_kwargs: Accepted (and ignored) for signature compatibility with
                 :meth:`DistilledPipeline.generate_two_stage`.
 
@@ -537,12 +540,14 @@ class DFRPipeline(DistilledPipeline):
 
         Raises:
             ValueError: on a pack without the keyframe embedding, when ``generated_keyframes``
-                is passed (DFR places its own slots from the canvas) or when TeaCache is requested.
+                is passed (DFR places its own slots from the canvas), when TeaCache is requested
+                or when ``negative_prompt`` is set (no CFG).
             FileNotFoundError: when the detailing LoRA cannot be resolved (raised up front,
                 before any prompt encoding).
             RuntimeError: when ``_stage1`` did not run the canvas hook, leaving the requested
                 duration unknown.
         """
+        reject_negative_prompt(negative_prompt, type(self).__name__)
         if generated_keyframes:
             raise ValueError("DFR places its keyframe slots from the canvas; --num-generated-keyframes does not apply")
         if enable_teacache:

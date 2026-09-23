@@ -116,6 +116,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         images=None,
         audio_start_time: float = 0.0,
         audio_max_duration: float | None = None,
+        negative_prompt: str | None = None,
     ) -> str:
         """Generate video from audio and save to file.
 
@@ -138,6 +139,9 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             image: Optional reference image for I2V conditioning (first frame).
             audio_start_time: Start time in seconds for audio.
             audio_max_duration: Max audio duration.
+            negative_prompt: Negative prompt for CFG. ``None`` (default) uses
+                ``DEFAULT_NEGATIVE_PROMPT``; any string (including ``""``) is
+                encoded verbatim.
 
         Returns:
             Path to the output video file.
@@ -180,7 +184,9 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             self.audio_conditioner.free()
 
         # --- Text encoding (positive + negative for CFG) ---
-        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(
+            prompt, negative_prompt
+        )
 
         # --- Load DiT (defer VAE encoder + upsampler to after Stage 1 for memory) ---
         if self.dit is None:

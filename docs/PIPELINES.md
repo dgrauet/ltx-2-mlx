@@ -36,7 +36,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** T2V / I2V mp4 with audio. Half-res distilled pass, 2× latent upsample, 3-step distilled refine.
 - **Packs:** 2.3 and 2.5. On 2.5 stage 1 uses the ancestral sampler. **Tier:** Stable.
 - **Required:** `--prompt`, `--output`, `--frame-rate`. `--frames` is required on 2.3 packs and auto-predicted on 2.5.
-- **Own flags:** `--stage1-steps` (8), `--stage2-steps` (3). No CFG, so `--cfg-scale`, `--stg-scale` and TeaCache do not apply.
+- **Own flags:** `--stage1-steps` (8), `--stage2-steps` (3). No CFG, so `--cfg-scale`, `--stg-scale` and TeaCache do not apply, and `--negative-prompt` is rejected.
 - **Example:** `ltx-2-mlx generate --distilled -p "a fox in the forest" -H 512 -W 768 -f 49 --frame-rate 24 -o fox.mp4`
 - **Notes:** fastest mode. Quality sits slightly below the dev + CFG variants.
 
@@ -45,7 +45,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** T2V / I2V mp4 with audio. Dev model + CFG at half resolution, 2× upsample, distilled 3-step refine.
 - **Packs:** 2.3 and 2.5. **Tier:** Stable. Best default quality per minute.
 - **Required:** `--prompt`, `--output`, `--frame-rate`; `--frames` on 2.3 packs.
-- **Own flags:** `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--stg-scale` (1.0; each unit above 0 adds one extra forward pass per step — pass `--stg-scale 0` on 32 GB Macs for long clips), `--dev-transformer` (`transformer-dev.safetensors`), `--distilled-lora`, `--distilled-lora-strength` (1.0), `--enable-teacache`, `--teacache-thresh`.
+- **Own flags:** `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--negative-prompt`, `--stg-scale` (1.0; each unit above 0 adds one extra forward pass per step — pass `--stg-scale 0` on 32 GB Macs for long clips), `--dev-transformer` (`transformer-dev.safetensors`), `--distilled-lora`, `--distilled-lora-strength` (1.0), `--enable-teacache`, `--teacache-thresh`.
 - **Example:** `ltx-2-mlx generate --two-stage -p "a fox in the forest" -H 480 -W 704 -f 97 --frame-rate 24 --low-ram -o fox.mp4`
 - **Cost (M2 Pro 32 GB, q8):** 704 × 480, 97 frames ≈ 1374 s, or ≈ 942 s with `--enable-teacache`. [Details](../CLAUDE.md#teacache-opt-in-stage-1-acceleration).
 
@@ -63,7 +63,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** T2V / I2V mp4 with audio in a single dev + CFG pass at the target resolution. No upsampler, no stage 2.
 - **Packs:** 2.3 and 2.5. **Tier:** Stable.
 - **Required:** `--prompt`, `--output`, `--frame-rate`; `--frames` on 2.3 packs.
-- **Own flags:** `--steps` (30), `--cfg-scale` (3.0), `--stg-scale` (1.0), `--dev-transformer`. No stage-2 or TeaCache flags.
+- **Own flags:** `--steps` (30), `--cfg-scale` (3.0), `--negative-prompt`, `--stg-scale` (1.0), `--dev-transformer`. No stage-2 or TeaCache flags.
 - **Example:** `ltx-2-mlx generate --one-stage -p "a fox in the forest" -H 480 -W 704 -f 33 --frame-rate 24 --low-ram -o fox.mp4`
 - **Cost (M2 Pro 32 GB, q8, `--low-ram`):** 704 × 480, 33 frames ≈ 2 min 31 s.
 - **Notes:** pick it for native resolutions up to 704 × 480, or when you would rather not depend on the neural upsampler. `--two-stage` is faster at larger targets.
@@ -73,7 +73,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** T2V / I2V mp4 (+ audio) — the DFR base path: half-res distilled stage with keyframe slots on a segment-aligned canvas, 2× latent upsample, then a full-res detailing stage with the official detailing IC-LoRA (`Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler`, strength 0.5) guided by the stage-1 latent. With `--video-decoder diffusion` the stage-2 keyframe slots are decoded as a keyframe-aware second stream (`--video-decoder conv`, the default, ignores them with a warning). `--temporal-upscalings T` adds T temporal x2 refine rounds on top: `(N-1)*2**T+1` frames at `frame_rate*2**T` fps, audio carried over unchanged from stage 1 (frozen, not re-denoised). `--spatial-upscalings 2` runs stage 1 at H/4 and stage 2 + the temporal rounds at H/2 (dims floored to multiples of 128 px, with a warning), then adds a full-res spatial epilogue: the carry keyframes are decoded one plane at a time, Lanczos-upsampled x2 and re-encoded as strength-1.0 keyframes, and the H/2 latent is spatially upsampled and re-denoised (3-step deterministic Euler, detailing LoRA, the H/2 latent as an IC-LoRA reference, frozen stage-1 audio) with every model call tiled 2×2 spatially and in `2**T` frame tiles cut on the last round's seams.
 - **Packs:** 2.5 only. **Tier:** Experimental.
 - **Required:** `--prompt`, `--output`, `--frame-rate` (`-f` optional: auto-predicted).
-- **Own flags:** `--detailing-lora PATH_OR_REPO` (official LoRA, downloaded on first use — **gated repo**: accept the licence once at [huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler) with the account `huggingface-cli login` uses, or the run stops before any model load; a local `.safetensors` path skips the download), `--stage1-steps` (8), `--stage2-steps` (3), `--image PATH FRAME STRENGTH` (repeatable), `--spatial-upscalings {1,2}` (1), `--temporal-upscalings {0,1,2}` (0), `--temporal-upsampler-path PATH` (default: the pack's `temporal_upscaler_x2_v1_0.safetensors`). Not accepted: `--num-generated-keyframes` (slots come from the canvas), `--enable-teacache`, `--cfg-scale`, `--stg-scale`; with `--temporal-upscalings` set or `--spatial-upscalings 2`, also not accepted: `--segment` (Prompt Relay), `--tile-frames` / `--tile-spatial`.
+- **Own flags:** `--detailing-lora PATH_OR_REPO` (official LoRA, downloaded on first use — **gated repo**: accept the licence once at [huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler) with the account `huggingface-cli login` uses, or the run stops before any model load; a local `.safetensors` path skips the download), `--stage1-steps` (8), `--stage2-steps` (3), `--image PATH FRAME STRENGTH` (repeatable), `--spatial-upscalings {1,2}` (1), `--temporal-upscalings {0,1,2}` (0), `--temporal-upsampler-path PATH` (default: the pack's `temporal_upscaler_x2_v1_0.safetensors`). Not accepted: `--num-generated-keyframes` (slots come from the canvas), `--enable-teacache`, `--cfg-scale`, `--stg-scale`, `--negative-prompt`; with `--temporal-upscalings` set or `--spatial-upscalings 2`, also not accepted: `--segment` (Prompt Relay), `--tile-frames` / `--tile-spatial`.
 - **Example:** `ltx-2-mlx generate --dfr --model /path/to/ltx-2.5-mlx-q8 -p "a fox in the forest" -H 512 -W 768 -f 49 --frame-rate 24 --low-ram -o fox.mp4`
 - **Cost (M2 Pro 32 GB, q8, `--low-ram`):** 768 × 512, 49 frames ≈ 277 s (8-step stage 1 at ~10.7 s/forward over 864 video tokens, 3-step stage 2 at ~53.5 s/forward over 4128 tokens — target + 2 keyframe slots + the half-res reference), peak Metal 14.0 GB, max RSS 10.8 GB. Frame 24 is visibly sharper (tree crowns, haze texture) than the plain `--distilled` render at the same seed. `--image` (I2V, frame 0 anchor) adds ~7 s. A 137-frame request pads to a 145-frame canvas (6 slots) and costs ≈ 783 s. `--video-decoder diffusion` at 1152 × 768, 25 frames runs untiled at ≈ 465 s, 12 GB peak Metal (the decoder now runs in its own bf16 whatever dtype the pipeline hands it; the first measurement, 22 GB, was the decode promoted to fp32 by an fp32 stage-2 latent). The keyframe-aware diffusion decode costs +58 % on the decode phase at 768 × 512 × 49 (157 s vs 100 s, 2 planes), same peak Metal. Temporal rounds at 768 × 512, 121 frames: `--temporal-upscalings 1` (241 frames @ 48 fps) ≈ 29 min, `--temporal-upscalings 2` (481 @ 96) ≈ 70 min; each 145-frame round tile costs ~9–10 min (4 ancestral steps). Spatial epilogue at 1536 × 1024, 49 frames: `--spatial-upscalings 2` ≈ 25 min (epilogue ≈ 19 min, 4 tiles × 3 steps), + `--temporal-upscalings 1` ≈ 75 min (97 frames @ 48 fps).
 - **Notes:** on I2V, the first-frame keyframe marker is now applied consistently (see [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental)). `--segment` (Prompt Relay) auto-distributes over the padded canvas, not the requested duration (e.g. 145 frames for `-f 137`), so segment boundaries shift by the padding before the tail is trimmed — pass explicit segment lengths for exact boundaries. [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental).
@@ -83,7 +83,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** an interpolation between a start image and an end image. Dev model + CFG at half res, then a distilled refine.
 - **Packs:** 2.3 and 2.5 (2.5 needs `--dev-transformer transformer-dev.safetensors`). **Tier:** Stable.
 - **Required:** `--prompt`, `--output`, `--frame-rate`, `--start`, `--end` (image paths).
-- **Own flags:** `--frames` (97), `--start-strength` (1.0), `--end-strength` (1.0), `--stage1-steps`, `--stage2-steps`, `--cfg-scale` (3.0 video, 7.0 audio), `--stg-scale` (1.0), `--dev-transformer`, `--distilled-lora`, `--lora-strength` (1.0).
+- **Own flags:** `--frames` (97), `--start-strength` (1.0), `--end-strength` (1.0), `--stage1-steps`, `--stage2-steps`, `--cfg-scale` (3.0 video, 7.0 audio), `--negative-prompt`, `--stg-scale` (1.0), `--dev-transformer`, `--distilled-lora`, `--lora-strength` (1.0).
 - **Example:** `ltx-2-mlx keyframe -p "the camera pushes in" --start a.jpg --end b.jpg -f 97 --frame-rate 24 -o out.mp4`
 - **Notes:** the distilled model hallucinates on interpolation, so this pipeline always uses the dev model. Lower `--end-strength` gives the prompt more freedom to diverge from the end fixture. [Details](../CLAUDE.md#keyframe-interpolation-pipeline).
 
@@ -125,7 +125,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** video driven by an existing audio track, optionally anchored on an image. Dev model + CFG, two stages.
 - **Packs:** 2.3 and 2.5. **Tier:** Beta.
 - **Required:** `--prompt`, `--output`, `--frame-rate`, `--audio`.
-- **Own flags:** `--frames` (97), `--audio-start` (0 s), `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--stg-scale` (1.0), `--image`.
+- **Own flags:** `--frames` (97), `--audio-start` (0 s), `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--negative-prompt`, `--stg-scale` (1.0), `--image`.
 - **Example:** `ltx-2-mlx a2v -p "a singer performing" --audio music.wav -i photo.jpg -f 97 --frame-rate 24 -o out.mp4`
 - **Notes:** sync quality depends on how well the prompt matches the audio. Audio CFG runs at 7.0.
 
@@ -134,7 +134,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** the source video with one latent-frame range regenerated. Dev model + CFG, single stage.
 - **Packs:** 2.3 and 2.5. **Tier:** Beta.
 - **Required:** `--prompt`, `--output`, `--video`, `--start`, `--end` (latent frame indices, end exclusive).
-- **Own flags:** `--steps` (30), `--cfg-scale` (3.0), `--stg-scale` (1.0), `--no-regen-audio`. Resolution and frame count come from the source clip, so `--height`, `--width`, `--frames` and `--frame-rate` are absent.
+- **Own flags:** `--steps` (30), `--cfg-scale` (3.0), `--negative-prompt`, `--stg-scale` (1.0), `--no-regen-audio`. Resolution and frame count come from the source clip, so `--height`, `--width`, `--frames` and `--frame-rate` are absent.
 - **Example:** `ltx-2-mlx retake -p "a different action" -v source.mp4 --start 2 --end 5 --low-ram -o retake.mp4`
 - **Cost:** follows the **total** clip length, not the size of the regenerated window. Preserved frames are still computed and attended over on every pass.
 
@@ -143,7 +143,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** the source video with latent frames appended before or after it. Same pipeline class as `retake`.
 - **Packs:** 2.3 and 2.5. **Tier:** Beta.
 - **Required:** `--prompt`, `--output`, `--video`, `--extend-frames`.
-- **Own flags:** `--direction` (`after`), `--steps` (30), `--cfg-scale` (3.0), `--stg-scale` (1.0).
+- **Own flags:** `--direction` (`after`), `--steps` (30), `--cfg-scale` (3.0), `--negative-prompt`, `--stg-scale` (1.0).
 - **Example:** `ltx-2-mlx extend -p "continue the scene" -v source.mp4 --extend-frames 4 --low-ram -o extended.mp4`
 - **Cost:** same rule as `retake` — the whole clip is denoised each step.
 
@@ -192,6 +192,7 @@ Run `ltx-2-mlx <subcommand> --help` for the exact spelling of these options.
 | `--diffvae-tile FRAMES HEIGHT WIDTH` | auto | Diffusion-decoder tile size, in pixel frames and pixels (multiples of 2 and 8; `0` leaves an axis untiled, `0 0 0` forces a single tile). | with `--video-decoder diffusion` |
 | `--lora PATH STRENGTH` | — | Extra LoRA weights, repeatable. A local `.safetensors` file or a HuggingFace repo id. Required on the IC-LoRA family. | `generate` modes, `ic-lora`, `hdr-ic-lora`, `lipdub` |
 | `--enhance-prompt` | off | Rewrite the prompt with Gemma before generating. Gemma 3 only, so it raises on 2.5 packs. | `generate` modes |
+| `--negative-prompt` | upstream `DEFAULT_NEGATIVE_PROMPT` | Negative prompt for CFG: what the video should avoid. One global prompt, even with `--segment`. `""` is encoded as an empty prompt, not replaced by the default. Rejected by `--distilled` and `--dfr` (no CFG). | CFG modes: `generate --one-stage` / `--two-stage` / `--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend` |
 | `--dev-transformer` | `transformer-dev.safetensors` on `generate`, unset elsewhere | Filename of the dev (non-distilled) transformer inside the pack. On `keyframe` and `ic-lora` there is no default, and on `ic-lora` passing it switches dev mode on. | `generate` modes, `keyframe`, `ic-lora` |
 | `--distilled-lora` | resolved from the pack; `ltx-2.3-22b-distilled-lora-384-1.1.safetensors` on `ic-lora` | Filename of the distilled LoRA used by the refine stage. | `generate` modes, `keyframe`, `ic-lora` |
 | `--distilled-lora-strength` | 1.0 (0.5 on `ic-lora` dev mode) | Strength of that LoRA. Any value other than 1.0 forces bind-time fusion under `--low-ram`. | `generate` modes, `ic-lora` |
@@ -258,6 +259,7 @@ are utilities and have no column.
 | `--diffvae-tile` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--lora` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | `--enhance-prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--negative-prompt` | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | `--dev-transformer` | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--distilled-lora` | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--distilled-lora-strength` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |

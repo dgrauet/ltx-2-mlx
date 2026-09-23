@@ -104,6 +104,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         image: str | None = None,
         images=None,
         prompt_relay=None,
+        negative_prompt: str | None = None,
         generated_keyframes: int | Sequence[int] = 0,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
@@ -118,6 +119,8 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         / ``tap`` are forwarded to ``res2s_denoise_loop`` exactly as in the
         Euler path. ``num_frames`` may be an :class:`AutoDuration` request,
         resolved after prompt encoding (see :meth:`TI2VidTwoStagesPipeline.generate_two_stage`).
+        ``negative_prompt`` has the same semantics as in the parent (``None`` =
+        ``DEFAULT_NEGATIVE_PROMPT``).
         """
         self._require_num_frames_source(num_frames)
         self._require_generated_keyframes_support(generated_keyframes)
@@ -125,7 +128,9 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
 
         # --- Text encoding (Prompt Relay: encode the combined prompt) ---
         encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
-        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(encode_prompt)
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(
+            encode_prompt, negative_prompt
+        )
         num_frames = self._resolve_num_frames(
             num_frames, video_encoding=video_embeds, audio_encoding=audio_embeds, frame_rate=frame_rate
         )

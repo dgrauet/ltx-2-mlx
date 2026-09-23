@@ -123,6 +123,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         image: str | None = None,
         images=None,
         prompt_relay=None,
+        negative_prompt: str | None = None,
         generated_keyframes: int | Sequence[int] = 0,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
@@ -147,6 +148,10 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             image: Optional reference image for I2V (legacy single-anchor).
             images: Optional list of :class:`ImageConditioningInput` for
                 multi-anchor I2V (matches upstream ``combined_image_conditionings``).
+            negative_prompt: Negative prompt for CFG. ``None`` (default) uses
+                ``DEFAULT_NEGATIVE_PROMPT``; any string (including ``""``) is
+                encoded verbatim. Always a single global prompt, even with
+                Prompt Relay.
             video_guider_params: Optional full guider params for video.
             audio_guider_params: Optional full guider params for audio.
             tap: Optional per-step instrumentation hook.
@@ -160,7 +165,9 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         # --- Text encoding (positive + negative for CFG; Prompt Relay encodes the
         # combined prompt on the positive side) ---
         encode_prompt, relay_token_ranges = self._prompt_relay_setup(prompt, prompt_relay)
-        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(encode_prompt)
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(
+            encode_prompt, negative_prompt
+        )
         num_frames = self._resolve_num_frames(
             num_frames, video_encoding=video_embeds, audio_encoding=audio_embeds, frame_rate=frame_rate
         )
@@ -310,6 +317,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         image: str | None = None,
         images=None,
         prompt_relay=None,
+        negative_prompt: str | None = None,
         generated_keyframes: int | Sequence[int] = 0,
         video_guider_params: MultiModalGuiderParams | None = None,
         audio_guider_params: MultiModalGuiderParams | None = None,
@@ -334,6 +342,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
             image=image,
             images=images,
             prompt_relay=prompt_relay,
+            negative_prompt=negative_prompt,
             generated_keyframes=generated_keyframes,
             video_guider_params=video_guider_params,
             audio_guider_params=audio_guider_params,

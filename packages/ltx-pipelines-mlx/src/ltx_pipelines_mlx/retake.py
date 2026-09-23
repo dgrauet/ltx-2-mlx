@@ -173,6 +173,7 @@ class RetakePipeline(BasePipeline):
         cfg_scale: float = DEFAULT_CFG_SCALE,
         stg_scale: float = DEFAULT_STG_SCALE,
         regenerate_audio: bool = True,
+        negative_prompt: str | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Regenerate a time segment of a video file.
 
@@ -187,6 +188,9 @@ class RetakePipeline(BasePipeline):
             stg_scale: STG guidance scale (default: 1.0, upstream LTX_2_3_PARAMS).
             regenerate_audio: If True, regenerate audio in the retake region.
                 If False, preserve original audio entirely.
+            negative_prompt: Negative prompt for CFG. ``None`` (default) uses
+                ``DEFAULT_NEGATIVE_PROMPT``; any string (including ``""``) is
+                encoded verbatim.
 
         Returns:
             Tuple of (video_latent, audio_latent).
@@ -207,6 +211,7 @@ class RetakePipeline(BasePipeline):
             cfg_scale=cfg_scale,
             stg_scale=stg_scale,
             regenerate_audio=regenerate_audio,
+            negative_prompt=negative_prompt,
         )
 
     def extend_from_video(
@@ -219,6 +224,7 @@ class RetakePipeline(BasePipeline):
         num_steps: int = 30,
         cfg_scale: float = DEFAULT_CFG_SCALE,
         stg_scale: float = DEFAULT_STG_SCALE,
+        negative_prompt: str | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Append or prepend ``extend_frames`` latent frames to a source video.
 
@@ -234,6 +240,9 @@ class RetakePipeline(BasePipeline):
             num_steps: Number of denoising steps (default: 30).
             cfg_scale: CFG guidance scale (default: 3.0).
             stg_scale: STG guidance scale (default: 1.0, upstream LTX_2_3_PARAMS).
+            negative_prompt: Negative prompt for CFG. ``None`` (default) uses
+                ``DEFAULT_NEGATIVE_PROMPT``; any string (including ``""``) is
+                encoded verbatim.
 
         Returns:
             Tuple of (extended_video_latent, extended_audio_latent).
@@ -253,6 +262,7 @@ class RetakePipeline(BasePipeline):
             num_steps=num_steps,
             cfg_scale=cfg_scale,
             stg_scale=stg_scale,
+            negative_prompt=negative_prompt,
         )
 
     def retake(
@@ -272,6 +282,7 @@ class RetakePipeline(BasePipeline):
         cfg_scale: float = DEFAULT_CFG_SCALE,
         stg_scale: float = DEFAULT_STG_SCALE,
         regenerate_audio: bool = True,
+        negative_prompt: str | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Regenerate a time segment of a video.
 
@@ -289,12 +300,17 @@ class RetakePipeline(BasePipeline):
             cfg_scale: CFG guidance scale (default: 3.0).
             stg_scale: STG guidance scale (default: 1.0, upstream LTX_2_3_PARAMS).
             regenerate_audio: If True, regenerate audio in the retake region.
+            negative_prompt: Negative prompt for CFG. ``None`` (default) uses
+                ``DEFAULT_NEGATIVE_PROMPT``; any string (including ``""``) is
+                encoded verbatim.
 
         Returns:
             Tuple of (video_latent, audio_latent).
         """
         # --- Text encoding (positive + negative for CFG) ---
-        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(
+            prompt, negative_prompt
+        )
 
         # --- Load dev transformer ---
         if self.dit is None:
@@ -417,6 +433,7 @@ class RetakePipeline(BasePipeline):
         num_steps: int = 30,
         cfg_scale: float = DEFAULT_CFG_SCALE,
         stg_scale: float = DEFAULT_STG_SCALE,
+        negative_prompt: str | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Extend a video by adding ``extend_frames`` latent frames.
 
@@ -438,11 +455,16 @@ class RetakePipeline(BasePipeline):
             num_steps: Number of denoising steps (default: 30).
             cfg_scale: CFG guidance scale (default: 3.0).
             stg_scale: STG guidance scale (default: 1.0, upstream LTX_2_3_PARAMS).
+            negative_prompt: Negative prompt for CFG. ``None`` (default) uses
+                ``DEFAULT_NEGATIVE_PROMPT``; any string (including ``""``) is
+                encoded verbatim.
 
         Returns:
             Tuple of (extended_video_latent, extended_audio_latent).
         """
-        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(prompt)
+        video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds = self._encode_text_with_negative(
+            prompt, negative_prompt
+        )
 
         if self.dit is None:
             self.dit = self._load_dev_transformer()

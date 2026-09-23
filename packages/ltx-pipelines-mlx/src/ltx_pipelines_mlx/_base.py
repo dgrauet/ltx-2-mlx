@@ -50,6 +50,27 @@ if TYPE_CHECKING:
     from ltx_pipelines_mlx.utils.stepwise import StepwisePreview
 
 
+def reject_negative_prompt(negative_prompt: str | None, pipeline_name: str) -> None:
+    """Raise if a negative prompt is passed to a pipeline without CFG.
+
+    Distilled-sampler pipelines never run an unconditional pass, so a
+    negative prompt would be silently ignored. Refuse it instead.
+
+    Args:
+        negative_prompt: The user-supplied negative prompt (``None`` = not set).
+        pipeline_name: Pipeline class name, used in the error message.
+
+    Raises:
+        ValueError: If ``negative_prompt`` is not ``None``.
+    """
+    if negative_prompt is not None:
+        raise ValueError(
+            f"negative_prompt requires a CFG pipeline; {pipeline_name} uses the distilled "
+            "sampler (no classifier-free guidance). Use a dev pipeline (one-stage, two-stage, "
+            "two-stages-hq) or drop negative_prompt."
+        )
+
+
 class BasePipeline:
     """Shared facade for all LTX-2 pipelines.
 
@@ -343,8 +364,16 @@ class BasePipeline:
         with phase("Loading text encoder (Gemma)", verbose=self.verbose):
             self.prompt_encoder.load()
 
-    def _encode_text_with_negative(self, prompt: str) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    def _encode_text_with_negative(
+        self, prompt: str, negative_prompt: str | None = None
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         """Load text encoder, encode prompt + negative prompt, materialize, free encoder.
+
+        ``negative_prompt=None`` encodes :data:`DEFAULT_NEGATIVE_PROMPT` (the
+        upstream CLI default). Any string — including ``""`` — is encoded
+        verbatim, matching upstream, where the pipelines encode whatever
+        ``negative_prompt`` they receive. The negative is always a single
+        global prompt: Prompt Relay only affects the positive side.
 
         The two encode calls are materialized **separately** (intermediate
         materialize between positive and negative) so they don't merge into
@@ -363,7 +392,8 @@ class BasePipeline:
         with phase("Encoding prompt", verbose=self.verbose):
             video_embeds, audio_embeds = self._encode_text(prompt)
             _materialize(video_embeds, audio_embeds)
-            neg_video_embeds, neg_audio_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT)
+            negative = DEFAULT_NEGATIVE_PROMPT if negative_prompt is None else negative_prompt
+            neg_video_embeds, neg_audio_embeds = self._encode_text(negative)
             _materialize(neg_video_embeds, neg_audio_embeds)
 
         # Free text encoder before loading heavy components

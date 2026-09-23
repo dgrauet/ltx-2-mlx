@@ -40,6 +40,7 @@ from ltx_core_mlx.utils.positions import (
     compute_audio_token_count,
     compute_video_positions,
 )
+from ltx_pipelines_mlx._base import reject_negative_prompt
 from ltx_pipelines_mlx.utils.helpers import generated_keyframe_conditionings
 
 from .scheduler import (
@@ -245,6 +246,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         prompt_relay=None,
         generated_keyframes: int | Sequence[int] = 0,
         enable_teacache: bool = False,
+        negative_prompt: str | None = None,
         **_unused_kwargs,
     ) -> tuple[mx.array, mx.array]:
         """Generate video using the distilled two-stage pipeline.
@@ -267,6 +269,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
                 :meth:`TI2VidTwoStagesPipeline.generate_two_stage`. Ignored on
                 LTX-2.3 packs (the 8-step distilled flow has never used
                 TeaCache); rejected on LTX-2.5 packs.
+            negative_prompt: Must stay ``None`` — the distilled flow has no CFG,
+                so a negative prompt is refused rather than silently ignored.
             **_unused_kwargs: Accepted (and ignored) for signature compatibility
                 with :meth:`TI2VidTwoStagesPipeline.generate_two_stage`. CFG / STG
                 flags don't apply to the distilled flow.
@@ -275,8 +279,10 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             Tuple of (video_latent, audio_latent) at full resolution.
 
         Raises:
-            ValueError: when ``enable_teacache`` is requested on an LTX-2.5 pack.
+            ValueError: when ``enable_teacache`` is requested on an LTX-2.5 pack,
+                or when ``negative_prompt`` is set (no CFG).
         """
+        reject_negative_prompt(negative_prompt, type(self).__name__)
         stage1, num_frames, height, width = self._stage1(
             prompt,
             height,
