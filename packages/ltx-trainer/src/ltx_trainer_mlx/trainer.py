@@ -16,6 +16,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,49 @@ from ltx_trainer_mlx.video_utils import save_video
 logger = logging.getLogger(__name__)
 
 StepCallback = Callable[[int, int, list[Path]], None]
+"""Called once per optimizer step as ``(step, total_steps, sampled_video_paths)``.
+
+``sampled_video_paths`` is the output of the most recent validation run (empty
+list if none has run yet). Exceptions raised by this callback propagate and
+abort training.
+"""
+
+
+@dataclass(frozen=True)
+class StepMetrics:
+    """Per-optimizer-step training metrics passed to a :data:`MetricsCallback`.
+
+    Attributes:
+        step: 1-based optimizer step that was just applied.
+        total_steps: Total number of optimizer steps in the run
+            (``optimization.steps``).
+        loss: Training loss of this optimizer step: the mean of the scalar
+            losses of its ``gradient_accumulation_steps`` micro-batches (equal
+            to the single micro-batch loss when accumulation is 1).
+        lr: Learning rate the optimizer actually used for this update (read
+            from the optimizer before ``update``; the scheduler only sets the
+            rate for the *next* step afterwards).
+        step_time_s: Wall-clock seconds from the first micro-batch's
+            forward/backward to the end of the optimizer update (materialized).
+            Excludes data loading of the first micro-batch, validation
+            sampling and checkpointing.
+        peak_memory_gb: ``mx.get_peak_memory()`` in GiB -- MLX's allocator
+            high-water mark since process start (or last
+            ``mx.reset_peak_memory()``). This is MLX accounting, not process
+            RSS, and can exceed physical RAM on unified-memory Macs; do not
+            present it as "RAM needed".
+    """
+
+    step: int
+    total_steps: int
+    loss: float
+    lr: float
+    step_time_s: float
+    peak_memory_gb: float | None = None
+
+
+MetricsCallback = Callable[[StepMetrics], None]
+"""Called once per optimizer step, after the update, with a :class:`StepMetrics`."""
 
 MEMORY_CHECK_INTERVAL = 200
 
@@ -57,6 +101,43 @@ def _materialize(x: Any) -> None:
     """
     # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
     mx.eval(x)
+
+
+def _lr_to_float(lr: Any) -> float:
+    """Convert an optimizer learning rate (float or scalar ``mx.array``) to ``float``."""
+    if isinstance(lr, mx.array):
+        return float(lr.item())
+    return float(lr)
+
+
+def _emit_step_metrics(callback: MetricsCallback | None, metrics: StepMetrics) -> MetricsCallback | None:
+    """Invoke a metrics callback, isolating the training run from its failures.
+
+    A metrics consumer (UI, logger) must never kill a long training run. If the
+    callback raises, a warning with the traceback is logged and the callback
+    is disabled for the rest of the run.
+
+    Args:
+        callback: The callback to invoke, or ``None``.
+        metrics: Metrics of the optimizer step that was just applied.
+
+    Returns:
+        The callback to use for subsequent steps: ``callback`` itself, or
+        ``None`` if it raised (or was ``None``).
+    """
+    if callback is None:
+        return None
+    try:
+        callback(metrics)
+    except Exception:
+        logger.warning(
+            "metrics_callback raised at step %d/%d; disabling it for the rest of the run.",
+            metrics.step,
+            metrics.total_steps,
+            exc_info=True,
+        )
+        return None
+    return callback
 
 
 class TrainingStats(BaseModel):
@@ -99,8 +180,26 @@ class LtxvTrainer:
         self,
         disable_progress_bars: bool = False,
         step_callback: StepCallback | None = None,
+        metrics_callback: MetricsCallback | None = None,
     ) -> tuple[Path, TrainingStats]:
         """Start the training process.
+
+        Args:
+            disable_progress_bars: Disable the rich progress display and log a
+                status line every 5 steps instead.
+            step_callback: Legacy per-optimizer-step hook
+                ``(step, total_steps, sampled_video_paths)``, invoked after
+                validation/checkpointing. Exceptions propagate.
+            metrics_callback: Called once per optimizer step, right after the
+                optimizer update and LR-scheduler tick (before validation and
+                checkpointing), with a :class:`StepMetrics` (loss, lr, step
+                time). Adds no GPU sync: the loop already materializes the loss
+                of every micro-batch and reads it with ``.item()`` for the
+                progress display, and the parameter update is already
+                materialized; the only extra work is a few Python float ops and
+                ``mx.get_peak_memory()`` (a counter read). If it raises, a
+                warning with traceback is logged and it is disabled for the
+                rest of the run -- training continues.
 
         Returns:
             Tuple of (saved_model_path, training_stats).
@@ -149,6 +248,9 @@ class LtxvTrainer:
 
             accum_steps = cfg.optimization.gradient_accumulation_steps
             accumulated_grads: Any = None
+            # Per-optimizer-step bookkeeping for metrics_callback.
+            accum_loss_sum = 0.0
+            opt_step_start = 0.0
 
             for step in range(cfg.optimization.steps * accum_steps):
                 # Get next batch
@@ -159,6 +261,8 @@ class LtxvTrainer:
                     batch = next(data_iter)
 
                 step_start_time = time.time()
+                if step % accum_steps == 0:  # first micro-batch of an optimizer step
+                    opt_step_start = time.perf_counter()
 
                 is_optimization_step = (step + 1) % accum_steps == 0
                 if is_optimization_step:
@@ -167,6 +271,8 @@ class LtxvTrainer:
                 # Forward + backward
                 loss, grads = loss_and_grad_fn(batch)
                 _materialize(loss)
+                loss_val = float(loss.item())
+                accum_loss_sum += loss_val
 
                 # Accumulate gradients
                 if accum_steps > 1:
@@ -186,6 +292,9 @@ class LtxvTrainer:
                         grads, grad_norm = optim.clip_grad_norm(grads, max_norm=cfg.optimization.max_grad_norm)
                         _materialize(grad_norm)
 
+                    # Learning rate actually applied by this update
+                    applied_lr = _lr_to_float(self._optimizer.learning_rate)
+
                     # Optimizer step
                     self._optimizer.update(self._transformer, grads)
                     _materialize((self._optimizer.state, self._transformer.parameters()))
@@ -194,6 +303,23 @@ class LtxvTrainer:
                 if self._lr_schedule is not None and is_optimization_step:
                     lr = self._lr_schedule(self._global_step)
                     self._optimizer.learning_rate = lr
+
+                # Per-step metrics (before validation/checkpointing so consumers
+                # see progress before a long validation pause)
+                if is_optimization_step:
+                    if metrics_callback is not None:
+                        metrics_callback = _emit_step_metrics(
+                            metrics_callback,
+                            StepMetrics(
+                                step=self._global_step,
+                                total_steps=cfg.optimization.steps,
+                                loss=accum_loss_sum / accum_steps,
+                                lr=applied_lr,
+                                step_time_s=time.perf_counter() - opt_step_start,
+                                peak_memory_gb=mx.get_peak_memory() / (1024**3),
+                            ),
+                        )
+                    accum_loss_sum = 0.0
 
                 # Validation
                 if (
@@ -220,12 +346,9 @@ class LtxvTrainer:
                     step_callback(self._global_step, cfg.optimization.steps, sampled_videos_paths or [])
 
                 # Update progress and log metrics
-                current_lr = self._optimizer.learning_rate
-                if isinstance(current_lr, mx.array):
-                    current_lr = float(current_lr.item())
+                current_lr = _lr_to_float(self._optimizer.learning_rate)
                 step_time = (time.time() - step_start_time) * cfg.optimization.gradient_accumulation_steps
 
-                loss_val = float(loss.item())
                 progress.update_training(
                     loss=loss_val,
                     lr=current_lr,
