@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from ltx_core_mlx.model.video_vae.diffusion_decoder import load_diffusion_decoder
+from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
 from tests.conftest import LTX25_Q8_DIR
 
 NPZ = Path(os.environ.get("DIFFVAE_PARITY_NPZ", "/tmp/diffvae_parity.npz"))
@@ -85,3 +86,54 @@ def test_diffusion_block_boundary(golden, run, tag, block):
 def test_pixels(golden, run, tag):
     """Final cropped pixels in ``[-1, 1]``."""
     _assert_close(run[tag]["out.pixels"], golden[f"{tag}.out.pixels"], DIFF_TOL, f"{tag}.out.pixels")
+
+
+@pytest.fixture(scope="module")
+def run_kf(golden, decoder):
+    results = {}
+    for tag in ("a", "b"):
+        if f"{tag}.k.in.latent" not in golden:
+            continue
+        taps = {}
+        kf = DecodeKeyframes(
+            mx.array(golden[f"{tag}.k.in.kf_latents"]), tuple(int(i) for i in golden[f"{tag}.k.in.kf_indices"])
+        )
+        pixels = decoder.decode(
+            mx.array(golden[f"{tag}.k.in.latent"]),
+            noise=mx.array(golden[f"{tag}.k.in.noise"]),
+            keyframes=kf,
+            keyframe_noise=mx.array(golden[f"{tag}.k.in.kf_noise"]),
+            tap=lambda name, value, sink=taps: sink.__setitem__(name, value),
+        )
+        mx.eval(pixels, *taps.values())
+        results[tag] = {k: np.array(v, copy=False) for k, v in taps.items()}
+        results[tag]["out.pixels"] = np.array(pixels, copy=False)
+    if not results:
+        pytest.skip("npz has no keyframe goldens; re-run parity_diffvae_reference.py")
+    return results
+
+
+@pytest.mark.parametrize("tag", ["a", "b"])
+@pytest.mark.parametrize("stage", [1, 2, 3, 4])
+@pytest.mark.parametrize("stream", ["out", "kf"])
+def test_keyframe_det_stage_boundary(golden, run_kf, tag, stage, stream):
+    _assert_close(
+        run_kf[tag][f"s{stage}.{stream}"], golden[f"{tag}.k.s{stage}.{stream}"], DET_TOL, f"{tag}.k.s{stage}.{stream}"
+    )
+
+
+@pytest.mark.parametrize("tag", ["a", "b"])
+@pytest.mark.parametrize("block", range(8))
+@pytest.mark.parametrize("stream", ["out", "kf"])
+def test_keyframe_diffusion_block_boundary(golden, run_kf, tag, block, stream):
+    _assert_close(
+        run_kf[tag][f"s5.b{block}.{stream}"],
+        golden[f"{tag}.k.s5.b{block}.{stream}"],
+        DIFF_TOL,
+        f"{tag}.k.s5.b{block}.{stream}",
+    )
+
+
+@pytest.mark.parametrize("tag", ["a", "b"])
+def test_keyframe_pixels(golden, run_kf, tag):
+    _assert_close(run_kf[tag]["out.pixels"], golden[f"{tag}.k.out.pixels"], DIFF_TOL, f"{tag}.k.out.pixels")

@@ -153,6 +153,66 @@ def main() -> None:
 
     for hook in hooks:
         hook.remove()
+
+    from ltx_core.model.video_vae.keyframes import DecodeKeyframes as TorchDecodeKeyframes
+
+    def wrap_kf_block(block, name):
+        original = block.forward_with_keyframes
+
+        def wrapped(*a, _orig=original, _name=name, **kw):
+            x, stream = _orig(*a, **kw)
+            out[_name + ".out"] = x.detach().float().clone().numpy()
+            out[_name + ".kf"] = stream.x.detach().float().clone().numpy()
+            return x, stream
+
+        block.forward_with_keyframes = wrapped
+
+    def wrap_kf_diff(block, name):
+        original = block.forward_x_ctx_with_keyframes
+
+        def wrapped(*a, _orig=original, _name=name, **kw):
+            x, kx = _orig(*a, **kw)
+            out[_name + ".out"] = x.detach().float().clone().numpy()
+            out[_name + ".kf"] = kx.detach().float().clone().numpy()
+            return x, kx
+
+        block.forward_x_ctx_with_keyframes = wrapped
+
+    for s, stage in enumerate(dec.det_stages):
+        wrap_kf_block(stage[-1], f"s{s + 1}")
+    for i, block in enumerate(dec.diff_blocks):
+        wrap_kf_diff(block, f"s5.b{i}")
+
+    torch.manual_seed(1)
+    for tag, shape, indices in (("a", (1, 128, 3, 7, 7), (5, 12)), ("b", (1, 128, 2, 5, 9), (3, 7))):
+        latent = torch.randn(shape)
+        kf_latents = torch.randn((1, 128, len(indices), shape[3], shape[4]))
+        kf = TorchDecodeKeyframes(latents=kf_latents, pixel_frame_indices=torch.tensor(indices, dtype=torch.int64))
+        real_randn = torch.randn
+        draws: list[torch.Tensor] = []
+
+        def fake_randn(*size, _real=real_randn, _draws=draws, **kwargs):
+            drawn = _real(*size, **kwargs)
+            _draws.append(drawn.clone())
+            return drawn
+
+        torch.randn = fake_randn
+        try:
+            with torch.no_grad():
+                pixels = next(dec._decode_pixels_with_keyframes(latent, kf, None, torch.Generator().manual_seed(1)))
+        finally:
+            torch.randn = real_randn
+        assert len(draws) == 2, [d.shape for d in draws]  # video canvas noise, then the plane noise
+        out[f"{tag}.k.in.latent"] = latent.numpy()
+        out[f"{tag}.k.in.kf_latents"] = kf_latents.numpy()
+        out[f"{tag}.k.in.kf_indices"] = np.array(indices, dtype=np.int64)
+        out[f"{tag}.k.in.noise"] = draws[0].float().numpy()
+        out[f"{tag}.k.in.kf_noise"] = draws[1].float().numpy()
+        out[f"{tag}.k.out.pixels"] = pixels.float().numpy()
+        for key in list(out):
+            if key.startswith("s") and not key.startswith(f"{tag}."):
+                out[f"{tag}.k.{key}"] = out.pop(key)
+
     np.savez(args.out, **out)
     print("wrote", args.out, len(out), "arrays")
     for key in sorted(out):
