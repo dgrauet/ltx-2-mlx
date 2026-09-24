@@ -92,10 +92,8 @@ def _numpy_joint(q, k, v, kq, kk, kv, times, valid, kernel):
     _, T, H, W, NH, D = q.shape
     P = kq.shape[1]
     kt, kh, kw = kernel
-    win = lambda length, kk_, i: (  # noqa: E731
-        window_start(length, kk_, i),
-        window_start(length, kk_, i) + min(kk_, length),
-    )
+    # upstream joint_eager: centered window [i - k//2, i - k//2 + k) clipped to the volume (not shifted inward)
+    win = lambda length, kk_, i: (max(i - kk_ // 2, 0), min(i - kk_ // 2 + kk_, length))  # noqa: E731
     vslots = video_keyframe_slots(times, valid, T)
     kslots = keyframe_video_slots(times, valid, T)
 
@@ -164,12 +162,38 @@ def test_joint_na3d_matches_the_brute_force_oracles(shape, planes, kernel, times
             assert np.array(mx.abs(ko[0, p_]).max()) == 0.0
 
 
-def test_joint_na3d_video_reduces_to_na3d_when_no_plane_is_valid():
+def test_joint_na3d_video_is_centered_clipped_na_when_no_plane_is_valid():
     q, k, v = (mx.random.normal((1, 4, 5, 5, 2, 4), key=mx.random.key(i)) for i in range(3))
     kq, kk, kv = (mx.random.normal((1, 2, 5, 5, 2, 4), key=mx.random.key(10 + i)) for i in range(3))
-    vo, ko = joint_na3d(q, k, v, kq, kk, kv, mx.array([1.0, 2.0]), mx.array([False, False]), (3, 3, 3))
-    assert np.allclose(np.array(vo), np.array(na3d(q, k, v, (3, 3, 3))), atol=1e-6)
+    t, va = mx.array([1.0, 2.0]), mx.array([False, False])
+    vo, ko = joint_na3d(q, k, v, kq, kk, kv, t, va, (3, 3, 3))
+    vr, _ = joint_na3d_reference(q, k, v, kq, kk, kv, t, va, (3, 3, 3))
+    vn, _ = _numpy_joint(q, k, v, kq, kk, kv, t, va, (3, 3, 3))
+    assert np.allclose(np.array(vo), np.array(vr), atol=1e-5, rtol=1e-5)
+    assert np.allclose(np.array(vo), vn, atol=1e-5, rtol=1e-5)
     assert np.array(mx.abs(ko).max()) == 0.0
+
+
+@pytest.mark.parametrize("impl", [joint_na3d, joint_na3d_reference])
+def test_joint_na3d_window_is_centered_and_clipped_at_the_border(impl):
+    # W = 4, kw = 3, zero queries -> uniform softmax over the visible keys; values are one-hot
+    # (video key w -> channel w, plane key w -> channel 4 + w), so the output lists the visible keys.
+    # Upstream clips the centered window: index 0 sees {0, 1}, not natten's shifted {0, 1, 2}.
+    eye = mx.eye(8)
+    q = mx.zeros((1, 1, 1, 4, 1, 8))
+    v = eye[:4].reshape(1, 1, 1, 4, 1, 8)
+    kv = eye[4:].reshape(1, 1, 1, 4, 1, 8)
+    vo, ko = impl(q, q, v, q, q, kv, mx.array([0.0]), mx.array([True]), (1, 1, 3))
+    want = np.array(
+        [
+            [0.25, 0.25, 0, 0, 0.25, 0.25, 0, 0],
+            [1 / 6, 1 / 6, 1 / 6, 0, 1 / 6, 1 / 6, 1 / 6, 0],
+            [0, 1 / 6, 1 / 6, 1 / 6, 0, 1 / 6, 1 / 6, 1 / 6],
+            [0, 0, 0.25, 0.25, 0, 0, 0.25, 0.25],
+        ]
+    )
+    for got in (vo, ko):
+        assert np.allclose(np.array(got).reshape(4, 8), want, atol=1e-6)
 
 
 def test_joint_na3d_is_run_to_run_deterministic_on_non_divisible_axes():

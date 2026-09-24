@@ -179,6 +179,21 @@ def na3d(
     return out
 
 
+def _centered_window(length: int, kernel: int, index: int) -> tuple[int, int]:
+    """Upstream ``joint_eager`` window on one axis: ``[i - k//2, i - k//2 + k)`` clipped to ``[0, length)``.
+
+    Unlike :func:`window_start` (natten's shift-inward rule) a query near a border sees fewer keys.
+    """
+    lo = index - kernel // 2
+    return max(lo, 0), min(lo + kernel, length)
+
+
+def _centered_mask(si: mx.array, qi: mx.array, kernel: int) -> mx.array:
+    """``(len(qi), len(si))`` mask of :func:`_centered_window` (``si`` already lies inside the axis)."""
+    lo = qi - kernel // 2
+    return (si[None, :] >= lo[:, None]) & (si[None, :] < (lo + kernel)[:, None])
+
+
 def joint_na3d_reference(
     q: mx.array,
     k: mx.array,
@@ -196,7 +211,6 @@ def joint_na3d_reference(
     times, valid = np.array(keyframe_times, dtype=np.float32), np.array(keyframe_valid, dtype=bool)
     vslots, kslots = video_keyframe_slots(times, valid, t), keyframe_video_slots(times, valid, t)
     lengths = (t, h, w)
-    k_eff = [min(kk_, ll) for kk_, ll in zip(kernel, lengths, strict=True)]
 
     def attend(query: mx.array, keys: mx.array, vals: mx.array) -> mx.array:
         scores = mx.einsum("nd,knd->nk", query.astype(mx.float32), keys.astype(mx.float32))
@@ -204,26 +218,28 @@ def joint_na3d_reference(
 
     vrows = []
     for ti, hi, wi in itertools.product(range(t), range(h), range(w)):
-        st, sh, sw = (window_start(ll, kk_, i) for ll, kk_, i in zip(lengths, kernel, (ti, hi, wi), strict=True))
-        keys = [k[0, st : st + k_eff[0], sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd)]
-        vals = [v[0, st : st + k_eff[0], sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd)]
+        (t0, t1), (h0, h1), (w0, w1) = (
+            _centered_window(ll, kk_, i) for ll, kk_, i in zip(lengths, kernel, (ti, hi, wi), strict=True)
+        )
+        keys = [k[0, t0:t1, h0:h1, w0:w1].reshape(-1, heads, hd)]
+        vals = [v[0, t0:t1, h0:h1, w0:w1].reshape(-1, heads, hd)]
         for s in vslots[ti]:
             if s >= 0:
-                keys.append(kk[0, s, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd))
-                vals.append(kv[0, s, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd))
+                keys.append(kk[0, s, h0:h1, w0:w1].reshape(-1, heads, hd))
+                vals.append(kv[0, s, h0:h1, w0:w1].reshape(-1, heads, hd))
         vrows.append(attend(q[0, ti, hi, wi], mx.concatenate(keys), mx.concatenate(vals)))
     krows = []
     for pi, hi, wi in itertools.product(range(p), range(h), range(w)):
         if not valid[pi]:
             krows.append(mx.zeros((heads, hd)))
             continue
-        sh, sw = window_start(h, kernel[1], hi), window_start(w, kernel[2], wi)
-        keys = [kk[0, pi, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd)]
-        vals = [kv[0, pi, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd)]
+        (h0, h1), (w0, w1) = _centered_window(h, kernel[1], hi), _centered_window(w, kernel[2], wi)
+        keys = [kk[0, pi, h0:h1, w0:w1].reshape(-1, heads, hd)]
+        vals = [kv[0, pi, h0:h1, w0:w1].reshape(-1, heads, hd)]
         for s in kslots[pi]:
             if s >= 0:
-                keys.append(k[0, s, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd))
-                vals.append(v[0, s, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd))
+                keys.append(k[0, s, h0:h1, w0:w1].reshape(-1, heads, hd))
+                vals.append(v[0, s, h0:h1, w0:w1].reshape(-1, heads, hd))
         krows.append(attend(kq[0, pi, hi, wi], mx.concatenate(keys), mx.concatenate(vals)))
     return (
         mx.stack(vrows, axis=0).reshape(q.shape).astype(q.dtype),
@@ -242,13 +258,15 @@ def _video_queries_with_planes(
     block: Kernel,
     max_blocks: int,
 ) -> mx.array:
-    """Video half of :func:`joint_na3d`: ``na3d`` blocks whose key slab is extended by the planes' spatial slabs."""
+    """Video half of :func:`joint_na3d`: blocks whose key slab is extended by the planes' spatial slabs.
+
+    Reuses ``na3d``'s block / slab plan, but masks each query to upstream's centered, volume-clipped window
+    (:func:`_centered_window`); that window is a subset of natten's shifted one, so the slabs still cover it.
+    """
     _, t, h, w, heads, head_dim = q.shape
     num_slots = vslots.shape[1]
     lengths = (t, h, w)
     plans = [_axis_plan(ll, kk_, bb) for ll, kk_, bb in zip(lengths, kernel, block, strict=True)]
-    starts = [window_starts(ll, kk_) for ll, kk_ in zip(lengths, kernel, strict=True)]
-    k_eff = [min(kk_, ll) for kk_, ll in zip(kernel, lengths, strict=True)]
     out = mx.zeros_like(q)
     slot_np = np.asarray(vslots, dtype=np.int64)
 
@@ -263,10 +281,9 @@ def _video_queries_with_planes(
         for q0, s0 in zip(q0s, s0s, strict=True):
             qi = mx.minimum(mx.arange(bsize) + q0, ll - 1)
             si = mx.arange(slab) + s0
-            ws = starts[axis][qi]
             qis.append(qi)
             sis.append(si)
-            masks_axis.append((si[None, :] >= ws[:, None]) & (si[None, :] < (ws + k_eff[axis])[:, None]))
+            masks_axis.append(_centered_mask(si, qi, kernel[axis]))
         axis_qi.append(qis)
         axis_si.append(sis)
         axis_mask.append(masks_axis)
@@ -340,20 +357,18 @@ def _plane_queries_with_frames(
 ) -> mx.array:
     """Plane half of :func:`joint_na3d`: each plane attends to its own spatial window plus the same window on its slot frames.
 
-    Runs ``na3d`` on the synthetic volume ``[plane, frame_a, frame_b]`` with a temporal kernel equal to its
-    length (every entry in-window) and keeps the plane's row.
+    The valid planes are the "video" of :func:`_video_queries_with_planes` with a temporal kernel of 1 (each plane
+    only sees itself on that axis) and the video frames as its "planes", so both halves share one windowing rule.
     """
     out = mx.zeros_like(kq)
-    for p in range(kq.shape[1]):
-        if not valid[p]:
-            continue
-        frames = [int(s) for s in kslots[p] if s >= 0]
-        keys = mx.concatenate([kk[:, p : p + 1], *[k[:, f : f + 1] for f in frames]], axis=1)
-        vals = mx.concatenate([kv[:, p : p + 1], *[v[:, f : f + 1] for f in frames]], axis=1)
-        n = keys.shape[1]
-        queries = mx.repeat(kq[:, p : p + 1], n, axis=1)
-        o = na3d(queries, keys, vals, (n, kernel[1], kernel[2]), block=(n, block[1], block[2]), max_blocks=max_blocks)
-        out[:, p] = o[:, 0]
+    rows = np.flatnonzero(valid)
+    if rows.size == 0:
+        return out
+    idx = mx.array(rows)
+    o = _video_queries_with_planes(
+        kq[:, idx], kk[:, idx], kv[:, idx], k, v, np.asarray(kslots)[rows], (1, kernel[1], kernel[2]), block, max_blocks
+    )
+    out[:, idx] = o
     mx.eval(out)
     return out
 
@@ -373,7 +388,8 @@ def joint_na3d(
 ) -> tuple[mx.array, mx.array]:
     """Joint video / keyframe-plane neighborhood attention (upstream ``joint_eager.joint_na3d``).
 
-    Video queries attend to their ``na3d`` window plus the same spatial window on the ``KEYFRAME_CONTEXT_SLOTS``
+    Every window is upstream's centered one clipped to the volume (:func:`_centered_window`), not ``na3d``'s
+    shift-inward window. Video queries attend to their 3-D window plus the same spatial window on the ``KEYFRAME_CONTEXT_SLOTS``
     nearest planes (ranked ``(|dt|, index)``, no temporal-kernel gating). Plane queries attend to the window on
     their own plane plus the same window on their nearest video frames. Invalid planes are excluded everywhere
     and output zeros. ``q`` / ``kq`` are pre-scaled; scale 1.0.
