@@ -518,8 +518,8 @@ def auto_tile_config(
 
     ``keyframe_planes`` planes are charged at the video's per-token cost (upstream
     ``chunked_eager`` uses the same coefficient); every tile is assumed to carry all
-    planes, which is an upper bound (the planes actually appear in at most one temporal
-    tile each).
+    planes, which is an upper bound (a tile keeps only the planes inside it plus the nearest
+    one on each side).
 
     Raises:
         ValueError: No tile fits (names ``LTX2_VAE_DECODE_BUDGET_GB``).

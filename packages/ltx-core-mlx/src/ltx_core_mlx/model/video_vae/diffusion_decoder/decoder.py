@@ -441,7 +441,9 @@ class NADiffusionDecoder(nn.Module):
         ``tap`` is the parity instrumentation hook; see :meth:`forward_stages_1_to_4` and
         :meth:`forward_stage_5` for the names it is called with. When ``keyframes`` is given, the
         dual-stream keyframe-aware path runs instead (see :meth:`forward_stages_1_to_3_with_keyframes`
-        onwards); ``keyframes=None`` is the plain path above and stays byte-identical.
+        onwards); ``keyframes=None`` is the plain path above and stays byte-identical. This keeps
+        every plane, whereas :meth:`tiled_decode` keeps each tile's planes plus one neighbour per
+        side; the two agree whenever at most one plane lies outside the clip on each side.
         """
         if latent.shape[0] != 1:
             raise ValueError("NADiffusionDecoder decodes one video at a time (batch size 1)")

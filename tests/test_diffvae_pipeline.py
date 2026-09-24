@@ -25,6 +25,15 @@ def test_diffusion_choice_requires_the_av_weights(tmp_path):
         vd.load()
 
 
+def test_forced_single_tile_guard_counts_keyframe_planes():
+    from ltx_core_mlx.model.video_vae.diffusion_decoder.config import LTX_2_5_DIFFUSION_DECODER
+
+    shape = (1, 128, 7, 16, 24)
+    plain = B._DiffusionVideoDecoder._stage5_tokens_for_config(LTX_2_5_DIFFUSION_DECODER, shape)
+    with_planes = B._DiffusionVideoDecoder._stage5_tokens_for_config(LTX_2_5_DIFFUSION_DECODER, shape, 2)
+    assert plain == 49 * 128 * 192 and with_planes == (49 + 2) * 128 * 192
+
+
 def test_stage5_token_estimate_and_guard(monkeypatch):
     # 512x768x49 -> latent (7, 16, 24) -> stage-5 grid (8*7-7=49) x (16*8=128) x (24*8=192) = 1_204_224
     assert B._DiffusionVideoDecoder.estimate_stage5_tokens((1, 128, 7, 16, 24)) == 49 * 128 * 192

@@ -333,13 +333,18 @@ class _DiffusionVideoDecoder:
         self.verbose = verbose
 
     @staticmethod
-    def _stage5_tokens_for_config(cfg: DiffusionDecoderConfig, latent_shape: tuple[int, ...]) -> int:
-        """Stage-5 token count of a ``(B, C, F, H, W)`` latent after the size floor, for ``cfg``'s geometry."""
+    def _stage5_tokens_for_config(
+        cfg: DiffusionDecoderConfig, latent_shape: tuple[int, ...], keyframe_planes: int = 0
+    ) -> int:
+        """Stage-5 token count of a ``(B, C, F, H, W)`` latent after the size floor, for ``cfg``'s geometry.
+
+        ``keyframe_planes`` adds one pixel frame's worth of tokens per keyframe plane.
+        """
         geometry = DiffusionTileGeometry.from_config(cfg)
         fhw = padded_latent_fhw(cfg, tuple(latent_shape[2:]))  # type: ignore[arg-type]
         f_px, h_px, w_px = output_fhw(geometry, fhw)
         p = geometry.patch_size
-        return f_px * (h_px // p) * (w_px // p)
+        return (f_px + keyframe_planes) * (h_px // p) * (w_px // p)
 
     @staticmethod
     def estimate_stage5_tokens(latent_shape: tuple[int, ...]) -> int:
@@ -380,7 +385,7 @@ class _DiffusionVideoDecoder:
                 keyframe_planes=keyframe_planes,
             )
         if self.tile_override == (0, 0, 0):
-            tokens = self._stage5_tokens_for_config(self._decoder.config, latent_shape)
+            tokens = self._stage5_tokens_for_config(self._decoder.config, latent_shape, keyframe_planes)
             self._raise_if_over_guard(tokens, diffvae_max_tokens())
             return None
         return DiffusionTileConfig.from_pixels(geometry, *self.tile_override)

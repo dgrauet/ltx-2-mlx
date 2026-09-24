@@ -74,6 +74,7 @@ class DecodeKeyframes:
 
     @property
     def num_planes(self) -> int:
+        """Number of keyframe planes ``P``."""
         return int(self.latents.shape[2])
 
 
@@ -108,10 +109,12 @@ class KeyframeStream:
 
     @property
     def num_planes(self) -> int:
+        """Number of keyframe planes ``P``."""
         return int(self.x.shape[1])
 
 
 def _stage_times_np(pixel_frame_indices: Sequence[int], remaining_time_stride: int) -> np.ndarray:
+    """Host-side :func:`keyframe_stage_times` (float32 numpy)."""
     if remaining_time_stride < 1:
         raise ValueError(f"remaining_time_stride must be positive, got {remaining_time_stride}")
     frames = np.asarray(pixel_frame_indices, dtype=np.float32)

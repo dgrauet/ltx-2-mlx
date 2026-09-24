@@ -1023,7 +1023,7 @@ compression where motion is fast. Cost: one latent frame of tokens per slot.
 Stage 2 needs no slots (the effect is baked into the stage-1 latent). The
 denoised slot content is extracted as ``(B, C, K, H, W)`` into
 ``BasePipeline.generated_keyframes`` before the conditioning tokens are cut; the
-standard pipelines don't decode it (DFR will).
+standard pipelines don't decode it (DFR does, with `--video-decoder diffusion`).
 
 **Keyframe marker on every 2.5 render.** Upstream marks the target's *first
 latent frame* in ``LatentState.keyframes_mask`` unconditionally (the causal
