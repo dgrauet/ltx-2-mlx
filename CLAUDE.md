@@ -1122,9 +1122,17 @@ requested duration in audio tokens), matching upstream. Under `--low-ram`, stage
 time also includes the per-bind detailing LoRA fusion (dequantize -> fuse -> requantize on every
 block bind of every step).
 
-**Not ported yet:** temporal rounds (`TemporalTilePlan`, sub-project 4c), the spatial epilogue,
-and the keyframe-aware decode (the stage-2 slot latents are captured in
-`BasePipeline.generated_keyframes` for a future decode path but not decoded here).
+**Keyframe-aware decode.** `_decode_and_save_video` (overridden on `DFRPipeline`) builds a
+`DecodeKeyframes` from the stage-2 slot latents (`BasePipeline.generated_keyframes`) and their
+canvas pixel-frame positions (`decode_keyframes_from_slots`, `dfr.py`), dropping any slot whose
+position falls outside the trimmed clip (the canvas padding). With `--video-decoder diffusion`
+the slots are decoded as a second stream — joint neighborhood attention with the video stream, 2
+nearest planes per video frame (and vice versa), plane noise seeded from the tile key's split —
+and a tiled decode selects each tile's planes (inside the tile plus one neighbour on each side).
+The conv decoder ignores the slots with a warning. Keyframe-aware renders are not
+pixel-comparable to a plain render at the same seed (the extra stream changes every activation).
+
+**Not ported yet:** temporal rounds (`TemporalTilePlan`, sub-project 4c) and the spatial epilogue.
 
 **Validated** (Task 6 e2e, M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5):
 `--distilled` at 512×768×49 is byte-identical (sha256) to `main` at 194 s, confirming the
@@ -1158,7 +1166,7 @@ dtype on entry (like the conv decoder) and the same decode peaks at ~12 GB (5.8 
 | `--enable-teacache` | raises `ValueError` — 2.3 polynomial isn't calibrated for 2.5 |
 | Modality tiling, Prompt Relay | validated on 2.3 only |
 | Generated keyframe slots (`--num-generated-keyframes N`) | supported on `generate` (all four modes, stage 1 only); refused up front on 2.3 packs (no `use_keyframes_abs_pos_embedding`) |
-| DFR (`DFRPipeline`) | base path shipped as `generate --dfr` (spatial detailing with the official 2.5 detailing IC-LoRA); temporal rounds / spatial epilogue / keyframe-aware decode pending |
+| DFR (`DFRPipeline`) | base path shipped as `generate --dfr` (spatial detailing with the official 2.5 detailing IC-LoRA + keyframe-aware decode on `--video-decoder diffusion`); temporal rounds / spatial epilogue pending |
 | Diffusion video decoder | opt-in `--video-decoder diffusion` (experimental; tiled automatically above the decode budget, `--diffvae-tile` override); conv remains default |
 
 The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once
@@ -1217,7 +1225,13 @@ caller's latent has and restores that dtype on the output, mirroring the conv de
 double the peak. Decoder noise seed = `seed + 30000`; not
 bit-comparable with torch's generator. Parity: per-stage torch goldens
 (`tests/parity_diffvae_reference.py`, disposable env) at 1e-4 (det stages) / 1e-3 (diffusion).
-Conv stays the default. Key files: `model/video_vae/diffusion_decoder/`, `utils/blocks.py::_DiffusionVideoDecoder`.
+Conv stays the default. `decode`/`tiled_decode` accept an optional `keyframes: DecodeKeyframes`
+(DFR's stage-2 slots, threaded from `BasePipeline._decode_and_save_video`): the keyframe planes
+are denormalised, offset by the decoder's own `type_emb` (distinguishes plane tokens from video
+tokens in the shared weights) and projected through the same `conv_in`, then carried as a second
+stream through stages 1–5 via `forward_*_with_keyframes`, mixing with the video stream only
+inside `joint_na3d`'s softmax (`diffusion_decoder/keyframes.py`). `keyframes=None` is the exact
+no-op plain path above. Key files: `model/video_vae/diffusion_decoder/`, `utils/blocks.py::_DiffusionVideoDecoder`.
 
 E2E validated on the 2.5 q8 pack (M2 Pro 32 GB, `--low-ram`, distilled two-stage, seed 5).
 At 384×576×25: conv 93.4s total (2.6s decode phase, ~11.8 GB peak RSS) vs diffusion 129.4s total

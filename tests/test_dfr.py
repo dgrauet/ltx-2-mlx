@@ -13,8 +13,14 @@ import ltx_pipelines_mlx.dfr as dfr_mod
 import ltx_pipelines_mlx.distilled as distilled_mod
 from ltx_core_mlx.conditioning.types.keyframe_slots import VideoGeneratedKeyframeSlots
 from ltx_core_mlx.conditioning.types.reference_video_cond import VideoConditionByReferenceLatent
+from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
 from ltx_pipelines_mlx.cli import _build_parser, _cmd_generate
-from ltx_pipelines_mlx.dfr import DEFAULT_DETAILING_LORA, DETAILING_LORA_STRENGTH, DFRPipeline
+from ltx_pipelines_mlx.dfr import (
+    DEFAULT_DETAILING_LORA,
+    DETAILING_LORA_STRENGTH,
+    DFRPipeline,
+    decode_keyframes_from_slots,
+)
 from ltx_pipelines_mlx.scheduler import LTX_2_5_STAGE_2_DISTILLED_SIGMAS
 from tests.test_ltx25_distilled import _fake_upsampler, _FakeVaeEncoder, _LoopSpy
 
@@ -310,3 +316,40 @@ def test_cli_dfr_rejects_incompatible_flags(tmp_path, bad):
 def test_cli_detailing_lora_requires_dfr(tmp_path):
     with pytest.raises(SystemExit):
         _cmd_generate(_build_parser().parse_args(_argv(tmp_path, "--distilled", "--detailing-lora", "/x.safetensors")))
+
+
+def test_decode_keyframes_from_slots_filters_the_canvas_padding(capsys):
+    slots = mx.random.normal((1, 128, 3, 4, 4))
+    kf = decode_keyframes_from_slots(slots, [24, 48, 72], num_frames=49, verbose=True)
+    assert (
+        isinstance(kf, DecodeKeyframes) and kf.pixel_frame_indices == (24, 48) and kf.latents.shape == (1, 128, 2, 4, 4)
+    )
+    assert mx.array_equal(kf.latents[:, :, 1], slots[:, :, 1]) and kf.clip_start_frame == 0
+    assert "dropping 1 keyframe slot" in capsys.readouterr().out
+    assert decode_keyframes_from_slots(slots, [72, 96, 120], num_frames=49) is None
+    assert decode_keyframes_from_slots(None, [], num_frames=49) is None
+    with pytest.raises(ValueError, match="slot count"):
+        decode_keyframes_from_slots(slots, [24], num_frames=49)
+
+
+def test_dfr_decode_passes_the_trimmed_slots_as_keyframes(tmp_path, monkeypatch):
+    pipe, *_ = _make(tmp_path, monkeypatch)
+    _run(pipe, num_frames=49)  # resolve_canvas(49): 48 = 2 x 24 -> canvas 49, slots at [24, 48], both < 49
+    seen = {}
+    monkeypatch.setattr(
+        distilled_mod.DistilledPipeline,
+        "_decode_and_save_video",
+        lambda self, v, a, out, *, frame_rate, seed=0, keyframes=None: seen.update(keyframes=keyframes) or out,
+    )
+    video = mx.zeros((1, 128, 7, 8, 8))  # 49 pixel frames
+    pipe._decode_and_save_video(video, mx.zeros((1, 8, 4, 16)), str(tmp_path / "o.mp4"), frame_rate=24.0, seed=1)
+    kf = seen["keyframes"]
+    assert isinstance(kf, DecodeKeyframes)
+    assert all(0 <= i < 49 for i in kf.pixel_frame_indices)
+    assert kf.num_planes == len(kf.pixel_frame_indices) == sum(1 for p in pipe.generated_keyframe_positions if p < 49)
+    # an explicit keyframes= wins over the pipeline's own slots
+    explicit = DecodeKeyframes(mx.zeros((1, 128, 1, 8, 8)), (3,))
+    pipe._decode_and_save_video(
+        video, mx.zeros((1, 8, 4, 16)), str(tmp_path / "o.mp4"), frame_rate=24.0, keyframes=explicit
+    )
+    assert seen["keyframes"] is explicit

@@ -4,8 +4,10 @@ Stage 1 (half resolution, distilled, ancestral on 2.5) runs on a canvas padded t
 segments with one generated keyframe slot per segment boundary. Stage 2 (full resolution,
 deterministic) runs with the detailing IC-LoRA attached at strength 0.5, conditioned on the
 stage-1 latent as an IC-LoRA reference and on the spatially upsampled stage-1 slots. This port
-covers ``spatial_upscalings=1`` / ``temporal_upscalings=0`` and decodes without keyframes; the
-keyframe-aware decode, the temporal rounds and the spatial epilogue are follow-ups.
+covers ``spatial_upscalings=1`` / ``temporal_upscalings=0``. The stage-2 keyframe slot latents
+are handed to the decoder as decoder keyframes (keyframe-aware decode on
+``--video-decoder diffusion``; the conv decoder ignores them with a warning). The temporal
+rounds and the spatial epilogue are follow-ups.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from ltx_core_mlx.loader import (
     apply_loras,
 )
 from ltx_core_mlx.loader.block_streaming import BlockLoraSource
+from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_token_count
 from ltx_core_mlx.utils.weights import apply_quantization
@@ -278,7 +281,7 @@ class DFRPipeline(DistilledPipeline):
             extra_conditionings=extra,
         )
         # Stage 2 slots are kept in self.generated_keyframes (overwritten by _stage2's
-        # extraction hook) for the keyframe-aware decode (follow-up 4b).
+        # extraction hook) for _decode_and_save_video to hand to the decoder as keyframes.
 
         # Trim the canvas padding: video to the requested latent frames, audio (stage 1's, as
         # upstream ships it) to the requested duration in audio tokens.
@@ -288,5 +291,59 @@ class DFRPipeline(DistilledPipeline):
         audio_latent = audio_latent[:, :, : compute_audio_token_count(requested, frame_rate=frame_rate)]
         return video_latent, audio_latent
 
+    def _decode_and_save_video(
+        self,
+        video_latent: mx.array,
+        audio_latent: mx.array,
+        output_path: str,
+        *,
+        frame_rate: float,
+        seed: int = 0,
+        keyframes: DecodeKeyframes | None = None,
+    ) -> str:
+        """Decode with the stage-2 keyframe slots as decoder keyframes (upstream's final ``decode_keyframes_from_slots`` handoff).
 
-__all__ = ["DEFAULT_DETAILING_LORA", "DETAILING_LORA_STRENGTH", "DFRPipeline"]
+        The conv decoder ignores them with a warning; ``--video-decoder diffusion`` runs the keyframe-aware decode.
+        """
+        if keyframes is None:
+            num_frames = (video_latent.shape[2] - 1) * _TEMPORAL_SCALE + 1
+            keyframes = decode_keyframes_from_slots(
+                self.generated_keyframes, self.generated_keyframe_positions, num_frames, verbose=self.verbose
+            )
+        return super()._decode_and_save_video(
+            video_latent, audio_latent, output_path, frame_rate=frame_rate, seed=seed, keyframes=keyframes
+        )
+
+
+def decode_keyframes_from_slots(
+    slots: mx.array | None, positions: Sequence[int], num_frames: int, *, verbose: bool = False
+) -> DecodeKeyframes | None:
+    """Build the decoder's keyframe input from the stage-2 slot latents (upstream ``helpers.decode_keyframes_from_slots``).
+
+    Slots at pixel frames outside ``[0, num_frames)`` (the canvas padding) are dropped; ``None`` when
+    nothing is left.
+
+    Args:
+        slots: ``(B, C, K, H, W)`` generated keyframe slot latents (normalised), or ``None``.
+        positions: Canvas pixel-frame index of each slot.
+        num_frames: Pixel frames of the trimmed video latent.
+        verbose: Print the dropped slots to stdout.
+    """
+    if slots is None:
+        return None
+    if slots.shape[2] != len(positions):
+        raise ValueError(f"slot count {slots.shape[2]} != len(positions) {len(positions)}")
+    keep = [i for i, p in enumerate(positions) if 0 <= p < num_frames]
+    dropped = len(positions) - len(keep)
+    if verbose and dropped:
+        print(f"[dfr] dropping {dropped} keyframe slot(s) beyond the trimmed {num_frames} frames", flush=True)
+    if not keep:
+        return None
+    return DecodeKeyframes(
+        latents=slots[:, :, keep],
+        pixel_frame_indices=tuple(int(positions[i]) for i in keep),
+        clip_start_frame=0,
+    )
+
+
+__all__ = ["DEFAULT_DETAILING_LORA", "DETAILING_LORA_STRENGTH", "DFRPipeline", "decode_keyframes_from_slots"]

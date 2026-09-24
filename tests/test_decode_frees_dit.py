@@ -98,8 +98,17 @@ def test_low_memory_with_no_dit_is_a_noop(pipe, stub_decode):
 
 def test_every_pipeline_routes_decode_through_base():
     """The fix lives in BasePipeline._decode_and_save_video; no subclass may
-    override it, or that pipeline silently loses the jetsam protection."""
+    override it and skip that fix, or that pipeline silently loses the jetsam
+    protection.
+
+    ``DFRPipeline`` is the one sanctioned exception: it overrides the method to
+    inject its stage-2 keyframe slots as decoder keyframes, but the override's
+    last line always delegates to ``super()._decode_and_save_video(...)`` (see
+    ``tests/test_dfr.py::test_dfr_decode_passes_the_trimmed_slots_as_keyframes``),
+    so the jetsam fix still runs on every call.
+    """
     # Import all pipeline modules so __subclasses__ is fully populated.
+    import ltx_pipelines_mlx.dfr
     import ltx_pipelines_mlx.distilled
     import ltx_pipelines_mlx.hdr_ic_lora
     import ltx_pipelines_mlx.ic_lora
@@ -116,5 +125,7 @@ def test_every_pipeline_routes_decode_through_base():
 
     subclasses = all_subclasses(BasePipeline)
     assert subclasses, "expected pipeline subclasses to be importable"
+    sanctioned = {"DFRPipeline"}
     overriders = [c.__name__ for c in subclasses if "_decode_and_save_video" in c.__dict__]
-    assert not overriders, f"pipelines overriding _decode_and_save_video: {overriders}"
+    unexpected = [name for name in overriders if name not in sanctioned]
+    assert not unexpected, f"pipelines overriding _decode_and_save_video: {unexpected}"
