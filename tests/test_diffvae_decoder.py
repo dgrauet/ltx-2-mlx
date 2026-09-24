@@ -15,6 +15,7 @@ from ltx_core_mlx.model.video_vae.diffusion_decoder import (
     load_diffusion_decoder,
 )
 from ltx_core_mlx.model.video_vae.diffusion_decoder.config import LTX_2_5_DIFFUSION_DECODER
+from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes, planes_for_tile
 from ltx_core_mlx.model.video_vae.diffusion_decoder.tiling import (
     DiffusionTileConfig,
     DiffusionTileGeometry,
@@ -227,3 +228,88 @@ def test_decoder_runs_in_its_weights_dtype_and_restores_the_callers():
     assert mx.array_equal(ref.astype(mx.float32), out)
     chunks = list(dec.tiled_decode(z.astype(mx.float32), None, seed=3))
     assert chunks[0].dtype == mx.float32 and mx.array_equal(chunks[0], out)
+
+
+def _kf(planes, h, w, indices, c=8):
+    return DecodeKeyframes(mx.random.normal((1, c, planes, h, w), key=mx.random.key(77)), tuple(indices))
+
+
+def test_pad_to_floor_temporal_switch():
+    dec = NADiffusionDecoder(TINY)
+    z = mx.random.normal((1, 8, 2, 2, 5))
+    zp, pads = dec.pad_to_floor(z, temporal=False)
+    assert zp.shape == (1, 8, 2, 3, 5) and pads == (0, 0, 1, 0, 0)
+
+
+def test_keyframe_decode_shapes_and_determinism():
+    dec = NADiffusionDecoder(TINY)
+    z = mx.random.normal((1, 8, 3, 3, 3))  # 17 frames, 96 x 96 px
+    kf = _kf(2, 3, 3, (5, 12))
+    a = dec.decode(z, seed=3, keyframes=kf)
+    assert a.shape == (1, 3, 17, 96, 96)
+    # joint_na3d's masked mx.fast.scaled_dot_product_attention has ~1 ULP run-to-run variance on
+    # Metal (verified bit-exact on the CPU device; not present on the plain, non-keyframe path,
+    # which stays mx.array_equal-exact elsewhere in this file) - allclose, not array_equal, here.
+    assert mx.allclose(a, dec.decode(z, seed=3, keyframes=kf), atol=1e-4, rtol=1e-4)
+    assert not mx.array_equal(a, dec.decode(z, seed=3))  # planes change the video
+    chunks = list(dec.tiled_decode(z, seed=3, keyframes=kf))
+    assert len(chunks) == 1 and mx.allclose(chunks[0], a, atol=1e-4, rtol=1e-4)  # one-tile tiled == decode
+
+
+def test_keyframe_decode_leaves_the_plain_path_byte_identical():
+    dec = NADiffusionDecoder(TINY)
+    z = mx.random.normal((1, 8, 2, 2, 3))
+    plain = dec.decode(z, seed=5)
+    assert mx.array_equal(plain, dec.decode(z, seed=5, keyframes=None))
+    assert mx.array_equal(plain, next(iter(dec.tiled_decode(z, seed=5))))
+
+
+def test_keyframe_stage_taps_and_stream_shapes():
+    dec = NADiffusionDecoder(TINY)
+    z = mx.random.normal((1, 8, 3, 3, 3))
+    kf = _kf(2, 3, 3, (5, 12))
+    taps = {}
+    dec.decode(z, seed=1, keyframes=kf, tap=lambda n, v: taps.__setitem__(n, v))
+    assert taps["s1.kf"].shape == (1, 2, 3, 3, 16) and taps["s1.out"].shape[1] == 5  # ghost-padded video
+    assert taps["s3.kf"].shape == (1, 2, 6, 6, 8) and taps["s4.kf"].shape == (1, 2, 12, 12, 8)
+    assert taps["s5.b0.kf"].shape == (1, 2, 24, 24, 4) and taps["s5.b1.out"].shape[1] == 17
+
+
+def test_keyframe_decode_validates_planes_and_padding():
+    dec = NADiffusionDecoder(TINY)
+    z = mx.random.normal((1, 8, 3, 3, 3))
+    with pytest.raises(ValueError, match="at least one plane"):
+        dec.decode(z, keyframes=DecodeKeyframes(mx.zeros((1, 8, 0, 3, 3)), ()))
+    with pytest.raises(ValueError, match="spatial"):
+        dec.decode(z, keyframes=_kf(1, 4, 3, (5,)))
+    # a 2x5 latent floors to 3x5 with a symmetric H pad; the planes get the same pad and decode
+    z2 = mx.random.normal((1, 8, 2, 2, 5))
+    out = dec.decode(z2, seed=2, keyframes=_kf(1, 2, 5, (4,)))
+    assert out.shape == (1, 3, 9, 64, 160)
+
+
+def test_tiled_keyframe_decode_streams_the_content_and_selects_planes_per_tile(monkeypatch):
+    dec = NADiffusionDecoder(TINY)
+    z = mx.random.normal((1, 8, 5, 3, 3))  # 33 frames
+    kf = _kf(3, 3, 3, (4, 16, 28))
+    seen = []
+    real = dec.decode_tile_with_keyframes
+
+    def spy(feat, stream, keyframes, tile, **kw):
+        seen.append((tile.out_t.start, tile.out_t.stop, stream.num_planes))
+        return real(feat, stream, keyframes, tile, **kw)
+
+    monkeypatch.setattr(dec, "decode_tile_with_keyframes", spy)
+    chunks = list(dec.tiled_decode(z, TINY_CFG, seed=4, allow_small_overlap=True, keyframes=kf))
+    assert sum(c.shape[2] for c in chunks) == 33 and all(c.shape[3:] == (96, 96) for c in chunks)
+    assert len(seen) > 1
+    for lo, hi, planes in seen:
+        assert planes == sum(planes_for_tile((4, 16, 28), lo, hi - 1))
+
+
+def test_keyframe_decode_on_the_pack_contract():
+    """type_emb loads from the pack (128,), non-zero."""
+    if LTX25_Q8_DIR is None:
+        pytest.skip("local ltx-2.5-mlx-q8 pack not found")
+    dec = load_diffusion_decoder(LTX25_Q8_DIR / "vae_decoder_av.safetensors")
+    assert dec.type_emb.shape == (128,) and float(mx.abs(dec.type_emb).max()) > 0.0
