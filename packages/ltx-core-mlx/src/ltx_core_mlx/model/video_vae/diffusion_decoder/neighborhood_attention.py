@@ -18,6 +18,13 @@ from __future__ import annotations
 import itertools
 
 import mlx.core as mx
+import numpy as np
+
+from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import (
+    KEYFRAME_CONTEXT_SLOTS,
+    keyframe_video_slots,
+    video_keyframe_slots,
+)
 
 Kernel = tuple[int, int, int]
 
@@ -170,3 +177,212 @@ def na3d(
         mx.eval(out)
 
     return out
+
+
+def joint_na3d_reference(
+    q: mx.array,
+    k: mx.array,
+    v: mx.array,
+    kq: mx.array,
+    kk: mx.array,
+    kv: mx.array,
+    keyframe_times: mx.array,
+    keyframe_valid: mx.array,
+    kernel: Kernel,
+) -> tuple[mx.array, mx.array]:
+    """Brute-force oracle of :func:`joint_na3d` (Python loop over queries); small grids only."""
+    _, t, h, w, heads, hd = q.shape
+    p = kq.shape[1]
+    times, valid = np.array(keyframe_times, dtype=np.float32), np.array(keyframe_valid, dtype=bool)
+    vslots, kslots = video_keyframe_slots(times, valid, t), keyframe_video_slots(times, valid, t)
+    lengths = (t, h, w)
+    k_eff = [min(kk_, ll) for kk_, ll in zip(kernel, lengths, strict=True)]
+
+    def attend(query: mx.array, keys: mx.array, vals: mx.array) -> mx.array:
+        scores = mx.einsum("nd,knd->nk", query.astype(mx.float32), keys.astype(mx.float32))
+        return mx.einsum("nk,knd->nd", mx.softmax(scores, axis=-1), vals.astype(mx.float32))
+
+    vrows = []
+    for ti, hi, wi in itertools.product(range(t), range(h), range(w)):
+        st, sh, sw = (window_start(ll, kk_, i) for ll, kk_, i in zip(lengths, kernel, (ti, hi, wi), strict=True))
+        keys = [k[0, st : st + k_eff[0], sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd)]
+        vals = [v[0, st : st + k_eff[0], sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd)]
+        for s in vslots[ti]:
+            if s >= 0:
+                keys.append(kk[0, s, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd))
+                vals.append(kv[0, s, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd))
+        vrows.append(attend(q[0, ti, hi, wi], mx.concatenate(keys), mx.concatenate(vals)))
+    krows = []
+    for pi, hi, wi in itertools.product(range(p), range(h), range(w)):
+        if not valid[pi]:
+            krows.append(mx.zeros((heads, hd)))
+            continue
+        sh, sw = window_start(h, kernel[1], hi), window_start(w, kernel[2], wi)
+        keys = [kk[0, pi, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd)]
+        vals = [kv[0, pi, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd)]
+        for s in kslots[pi]:
+            if s >= 0:
+                keys.append(k[0, s, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd))
+                vals.append(v[0, s, sh : sh + k_eff[1], sw : sw + k_eff[2]].reshape(-1, heads, hd))
+        krows.append(attend(kq[0, pi, hi, wi], mx.concatenate(keys), mx.concatenate(vals)))
+    return (
+        mx.stack(vrows, axis=0).reshape(q.shape).astype(q.dtype),
+        mx.stack(krows, axis=0).reshape(kq.shape).astype(kq.dtype),
+    )
+
+
+def _video_queries_with_planes(
+    q: mx.array,
+    k: mx.array,
+    v: mx.array,
+    kk: mx.array,
+    kv: mx.array,
+    vslots: np.ndarray,
+    kernel: Kernel,
+    block: Kernel,
+    max_blocks: int,
+) -> mx.array:
+    """Video half of :func:`joint_na3d`: ``na3d`` blocks whose key slab is extended by the planes' spatial slabs."""
+    _, t, h, w, heads, head_dim = q.shape
+    num_slots = vslots.shape[1]
+    lengths = (t, h, w)
+    plans = [_axis_plan(ll, kk_, bb) for ll, kk_, bb in zip(lengths, kernel, block, strict=True)]
+    starts = [window_starts(ll, kk_) for ll, kk_ in zip(lengths, kernel, strict=True)]
+    k_eff = [min(kk_, ll) for kk_, ll in zip(kernel, lengths, strict=True)]
+    out = mx.zeros_like(q)
+    slot_np = np.asarray(vslots, dtype=np.int64)
+
+    axis_qi: list[list[mx.array]] = []
+    axis_si: list[list[mx.array]] = []
+    axis_mask: list[list[mx.array]] = []
+    for axis in range(3):
+        q0s, s0s, bsize, slab = plans[axis]
+        ll = lengths[axis]
+        qis, sis, masks_axis = [], [], []
+        for q0, s0 in zip(q0s, s0s, strict=True):
+            qi = mx.minimum(mx.arange(bsize) + q0, ll - 1)
+            si = mx.arange(slab) + s0
+            ws = starts[axis][qi]
+            qis.append(qi)
+            sis.append(si)
+            masks_axis.append((si[None, :] >= ws[:, None]) & (si[None, :] < (ws + k_eff[axis])[:, None]))
+        axis_qi.append(qis)
+        axis_si.append(sis)
+        axis_mask.append(masks_axis)
+    bt = plans[0][2]
+    eye_t = mx.eye(bt, dtype=mx.bool_)
+
+    block_ids = list(itertools.product(*[range(len(p[0])) for p in plans]))
+    for group_start in range(0, len(block_ids), max_blocks):
+        group = block_ids[group_start : group_start + max_blocks]
+        qg, kg, vg, masks = [], [], [], []
+        q_indices = []
+        for bi in group:
+            ti, hi, wi = (axis_qi[axis][bi[axis]] for axis in range(3))
+            st_, sh_, sw_ = (axis_si[axis][bi[axis]] for axis in range(3))
+            mt, mh, mw = (axis_mask[axis][bi[axis]] for axis in range(3))
+            q_indices.append((ti, hi, wi))
+            # video slab
+            vid_mask = (
+                mt[:, None, None, :, None, None] & mh[None, :, None, None, :, None] & mw[None, None, :, None, None, :]
+            ).reshape(bt * len(hi) * len(wi), -1)
+            keys = [_gather_grid(k, st_, sh_, sw_)]
+            vals = [_gather_grid(v, st_, sh_, sw_)]
+            # plane slab: for each temporal row of the block, its `num_slots` planes on the same (h, w) slab
+            rows = np.asarray(ti).astype(np.int64)  # (bt,)
+            slots = slot_np[rows]  # (bt, num_slots), -1 = empty
+            plane_idx = mx.array(np.where(slots < 0, 0, slots).reshape(-1))  # (bt * num_slots,)
+            slot_ok = mx.array(slots >= 0)  # (bt, num_slots)
+            pk = kk[0, plane_idx[:, None, None], sh_[None, :, None], sw_[None, None, :]]  # (bt*S, Lh, Lw, heads, hd)
+            pv = kv[0, plane_idx[:, None, None], sh_[None, :, None], sw_[None, None, :]]
+            keys.append(pk.reshape(-1, heads, head_dim))
+            vals.append(pv.reshape(-1, heads, head_dim))
+            plane_mask = (
+                eye_t[:, None, None, :, None, None, None]  # query row == slab row
+                & slot_ok[None, None, None, :, :, None, None]
+                & mh[None, :, None, None, None, :, None]
+                & mw[None, None, :, None, None, None, :]
+            ).reshape(bt * len(hi) * len(wi), bt * num_slots * len(sh_) * len(sw_))
+            qg.append(_gather_grid(q, ti, hi, wi))
+            kg.append(mx.concatenate(keys, axis=0))
+            vg.append(mx.concatenate(vals, axis=0))
+            masks.append(mx.concatenate([vid_mask, plane_mask], axis=1))
+        og = mx.fast.scaled_dot_product_attention(
+            mx.stack(qg).transpose(0, 2, 1, 3),
+            mx.stack(kg).transpose(0, 2, 1, 3),
+            mx.stack(vg).transpose(0, 2, 1, 3),
+            scale=1.0,
+            mask=mx.stack(masks)[:, None],
+        ).transpose(0, 2, 1, 3)
+        for gi, (ti, hi, wi) in enumerate(q_indices):
+            out[0, ti[:, None, None], hi[None, :, None], wi[None, None, :]] = og[gi].reshape(
+                len(ti), len(hi), len(wi), heads, head_dim
+            )
+        mx.eval(out)
+    return out
+
+
+def _plane_queries_with_frames(
+    kq: mx.array,
+    kk: mx.array,
+    kv: mx.array,
+    k: mx.array,
+    v: mx.array,
+    kslots: np.ndarray,
+    valid: np.ndarray,
+    kernel: Kernel,
+    block: Kernel,
+    max_blocks: int,
+) -> mx.array:
+    """Plane half of :func:`joint_na3d`: each plane attends to its own spatial window plus the same window on its slot frames.
+
+    Runs ``na3d`` on the synthetic volume ``[plane, frame_a, frame_b]`` with a temporal kernel equal to its
+    length (every entry in-window) and keeps the plane's row.
+    """
+    out = mx.zeros_like(kq)
+    for p in range(kq.shape[1]):
+        if not valid[p]:
+            continue
+        frames = [int(s) for s in kslots[p] if s >= 0]
+        keys = mx.concatenate([kk[:, p : p + 1], *[k[:, f : f + 1] for f in frames]], axis=1)
+        vals = mx.concatenate([kv[:, p : p + 1], *[v[:, f : f + 1] for f in frames]], axis=1)
+        n = keys.shape[1]
+        queries = mx.repeat(kq[:, p : p + 1], n, axis=1)
+        o = na3d(queries, keys, vals, (n, kernel[1], kernel[2]), block=(n, block[1], block[2]), max_blocks=max_blocks)
+        out[:, p] = o[:, 0]
+    mx.eval(out)
+    return out
+
+
+def joint_na3d(
+    q: mx.array,
+    k: mx.array,
+    v: mx.array,
+    kq: mx.array,
+    kk: mx.array,
+    kv: mx.array,
+    keyframe_times: mx.array,
+    keyframe_valid: mx.array,
+    kernel: Kernel,
+    block: Kernel = (4, 8, 8),
+    max_blocks: int = 64,
+) -> tuple[mx.array, mx.array]:
+    """Joint video / keyframe-plane neighborhood attention (upstream ``joint_eager.joint_na3d``).
+
+    Video queries attend to their ``na3d`` window plus the same spatial window on the ``KEYFRAME_CONTEXT_SLOTS``
+    nearest planes (ranked ``(|dt|, index)``, no temporal-kernel gating). Plane queries attend to the window on
+    their own plane plus the same window on their nearest video frames. Invalid planes are excluded everywhere
+    and output zeros. ``q`` / ``kq`` are pre-scaled; scale 1.0.
+    """
+    if q.shape[0] != 1 or kq.shape[0] != 1:
+        raise ValueError("joint_na3d supports batch size 1")
+    if tuple(kq.shape[2:4]) != tuple(q.shape[2:4]):
+        raise ValueError(f"keyframe planes must share the video's spatial grid, got {kq.shape[2:4]} vs {q.shape[2:4]}")
+    times = np.array(keyframe_times, dtype=np.float32)
+    valid = np.array(keyframe_valid, dtype=bool)
+    t = q.shape[1]
+    vslots = video_keyframe_slots(times, valid, t, KEYFRAME_CONTEXT_SLOTS)
+    kslots = keyframe_video_slots(times, valid, t, KEYFRAME_CONTEXT_SLOTS)
+    video_out = _video_queries_with_planes(q, k, v, kk, kv, vslots, kernel, block, max_blocks)
+    plane_out = _plane_queries_with_frames(kq, kk, kv, k, v, kslots, valid, kernel, block, max_blocks)
+    return video_out, plane_out
