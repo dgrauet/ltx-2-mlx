@@ -1128,13 +1128,25 @@ canvas pixel-frame positions (`decode_keyframes_from_slots`, `dfr.py`), dropping
 position falls outside the trimmed clip (the canvas padding). With `--video-decoder diffusion`
 the slots are decoded as a second stream — joint neighborhood attention with the video stream, 2
 nearest planes per video frame (and vice versa), plane noise seeded from the tile key's split —
+where every joint window is upstream `joint_eager`'s **centered window clipped to the volume**
+(`[i - k//2, i - k//2 + k) ∩ [0, L)`, fewer keys at a border), not natten's shift-inward window of
+the plain path (`na3d`, untouched) —
 and a tiled decode selects each tile's planes (inside the tile plus one neighbour on each side).
 The conv decoder ignores the slots with a warning. Keyframe-aware renders are not
 pixel-comparable to a plain render at the same seed (the extra stream changes every activation).
 
 **Not ported yet:** temporal rounds (`TemporalTilePlan`, sub-project 4c) and the spatial epilogue.
 
-**Validated** (Task 6 e2e, M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5):
+**Keyframe decode validated** (M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5, 512×768×49,
+baselines at the pre-keyframe base): `--dfr` (conv) and `--distilled --video-decoder diffusion` are
+byte-identical (sha256) to the baselines; `--dfr --video-decoder diffusion` now decodes 2 planes
+(`keyframes=2@[24, 48]`) in a 157.4 s decode phase vs 99.7 s plain (+58 %), peak Metal 10.73 vs
+10.58 GB, PSNR 47.0 dB vs the plain decode (smooth per frame, no seam or flicker at the slot frames,
+no visible sharpness change on this fog scene); forced 1×3×4 tiles: 470.7 s, 3.74 GB, 49.8 dB vs
+untiled; `-f 137`: the slot at 144 is dropped, 5 planes, auto-tiled 2×1×2, 137 frames written. Torch
+parity (upstream a95ab85): every plain and keyframe boundary ≤ 5.3e-6.
+
+**Validated** (PR #150 e2e, M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5):
 `--distilled` at 512×768×49 is byte-identical (sha256) to `main` at 194 s, confirming the
 `_stage1`/`_stage2` split is additive. `--dfr` at 512×768×49: 276.9 s total (stage 1: 8 steps at
 10.7 s/forward over 864 video tokens; stage 2: 3 steps at 53.5 s/forward over 4128 tokens — target
