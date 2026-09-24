@@ -102,10 +102,9 @@ def test_every_pipeline_routes_decode_through_base():
     protection.
 
     ``DFRPipeline`` is the one sanctioned exception: it overrides the method to
-    inject its stage-2 keyframe slots as decoder keyframes, but the override's
-    last line always delegates to ``super()._decode_and_save_video(...)`` (see
-    ``tests/test_dfr.py::test_dfr_decode_passes_the_trimmed_slots_as_keyframes``),
-    so the jetsam fix still runs on every call.
+    inject its stage-2 keyframe slots as decoder keyframes and delegates to
+    ``super()``; ``test_sanctioned_override_still_frees_dit_before_decode``
+    checks that behaviourally rather than trusting the source text.
     """
     # Import all pipeline modules so __subclasses__ is fully populated.
     import ltx_pipelines_mlx.dfr
@@ -129,3 +128,36 @@ def test_every_pipeline_routes_decode_through_base():
     overriders = [c.__name__ for c in subclasses if "_decode_and_save_video" in c.__dict__]
     unexpected = [name for name in overriders if name not in sanctioned]
     assert not unexpected, f"pipelines overriding _decode_and_save_video: {unexpected}"
+
+
+def test_sanctioned_override_still_frees_dit_before_decode(stub_decode, monkeypatch):
+    """DFRPipeline's override must keep the base DiT-free step ahead of the decode."""
+    import mlx.core as mx
+
+    import ltx_pipelines_mlx.utils._orchestration as orch
+    from ltx_pipelines_mlx.dfr import DFRPipeline
+
+    p = DFRPipeline.__new__(DFRPipeline)
+    p.low_memory = True
+    p.verbose = False
+    p._loaded = True
+    p.dit = _Marker()
+    p.video_decoder_block = object()
+    p.audio_decoder_block = object()
+    p.generated_keyframes = None
+    p.generated_keyframe_positions = []
+
+    seen_dit_at_decode = []
+    real_stub = orch.decode_and_save_video
+
+    def _observing_stub(*args, **kwargs):
+        seen_dit_at_decode.append(p.dit)
+        return real_stub(*args, **kwargs)
+
+    monkeypatch.setattr(orch, "decode_and_save_video", _observing_stub)
+
+    result = p._decode_and_save_video(mx.zeros((1, 128, 7, 2, 2)), None, "out.mp4", frame_rate=24.0)
+
+    assert result == "out.mp4"
+    assert seen_dit_at_decode == [None], "DiT must be freed BEFORE the decode starts"
+    assert p._loaded is False
