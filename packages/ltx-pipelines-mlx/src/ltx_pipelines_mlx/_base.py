@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from ltx_core_mlx.conditioning.prompt_relay import PromptRelayInput
+    from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
     from ltx_pipelines_mlx.utils.samplers import OnStepFn
     from ltx_pipelines_mlx.utils.stepwise import StepwisePreview
 
@@ -526,6 +527,7 @@ class BasePipeline:
         *,
         frame_rate: float,
         seed: int = 0,
+        keyframes: DecodeKeyframes | None = None,
     ) -> str:
         """Inheritance wrapper around :func:`utils._orchestration.decode_and_save_video`."""
         from ltx_pipelines_mlx.utils._orchestration import decode_and_save_video as _impl
@@ -552,6 +554,7 @@ class BasePipeline:
                 low_memory=self.low_memory,
                 generate_audio=self.generate_audio,
                 seed=seed,
+                keyframes=keyframes,
             )
 
     # ------------------------------------------------------------------

@@ -86,6 +86,7 @@ from ltx_pipelines_mlx.utils.types import AutoDuration
 if TYPE_CHECKING:
     from ltx_core_mlx.model.video_vae.diffusion_decoder import NADiffusionDecoder
     from ltx_core_mlx.model.video_vae.diffusion_decoder.config import DiffusionDecoderConfig
+    from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
     from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
 
 logger = logging.getLogger(__name__)
@@ -366,13 +367,17 @@ class _DiffusionVideoDecoder:
         """Raise if a forced one-tile decode of ``latent_shape`` exceeds the token guard (2.5 geometry)."""
         cls._raise_if_over_guard(cls.estimate_stage5_tokens(latent_shape), diffvae_max_tokens())
 
-    def resolve_tiling(self, latent_shape: tuple[int, ...]) -> DiffusionTileConfig | None:
+    def resolve_tiling(self, latent_shape: tuple[int, ...], *, keyframe_planes: int = 0) -> DiffusionTileConfig | None:
         """Tiling for ``latent_shape`` from the override or the budget (see the class docstring)."""
         geometry = DiffusionTileGeometry.from_config(self._decoder.config)
         fhw = padded_latent_fhw(self._decoder.config, tuple(latent_shape[2:]))  # type: ignore[arg-type]
         if self.tile_override is None:
             return auto_tile_config(
-                geometry, fhw, budget_bytes=diffusion_decode_budget_bytes(), weight_bytes=self.weight_bytes
+                geometry,
+                fhw,
+                budget_bytes=diffusion_decode_budget_bytes(),
+                weight_bytes=self.weight_bytes,
+                keyframe_planes=keyframe_planes,
             )
         if self.tile_override == (0, 0, 0):
             tokens = self._stage5_tokens_for_config(self._decoder.config, latent_shape)
@@ -388,13 +393,17 @@ class _DiffusionVideoDecoder:
         audio_path: str | None = None,
         *,
         seed: int = 0,
+        keyframes: DecodeKeyframes | None = None,
     ) -> str:
         """Stream-decode ``video_latent`` into ``output_path`` with optional audio mux."""
-        tiling = self.resolve_tiling(tuple(video_latent.shape))
+        planes = keyframes.num_planes if keyframes is not None else 0
+        tiling = self.resolve_tiling(tuple(video_latent.shape), keyframe_planes=planes)
         if self.verbose:
             fhw = padded_latent_fhw(self._decoder.config, tuple(video_latent.shape[2:]))  # type: ignore[arg-type]
             geometry = DiffusionTileGeometry.from_config(self._decoder.config)
             summary = describe_tiling(geometry, fhw, tiling) if tiling is not None else "tiles=1 (untiled)"
+            if planes:
+                summary += f" keyframes={planes}@{list(keyframes.pixel_frame_indices)}"
             print(
                 f"[diffvae tiling] {summary} budget={diffusion_decode_budget_bytes() / 2**30:.1f} GB "
                 f"resident={mx.get_active_memory() / 2**30:.2f} GB before decode latent={video_latent.dtype}",
@@ -407,7 +416,9 @@ class _DiffusionVideoDecoder:
         if self.verbose:
             mx.reset_peak_memory()
         with decode_cache_limit(), _ffmpeg_sink(cmd) as proc:
-            stream_chunks_to_ffmpeg(self._decoder.tiled_decode(video_latent, tiling, seed=seed), proc)
+            stream_chunks_to_ffmpeg(
+                self._decoder.tiled_decode(video_latent, tiling, seed=seed, keyframes=keyframes), proc
+            )
         if self.verbose:
             print(
                 f"[diffvae tiling] peak Metal memory {mx.get_peak_memory() / 2**30:.2f} GB", file=sys.stderr, flush=True
@@ -476,11 +487,14 @@ class VideoDecoder:
         audio_path: str | None = None,
         *,
         seed: int = 0,
+        keyframes: DecodeKeyframes | None = None,
     ) -> str:
         """Stream-decode the latent into an mp4 with optional audio mux.
 
         ``seed`` is forwarded to the loaded decoder; the conv decoder ignores
         it (deterministic), the diffusion decoder uses it to seed its noise draw.
+        ``keyframes`` is forwarded to the diffusion decoder only; the conv
+        decoder has no keyframe-aware path, so it warns and drops them.
         """
         conv_verbose = self.verbose and self.video_decoder == "conv"
         if conv_verbose:
@@ -494,7 +508,18 @@ class VideoDecoder:
             )
             mx.reset_peak_memory()
         decoder = self.load()
-        decoder.decode_and_stream(video_latent, output_path, frame_rate=frame_rate, audio_path=audio_path, seed=seed)
+        if keyframes is not None and self.video_decoder != "diffusion":
+            print(
+                "[vae-decode] keyframes are ignored by the conv decoder (use --video-decoder diffusion "
+                "for the keyframe-aware decode)",
+                file=sys.stderr,
+                flush=True,
+            )
+            keyframes = None
+        extra = {"keyframes": keyframes} if keyframes is not None else {}
+        decoder.decode_and_stream(
+            video_latent, output_path, frame_rate=frame_rate, audio_path=audio_path, seed=seed, **extra
+        )
         if conv_verbose:
             print(
                 f"[vae-decode tiling] peak Metal memory {mx.get_peak_memory() / 2**30:.2f} GB",

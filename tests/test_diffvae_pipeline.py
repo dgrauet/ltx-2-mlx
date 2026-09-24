@@ -5,6 +5,7 @@ from __future__ import annotations
 import mlx.core as mx
 import pytest
 
+from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
 from ltx_core_mlx.model.video_vae.diffusion_decoder.tiling import DiffusionTileConfig
 from ltx_core_mlx.model.video_vae.video_vae import decode_budget_bytes
 from ltx_pipelines_mlx._base import BasePipeline
@@ -47,7 +48,7 @@ def test_diffusion_decode_and_stream_uses_shared_ffmpeg_plumbing(monkeypatch, tm
         config = TINY
         spatial_scale = (32, 32)
 
-        def tiled_decode(self, latent, tiling=None, *, seed=0):
+        def tiled_decode(self, latent, tiling=None, *, seed=0, keyframes=None):
             seen["seed"] = seed
             seen["tiling"] = tiling
             yield mx.zeros((1, 3, 9, 64, 96))
@@ -369,3 +370,65 @@ def test_cli_rejects_diffvae_tile_without_the_diffusion_decoder():
     )
     with pytest.raises(ValueError, match="--video-decoder diffusion"):
         cli._require_diffusion_decoder_preconditions(args, "/nonexistent")
+
+
+def test_diffusion_decode_and_stream_forwards_keyframes(monkeypatch, tmp_path):
+    seen = {}
+
+    class _Dec:
+        config = TINY
+        spatial_scale = (32, 32)
+
+        def tiled_decode(self, latent, tiling=None, *, seed=0, keyframes=None):
+            seen["keyframes"] = keyframes
+            seen["tiling"] = tiling
+            yield mx.zeros((1, 3, 9, 64, 96))
+
+    monkeypatch.setenv(B.DIFFVAE_MAX_TOKENS_ENV, "10000000")
+    monkeypatch.setattr(B, "_ffmpeg_sink", lambda cmd: _FakeSink())
+    monkeypatch.setattr(B, "stream_chunks_to_ffmpeg", lambda chunks, proc: list(chunks))
+    kf = DecodeKeyframes(mx.zeros((1, 128, 1, 2, 3)), (4,))
+    wrapper = B._DiffusionVideoDecoder(_Dec(), weight_bytes=0, tile_override=(0, 0, 0))
+    wrapper.decode_and_stream(mx.zeros((1, 128, 2, 2, 3)), str(tmp_path / "o.mp4"), seed=1, keyframes=kf)
+    assert seen["keyframes"] is kf
+
+
+def test_conv_video_decoder_warns_and_drops_keyframes(monkeypatch, tmp_path, capsys):
+    calls = {}
+
+    class _Conv:
+        def decode_and_stream(self, latent, output_path, *, frame_rate, audio_path=None, seed=0):
+            calls["kwargs"] = dict(frame_rate=frame_rate, audio_path=audio_path, seed=seed)
+
+    vd = B.VideoDecoder(tmp_path)  # conv
+    vd.verbose = False
+    monkeypatch.setattr(vd, "load", lambda: _Conv())
+    kf = DecodeKeyframes(mx.zeros((1, 128, 1, 2, 3)), (4,))
+    vd.decode_and_stream(mx.zeros((1, 128, 2, 2, 3)), str(tmp_path / "o.mp4"), seed=3, keyframes=kf)
+    assert calls["kwargs"]["seed"] == 3
+    assert "keyframes are ignored by the conv decoder" in capsys.readouterr().err
+
+
+def test_orchestration_forwards_keyframes_only_when_given():
+    from ltx_pipelines_mlx.utils._orchestration import decode_and_save_video
+
+    seen = []
+
+    class _VD:
+        def decode_and_stream(self, latent, output_path, *, frame_rate, audio_path=None, **kw):
+            seen.append(kw)
+
+    decode_and_save_video(_VD(), None, mx.zeros((1,)), mx.zeros((1,)), "o.mp4", frame_rate=24.0, generate_audio=False)
+    kf = DecodeKeyframes(mx.zeros((1, 128, 1, 2, 3)), (4,))
+    decode_and_save_video(
+        _VD(),
+        None,
+        mx.zeros((1,)),
+        mx.zeros((1,)),
+        "o.mp4",
+        frame_rate=24.0,
+        generate_audio=False,
+        seed=2,
+        keyframes=kf,
+    )
+    assert seen == [{}, {"seed": 2, "keyframes": kf}]

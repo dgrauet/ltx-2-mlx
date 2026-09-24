@@ -11,9 +11,11 @@ from ltx_core_mlx.model.video_vae.diffusion_decoder.config import LTX_2_5_DIFFUS
 from ltx_core_mlx.model.video_vae.diffusion_decoder.tiling import (
     MIN_MODEL_BYTES,
     RESERVE_BYTES,
+    STAGE5_MEM_COEF,
     DiffusionTileConfig,
     DiffusionTileGeometry,
     Interval,
+    _stage4_feature_bytes,
     auto_tile_config,
     build_tile_schedule,
     describe_tiling,
@@ -278,3 +280,17 @@ def test_auto_weights_floor_and_failure():
     assert a == b
     with pytest.raises(ValueError, match="LTX2_VAE_DECODE_BUDGET_GB"):
         auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=_budget(100), weight_bytes=0)
+
+
+def test_estimate_adds_plane_tokens_and_defaults_are_unchanged():
+    geometry = DiffusionTileGeometry.from_config(LTX_2_5_DIFFUSION_DECODER)
+    fhw = (7, 16, 24)
+    base = estimate_untiled_bytes(geometry, fhw)
+    assert estimate_untiled_bytes(geometry, fhw, keyframe_planes=0) == base
+    per_plane = (16 * 8) * (24 * 8) * geometry.stage5_channels * 2 * STAGE5_MEM_COEF
+    assert estimate_untiled_bytes(geometry, fhw, keyframe_planes=2) == base + int(2 * per_plane)
+    # a budget that just fits the plain decode tiles once planes are added
+    weight = 1 << 30
+    budget = base + weight + RESERVE_BYTES + _stage4_feature_bytes(geometry, fhw) + 1
+    assert auto_tile_config(geometry, fhw, budget_bytes=budget, weight_bytes=weight) is None
+    assert auto_tile_config(geometry, fhw, budget_bytes=budget, weight_bytes=weight, keyframe_planes=2) is not None

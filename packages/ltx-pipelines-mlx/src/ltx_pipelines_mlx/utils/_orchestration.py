@@ -29,6 +29,7 @@ from ltx_core_mlx.utils.weights import (
 )
 
 if TYPE_CHECKING:
+    from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
     from ltx_pipelines_mlx.utils.blocks import AudioDecoder, VideoDecoder
 
 
@@ -175,6 +176,7 @@ def decode_and_save_video(
     low_memory: bool = True,
     generate_audio: bool = True,
     seed: int = 0,
+    keyframes: DecodeKeyframes | None = None,
 ) -> str:
     """Decode audio+video latents and mux to mp4 via ffmpeg.
 
@@ -196,10 +198,16 @@ def decode_and_save_video(
             non-zero, so callers (and stand-in test doubles) that pre-date
             the diffusion decoder's seeded noise draw keep working
             unchanged with the default seed. The conv decoder ignores it.
+        keyframes: Forwarded to ``video_decoder.decode_and_stream`` only
+            when given (not ``None``), so callers that pre-date the
+            keyframe-aware decode keep working unchanged. The conv decoder
+            warns and ignores it.
     """
     import tempfile
 
     decode_kwargs = {"seed": seed} if seed else {}
+    if keyframes is not None:
+        decode_kwargs["keyframes"] = keyframes
 
     if not generate_audio:
         video_decoder.decode_and_stream(

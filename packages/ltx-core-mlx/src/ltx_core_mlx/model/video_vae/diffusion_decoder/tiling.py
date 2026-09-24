@@ -472,11 +472,20 @@ def _stage5_bytes_per_token(geometry: DiffusionTileGeometry) -> float:
     return geometry.stage5_channels * 2 * STAGE5_MEM_COEF
 
 
-def estimate_untiled_bytes(geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel) -> int:
-    """Activation bytes of a one-tile decode: stage-5 tokens x bytes/token + the fp16 output accumulator."""
+def _plane_tokens(geometry: DiffusionTileGeometry, h_px: int, w_px: int, keyframe_planes: int) -> int:
+    """Stage-5 tokens of ``keyframe_planes`` planes at an ``h_px x w_px`` pixel extent."""
+    p = geometry.patch_size
+    return keyframe_planes * (h_px // p) * (w_px // p)
+
+
+def estimate_untiled_bytes(
+    geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel, *, keyframe_planes: int = 0
+) -> int:
+    """Activation bytes of a one-tile decode: (video + plane) stage-5 tokens x bytes/token + the fp16
+    output accumulator."""
     f_px, h_px, w_px = output_fhw(geometry, latent_fhw_padded)
     p = geometry.patch_size
-    tokens = f_px * (h_px // p) * (w_px // p)
+    tokens = f_px * (h_px // p) * (w_px // p) + _plane_tokens(geometry, h_px, w_px, keyframe_planes)
     return int(tokens * _stage5_bytes_per_token(geometry)) + f_px * h_px * w_px * 3 * 2
 
 
@@ -499,12 +508,18 @@ def auto_tile_config(
     *,
     budget_bytes: int,
     weight_bytes: int,
+    keyframe_planes: int = 0,
 ) -> DiffusionTileConfig | None:
     """Pick tile sizes that keep the decode under ``budget_bytes`` (upstream ``dt:261-418``, simplified).
 
     Returns ``None`` when the whole decode fits (no tiling). Otherwise the feasible
     ``(frames, h, w)`` on the ``(step_frames, step_px, step_px)`` grid with the least overlap
     redundancy; ties prefer the larger tile, then fewer tiles.
+
+    ``keyframe_planes`` planes are charged at the video's per-token cost (upstream
+    ``chunked_eager`` uses the same coefficient); every tile is assumed to carry all
+    planes, which is an upper bound (the planes actually appear in at most one temporal
+    tile each).
 
     Raises:
         ValueError: No tile fits (names ``LTX2_VAE_DECODE_BUDGET_GB``).
@@ -515,7 +530,7 @@ def auto_tile_config(
         - RESERVE_BYTES
         - _stage4_feature_bytes(geometry, latent_fhw_padded)
     )
-    if estimate_untiled_bytes(geometry, latent_fhw_padded) <= usable:
+    if estimate_untiled_bytes(geometry, latent_fhw_padded, keyframe_planes=keyframe_planes) <= usable:
         return None
     t4, h4, w4 = geometry.stage4_content_thw(*latent_fhw_padded)
     f_px, h_px, w_px = output_fhw(geometry, latent_fhw_padded)
@@ -533,7 +548,10 @@ def auto_tile_config(
         max_tokens = (usable - acc) // per_token
         for tile_h, n_h in cand_h:
             for tile_w, n_w in cand_w:
-                if tile_t * (tile_h // p) * (tile_w // p) > max_tokens:
+                if (
+                    tile_t * (tile_h // p) * (tile_w // p) + _plane_tokens(geometry, tile_h, tile_w, keyframe_planes)
+                    > max_tokens
+                ):
                     continue
                 redundancy = n_t * n_h * n_w * tile_t * tile_h * tile_w / (f_px * h_px * w_px)
                 score = (redundancy, -(tile_t * tile_h * tile_w), n_t * n_h * n_w, tile_t, tile_h, tile_w)
