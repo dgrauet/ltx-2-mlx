@@ -255,6 +255,7 @@ def _video_queries_with_planes(
     axis_qi: list[list[mx.array]] = []
     axis_si: list[list[mx.array]] = []
     axis_mask: list[list[mx.array]] = []
+    axis_valid: list[list[int]] = []
     for axis in range(3):
         q0s, s0s, bsize, slab = plans[axis]
         ll = lengths[axis]
@@ -269,6 +270,8 @@ def _video_queries_with_planes(
         axis_qi.append(qis)
         axis_si.append(sis)
         axis_mask.append(masks_axis)
+        # rows past the axis end are clamped duplicates of its last index; only the leading ones are written back
+        axis_valid.append([min(bsize, ll - q0) for q0 in q0s])
     bt = plans[0][2]
     eye_t = mx.eye(bt, dtype=mx.bool_)
 
@@ -281,7 +284,7 @@ def _video_queries_with_planes(
             ti, hi, wi = (axis_qi[axis][bi[axis]] for axis in range(3))
             st_, sh_, sw_ = (axis_si[axis][bi[axis]] for axis in range(3))
             mt, mh, mw = (axis_mask[axis][bi[axis]] for axis in range(3))
-            q_indices.append((ti, hi, wi))
+            q_indices.append((ti, hi, wi, *(axis_valid[axis][bi[axis]] for axis in range(3))))
             # video slab
             vid_mask = (
                 mt[:, None, None, :, None, None] & mh[None, :, None, None, :, None] & mw[None, None, :, None, None, :]
@@ -314,10 +317,11 @@ def _video_queries_with_planes(
             scale=1.0,
             mask=mx.stack(masks)[:, None],
         ).transpose(0, 2, 1, 3)
-        for gi, (ti, hi, wi) in enumerate(q_indices):
-            out[0, ti[:, None, None], hi[None, :, None], wi[None, None, :]] = og[gi].reshape(
-                len(ti), len(hi), len(wi), heads, head_dim
-            )
+        for gi, (ti, hi, wi, nt, nh, nw) in enumerate(q_indices):
+            # Write each destination once: the clamped duplicate rows are not bit-identical to their
+            # original at this key width on Metal, and a scatter with duplicate indices has no defined winner.
+            og_block = og[gi].reshape(len(ti), len(hi), len(wi), heads, head_dim)[:nt, :nh, :nw]
+            out[0, ti[:nt, None, None], hi[None, :nh, None], wi[None, None, :nw]] = og_block
         mx.eval(out)
     return out
 

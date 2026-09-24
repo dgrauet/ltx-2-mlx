@@ -247,13 +247,10 @@ def test_keyframe_decode_shapes_and_determinism():
     kf = _kf(2, 3, 3, (5, 12))
     a = dec.decode(z, seed=3, keyframes=kf)
     assert a.shape == (1, 3, 17, 96, 96)
-    # joint_na3d's masked mx.fast.scaled_dot_product_attention has ~1 ULP run-to-run variance on
-    # Metal (verified bit-exact on the CPU device; not present on the plain, non-keyframe path,
-    # which stays mx.array_equal-exact elsewhere in this file) - allclose, not array_equal, here.
-    assert mx.allclose(a, dec.decode(z, seed=3, keyframes=kf), atol=1e-4, rtol=1e-4)
+    assert mx.array_equal(a, dec.decode(z, seed=3, keyframes=kf))
     assert not mx.array_equal(a, dec.decode(z, seed=3))  # planes change the video
     chunks = list(dec.tiled_decode(z, seed=3, keyframes=kf))
-    assert len(chunks) == 1 and mx.allclose(chunks[0], a, atol=1e-4, rtol=1e-4)  # one-tile tiled == decode
+    assert len(chunks) == 1 and mx.array_equal(chunks[0], a)  # one-tile tiled == decode
 
 
 def test_keyframe_decode_leaves_the_plain_path_byte_identical():

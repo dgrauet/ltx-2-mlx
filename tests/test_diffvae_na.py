@@ -172,6 +172,17 @@ def test_joint_na3d_video_reduces_to_na3d_when_no_plane_is_valid():
     assert np.array(mx.abs(ko).max()) == 0.0
 
 
+def test_joint_na3d_is_run_to_run_deterministic_on_non_divisible_axes():
+    # every axis leaves a clamped last block: duplicate query rows must not race in the write-back
+    q, k, v = (mx.random.normal((1, 5, 7, 7, 2, 16), key=mx.random.key(i)) for i in range(3))
+    kq, kk, kv = (mx.random.normal((1, 2, 7, 7, 2, 16), key=mx.random.key(20 + i)) for i in range(3))
+    args = (q, k, v, kq, kk, kv, mx.array([1.0, 3.5]), mx.array([True, True]), (3, 3, 3))
+    first = joint_na3d(*args, block=(4, 4, 4))
+    for _ in range(5):
+        again = joint_na3d(*args, block=(4, 4, 4))
+        assert all(mx.array_equal(a, b) for a, b in zip(first, again, strict=True))
+
+
 def test_joint_na3d_rejects_batches_and_spatial_mismatch():
     q = mx.zeros((2, 3, 3, 3, 1, 4))
     with pytest.raises(ValueError, match="batch"):
