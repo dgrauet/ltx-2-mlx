@@ -22,7 +22,7 @@ import mlx.nn as nn
 
 from ltx_core_mlx.model.video_vae.diffusion_decoder.blocks import NeighborhoodAttention3D
 from ltx_core_mlx.model.video_vae.diffusion_decoder.layers import RMSNorm, SwiGLU
-from ltx_core_mlx.model.video_vae.diffusion_decoder.neighborhood_attention import Kernel, na3d
+from ltx_core_mlx.model.video_vae.diffusion_decoder.neighborhood_attention import Kernel, joint_na3d, na3d
 
 W_CHUNKS = 4  # upstream `_CHUNKED_W_CHUNKS`, not configurable
 
@@ -108,6 +108,59 @@ class ChunkedDiffusionNABlock(nn.Module):
             o = self.attn.proj(o.reshape(b, t, h, e, -1))
             outs.append(o[:, :, :, halo : halo + core_len])
         return x + mx.concatenate(outs, axis=3)
+
+    def attention_residual_with_keyframes(
+        self,
+        x: mx.array,
+        kf_x: mx.array,
+        modulation: list[mx.array],
+        keyframe_times: mx.array,
+        keyframe_valid: mx.array,
+    ) -> tuple[mx.array, mx.array]:
+        """W-chunked joint attention residual: both streams cut into the same slabs with the same halo and ``w_pos``."""
+        if tuple(kf_x.shape[2:4]) != tuple(x.shape[2:4]):
+            raise ValueError(
+                f"keyframe planes must share the video's spatial grid, got {kf_x.shape[2:4]} vs {x.shape[2:4]}"
+            )
+        scale_msa, shift_msa, _, _ = self._modulation(modulation)
+        halo = self.kernel[2] // 2
+        outs: list[mx.array] = []
+        kouts: list[mx.array] = []
+        for (buf, w_pos, _cs, core_len), (kbuf, _, _, _) in zip(
+            build_w_slabs(x, halo), build_w_slabs(kf_x, halo), strict=True
+        ):
+            y = self.norm1(buf) * (1 + scale_msa) + shift_msa
+            ky = self.norm1(kbuf) * (1 + scale_msa) + shift_msa
+            q, k, v = self.attn.qkv_rope(y, w_pos=w_pos)
+            kq, kk, kv = self.attn.qkv_rope(ky, w_pos=w_pos, t_pos=keyframe_times)
+            o, ko = joint_na3d(q, k, v, kq, kk, kv, keyframe_times, keyframe_valid, self.kernel)
+            b, t, h, e, _, _ = o.shape
+            outs.append(self.attn.proj(o.reshape(b, t, h, e, -1))[:, :, :, halo : halo + core_len])
+            kouts.append(self.attn.proj(ko.reshape(b, ko.shape[1], h, e, -1))[:, :, :, halo : halo + core_len])
+        return x + mx.concatenate(outs, axis=3), kf_x + mx.concatenate(kouts, axis=3)
+
+    def forward_with_keyframes(
+        self,
+        x: mx.array,
+        context: mx.array,
+        kf_x: mx.array,
+        kf_context: mx.array,
+        modulation: list[mx.array],
+        keyframe_times: mx.array,
+        keyframe_valid: mx.array,
+    ) -> tuple[mx.array, mx.array]:
+        """Dual-stream stage-5 block: per-stream context inject, joint attention, per-stream modulated MLP; invalid planes re-zeroed."""
+        if tuple(kf_x.shape[2:4]) != tuple(x.shape[2:4]):
+            raise ValueError(
+                f"keyframe planes must share the video's spatial grid, got {kf_x.shape[2:4]} vs {x.shape[2:4]}"
+            )
+        _, _, scale_mlp, shift_mlp = self._modulation(modulation)
+        x = inject_context(x, context, self.context_proj)
+        kf_x = inject_context(kf_x, kf_context, self.context_proj)
+        x, kf_x = self.attention_residual_with_keyframes(x, kf_x, modulation, keyframe_times, keyframe_valid)
+        x = x + self.mlp(self.norm2(x) * (1 + scale_mlp) + shift_mlp)
+        kf_x = kf_x + self.mlp(self.norm2(kf_x) * (1 + scale_mlp) + shift_mlp)
+        return x, kf_x * keyframe_valid[None, :, None, None, None].astype(kf_x.dtype)
 
     def __call__(self, x: mx.array, context: mx.array, modulation: list[mx.array]) -> mx.array:
         _, _, scale_mlp, shift_mlp = self._modulation(modulation)

@@ -14,7 +14,7 @@ from ltx_core_mlx.model.video_vae.diffusion_decoder.chunked import (
     inject_context,
 )
 from ltx_core_mlx.model.video_vae.diffusion_decoder.layers import LinearPixelShuffleUpsample, SharedAdaLN
-from ltx_core_mlx.model.video_vae.diffusion_decoder.neighborhood_attention import na3d_reference
+from ltx_core_mlx.model.video_vae.diffusion_decoder.neighborhood_attention import joint_na3d, na3d_reference
 
 
 def _ref_slabs(x, halo, w_chunks=4):
@@ -113,3 +113,44 @@ def test_block_call_order_inject_attn_mlp():
     h = blk.attention_residual(h, mod)
     ref = h + blk.mlp(blk.norm2(h) * (1 + p[3]) + p[4])
     assert mx.allclose(y, ref, atol=1e-5).item()
+
+
+def _modulation(block, dim):
+    from ltx_core_mlx.model.video_vae.diffusion_decoder.layers import SharedAdaLN
+
+    return SharedAdaLN(8, dim)(mx.random.normal((1, 8), key=mx.random.key(9)))
+
+
+def test_chunked_forward_with_keyframes_shapes_and_invalid_plane_rezero():
+    block = ChunkedDiffusionNABlock(8, 4, (3, 3, 3), context_channels=6)
+    mod = _modulation(block, 8)
+    x = mx.random.normal((1, 3, 6, 16, 8), key=mx.random.key(1))
+    ctx = mx.random.normal((1, 3, 6, 16, 6), key=mx.random.key(2))
+    kx = mx.random.normal((1, 2, 6, 16, 8), key=mx.random.key(3))
+    kctx = mx.random.normal((1, 2, 6, 16, 6), key=mx.random.key(4))
+    y, ky = block.forward_with_keyframes(x, ctx, kx, kctx, mod, mx.array([0.0, 2.0]), mx.array([True, False]))
+    assert y.shape == x.shape and ky.shape == kx.shape
+    assert float(mx.abs(ky[0, 1]).max()) == 0.0  # stage-5 blocks re-zero invalid planes
+    with pytest.raises(ValueError, match="spatial"):
+        block.forward_with_keyframes(x, ctx, kx[:, :, :3], kctx, mod, mx.array([0.0, 2.0]), mx.array([True, True]))
+
+
+def test_chunked_joint_residual_equals_full_slab_attention_on_interior_columns():
+    """Interior core columns (further than a halo from the image borders) equal a whole-width joint attention."""
+    block = ChunkedDiffusionNABlock(8, 4, (3, 3, 3), context_channels=6)
+    mod = _modulation(block, 8)
+    x = mx.random.normal((1, 2, 5, 16, 8), key=mx.random.key(5))
+    kx = mx.random.normal((1, 1, 5, 16, 8), key=mx.random.key(6))
+    times, valid = mx.array([0.5]), mx.array([True])
+    y, ky = block.attention_residual_with_keyframes(x, kx, mod, times, valid)
+    scale_msa, shift_msa, _, _ = block._modulation(mod)
+    yw = block.norm1(x) * (1 + scale_msa) + shift_msa
+    kyw = block.norm1(kx) * (1 + scale_msa) + shift_msa
+    q, k, v = block.attn.qkv_rope(yw)
+    kq, kk, kv = block.attn.qkv_rope(kyw, t_pos=times)
+    o, ko = joint_na3d(q, k, v, kq, kk, kv, times, valid, (3, 3, 3))
+    full = x + block.attn.proj(o.reshape(1, 2, 5, 16, -1))
+    kfull = kx + block.attn.proj(ko.reshape(1, 1, 5, 16, -1))
+    halo = 1
+    assert mx.allclose(y[:, :, :, halo:-halo], full[:, :, :, halo:-halo], atol=1e-5, rtol=1e-5)
+    assert mx.allclose(ky[:, :, :, halo:-halo], kfull[:, :, :, halo:-halo], atol=1e-5, rtol=1e-5)
