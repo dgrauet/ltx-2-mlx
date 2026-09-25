@@ -39,6 +39,7 @@ from ltx_pipelines_mlx.iclora_utils import (
     read_lora_reference_downscale_factor,
     reference_conditioning_from_latent,
 )
+from ltx_pipelines_mlx.scheduler import LTX_2_5_DISTILLED_SIGMAS
 from ltx_pipelines_mlx.utils._orchestration import resolve_lora_path
 from ltx_pipelines_mlx.utils.progress import phase
 from ltx_pipelines_mlx.utils.types import DEFAULT_AUTO_DURATION, AutoDuration
@@ -53,6 +54,141 @@ DEFAULT_DETAILING_LORA = "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler"
 DETAILING_LORA_STRENGTH = 0.5
 #: Pixel frames per latent frame of the video VAE (there is no pipeline-level constant).
 _TEMPORAL_SCALE = 8
+
+#: Upstream ``_ANCHOR_KEYFRAME_STRENGTH``: carried keyframes pinned just short of clean.
+ANCHOR_KEYFRAME_STRENGTH = 0.95
+#: Upstream ``_TEMPORAL_ANCESTRAL_ETA``.
+TEMPORAL_ANCESTRAL_ETA = 0.5
+#: Upstream ``DISTILLED_SIGMAS[4:]``: the 4-step temporal-round schedule.
+TEMPORAL_SIGMAS: list[float] = list(LTX_2_5_DISTILLED_SIGMAS[4:])
+_MAX_CONDITIONING_FPS = 60.0
+_SNAP_CONDITIONING_FPS_ABOVE = 30.0
+
+
+def conditioning_fps(playback_fps: float) -> float:
+    """Transformer RoPE fps (upstream ``_conditioning_fps``): above 30 snaps to 60; playback fps is unchanged."""
+    return _MAX_CONDITIONING_FPS if playback_fps > _SNAP_CONDITIONING_FPS_ABOVE else playback_fps
+
+
+def resample_audio_time(audio_latent: mx.array, src_start: float, src_end: float, out_frames: int) -> mx.array:
+    """Linearly sample a ``(B, C, T, F)`` audio latent along T over ``[src_start, src_end)`` cells.
+
+    Raises:
+        ValueError: ``out_frames < 1``, empty latent, or empty window.
+    """
+    if out_frames < 1:
+        raise ValueError(f"out_frames must be >= 1, got {out_frames}")
+    full_t = audio_latent.shape[2]
+    if full_t < 1:
+        raise ValueError("Cannot resample an empty audio latent")
+    span = src_end - src_start
+    if span <= 0:
+        raise ValueError(f"Audio window is empty: [{src_start}, {src_end})")
+    positions = mx.clip(src_start + (span / out_frames) * mx.arange(out_frames, dtype=mx.float32), 0, full_t - 1)
+    lo = mx.floor(positions).astype(mx.int32)
+    hi = mx.minimum(lo + 1, full_t - 1)
+    weight = (positions - lo.astype(mx.float32)).astype(audio_latent.dtype).reshape(1, 1, -1, 1)
+    return audio_latent[:, :, lo] * (1 - weight) + audio_latent[:, :, hi] * weight
+
+
+def audio_latent_for_tile(
+    audio_latent: mx.array,
+    *,
+    pixel_start: int,
+    local_frames: int,
+    playback_fps: float,
+    source_duration: float,
+    cond_fps: float,
+) -> mx.array:
+    """Stage-1 audio for one temporal tile (upstream ``_audio_latent_for_tile``).
+
+    The window is wall-clock ``[pixel_start, pixel_start + local_frames) / playback_fps`` as a fraction of
+    ``source_duration`` (stage 1's ``canvas_frames / frame_rate``); the output length is the audio token
+    count of ``local_frames`` at ``cond_fps``.
+
+    Raises:
+        ValueError: non-positive ``local_frames`` / ``playback_fps`` / ``source_duration`` or empty audio.
+    """
+    if local_frames <= 0:
+        raise ValueError(f"local_frames must be >= 1, got {local_frames}")
+    if playback_fps <= 0:
+        raise ValueError(f"playback_fps must be > 0, got {playback_fps}")
+    if source_duration <= 0:
+        raise ValueError(f"source_duration must be > 0, got {source_duration}")
+    full_t = audio_latent.shape[2]
+    if full_t <= 0:
+        raise ValueError("Cannot slice audio for a tile with an empty audio latent")
+    src_start = pixel_start / playback_fps / source_duration * full_t
+    src_end = (pixel_start + local_frames) / playback_fps / source_duration * full_t
+    return resample_audio_time(
+        audio_latent, src_start, src_end, compute_audio_token_count(local_frames, frame_rate=cond_fps)
+    )
+
+
+def slot_initials_from_video(video_latent: mx.array, positions: Sequence[int]) -> mx.array:
+    """Nearest latent frames ``round(position / 8)`` (clamped) as ``(B, C, K, H, W)`` slot seeds."""
+    last = video_latent.shape[2] - 1
+    frames = [min(max(round(int(p) / _TEMPORAL_SCALE), 0), last) for p in positions]
+    return mx.concatenate([video_latent[:, :, i : i + 1] for i in frames], axis=2)
+
+
+def dedupe_slots(positions: Sequence[int], latents: mx.array) -> tuple[list[int], mx.array]:
+    """Sorted unique slot positions; lead-in duplicates keep the earlier tile's latent."""
+    first: dict[int, int] = {}
+    for index, position in enumerate(positions):
+        first.setdefault(int(position), index)
+    ordered = sorted(first)
+    return ordered, mx.concatenate([latents[:, :, first[p] : first[p] + 1] for p in ordered], axis=2)
+
+
+def merge_carry_forward_keyframes(
+    anchor_positions: Sequence[int],
+    anchor_latents: mx.array | None,
+    slot_positions: Sequence[int],
+    slot_latents: mx.array | None,
+) -> tuple[list[int], mx.array]:
+    """Next round's keyframe bag: carried anchors plus this round's slots, sorted by position.
+
+    Mirrors upstream ``_merge_carry_forward_keyframes`` (a slot at an anchor's position replaces it).
+
+    Raises:
+        RuntimeError: missing latents for non-empty positions, or an empty bag.
+        ValueError: latent count != position count.
+    """
+    by_position: dict[int, mx.array] = {}
+    for positions, latents, label in (
+        (anchor_positions, anchor_latents, "anchor"),
+        (slot_positions, slot_latents, "slot"),
+    ):
+        if not positions:
+            continue
+        if latents is None:
+            raise RuntimeError(f"Missing {label} keyframe latents for carry-forward merge")
+        if latents.shape[2] != len(positions):
+            raise ValueError(f"{label} latents K={latents.shape[2]} != {len(positions)} positions")
+        for index, position in enumerate(positions):
+            by_position[int(position)] = latents[:, :, index : index + 1]
+    if not by_position:
+        raise RuntimeError("Carry-forward keyframe bag is empty")
+    ordered = sorted(by_position)
+    return ordered, mx.concatenate([by_position[p] for p in ordered], axis=2)
+
+
+def rebase_image_conditionings(
+    images: Sequence, *, pixel_scale: int, pixel_start: int = 0, pixel_end: int | None = None
+) -> list:
+    """Map ``ImageConditioningInput.frame_idx`` onto a temporally upsampled grid (upstream ``_rebase_image_conditionings``).
+
+    After ``r`` rounds a moment sits at ``frame_idx * 2**r``; with ``pixel_end`` only images inside
+    ``[pixel_start, pixel_end]`` are kept and their index becomes tile-local.
+    """
+    rebased = []
+    for image in images:
+        scaled = image.frame_idx * pixel_scale
+        if pixel_end is not None and not (pixel_start <= scaled <= pixel_end):
+            continue
+        rebased.append(image._replace(frame_idx=scaled - pixel_start))
+    return rebased
 
 
 class DFRPipeline(DistilledPipeline):
@@ -352,4 +488,19 @@ def decode_keyframes_from_slots(
     )
 
 
-__all__ = ["DEFAULT_DETAILING_LORA", "DETAILING_LORA_STRENGTH", "DFRPipeline", "decode_keyframes_from_slots"]
+__all__ = [
+    "ANCHOR_KEYFRAME_STRENGTH",
+    "DEFAULT_DETAILING_LORA",
+    "DETAILING_LORA_STRENGTH",
+    "TEMPORAL_ANCESTRAL_ETA",
+    "TEMPORAL_SIGMAS",
+    "DFRPipeline",
+    "audio_latent_for_tile",
+    "conditioning_fps",
+    "decode_keyframes_from_slots",
+    "dedupe_slots",
+    "merge_carry_forward_keyframes",
+    "rebase_image_conditionings",
+    "resample_audio_time",
+    "slot_initials_from_video",
+]
