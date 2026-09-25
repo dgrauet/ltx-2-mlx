@@ -30,6 +30,7 @@ from ltx_core_mlx.loader import (
     apply_loras,
 )
 from ltx_core_mlx.loader.block_streaming import BlockLoraSource
+from ltx_core_mlx.model.upsampler import LatentUpsampler
 from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_token_count
@@ -234,6 +235,7 @@ class DFRPipeline(DistilledPipeline):
         self.detailing_lora = detailing_lora
         self._detailing_lora_path: str | None = None
         self._detailing_downscale: int | None = None
+        self._detailing_source: BlockLoraSource | None = None
         self.canvas_frames: int = 0
         self.generated_keyframe_positions: list[int] = []
         self.temporal_upscalings = temporal_upscalings
@@ -263,22 +265,23 @@ class DFRPipeline(DistilledPipeline):
 
         Streaming (``--low-ram``): append a :class:`BlockLoraSource` (fused at each block bind,
         exactly like ``ICLoraPipeline._fuse_loras``). Otherwise fuse in place and re-quantize:
-        stage 1 is finished and the model is never reused clean.
+        stage 1 is finished and the model is reused clean only by the temporal rounds, which
+        reload it (see :meth:`_detach_detailing_lora`).
         """
         assert self.dit is not None
         path = self._resolve_detailing_lora()
         with phase("Attaching the detailing IC-LoRA (strength 0.5)", verbose=self.verbose):
             if self.low_ram_streaming:
                 sources: list = list(object.__getattribute__(self.dit, "_lora_sources"))
-                sources.append(
-                    BlockLoraSource(
-                        path,
-                        block_prefix=LTXV_LORA_BLOCK_PREFIX,
-                        strength=DETAILING_LORA_STRENGTH,
-                        sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
-                    )
+                source = BlockLoraSource(
+                    path,
+                    block_prefix=LTXV_LORA_BLOCK_PREFIX,
+                    strength=DETAILING_LORA_STRENGTH,
+                    sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
                 )
+                sources.append(source)
                 object.__setattr__(self.dit, "_lora_sources", sources)
+                self._detailing_source = source
                 logger.info("Attached detailing LoRA streamer: %s (strength=%s)", path, DETAILING_LORA_STRENGTH)
                 return
 
@@ -299,6 +302,25 @@ class DFRPipeline(DistilledPipeline):
             del model_sd, lora_sd, fused
             aggressive_cleanup()
             logger.info("Fused detailing LoRA: %s (strength=%s)", path, DETAILING_LORA_STRENGTH)
+
+    def _detach_detailing_lora(self) -> None:
+        """Give the temporal rounds the distilled transformer without the detailing IC-LoRA (upstream ``self.stage``).
+
+        Streaming: drop the detailing :class:`BlockLoraSource` (user LoRAs stay). Otherwise the LoRA is fused
+        into the weights, so free the fused DiT and reload a clean one; pending user LoRAs are re-fused by
+        :meth:`_load_transformer_with_optional_streaming`.
+        """
+        if self.low_ram_streaming:
+            sources = [s for s in object.__getattribute__(self.dit, "_lora_sources") if s is not self._detailing_source]
+            object.__setattr__(self.dit, "_lora_sources", sources)
+            self._detailing_source = None
+            return
+        self.dit = None
+        aggressive_cleanup()
+        transformer_path = self.model_dir / "transformer.safetensors"
+        if not transformer_path.exists():
+            transformer_path = self._resolve_safetensors(self.model_dir, "transformer-distilled")
+        self.dit = self._load_transformer_with_optional_streaming(transformer_path)
 
     # ---- temporal upsampler -----------------------------------------------------------
     def _resolve_temporal_upsampler_path(self) -> Path:
@@ -321,7 +343,7 @@ class DFRPipeline(DistilledPipeline):
             )
         return path
 
-    def _load_temporal_upsampler(self):
+    def _load_temporal_upsampler(self) -> LatentUpsampler:
         """Build and load the temporal x2 latent upsampler."""
         with phase("Loading the temporal upsampler", verbose=self.verbose):
             return self._build_upsampler(self._resolve_temporal_upsampler_path())

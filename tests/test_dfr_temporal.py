@@ -127,3 +127,30 @@ def test_upsample_latent_takes_an_explicit_upsampler(tmp_path):
     x = mx.ones((1, 2, 3, 1, 1))
     assert float(pipe._upsample_latent(x).sum()) == 12.0  # default: self.upsampler
     assert float(pipe._upsample_latent(x, upsampler=lambda y: y * 3).sum()) == 18.0
+
+
+def test_detach_removes_only_the_detailing_source_under_low_ram(tmp_path):
+    pipe = DFRPipeline(str(_pack(tmp_path)), low_ram_streaming=True)
+
+    class _Dit:
+        pass
+
+    dit = _Dit()
+    user_src, detail_src = object(), object()
+    object.__setattr__(dit, "_lora_sources", [user_src, detail_src])
+    pipe.dit = dit
+    pipe._detailing_source = detail_src
+    pipe._detach_detailing_lora()
+    assert pipe.dit is dit and object.__getattribute__(dit, "_lora_sources") == [user_src]
+    assert pipe._detailing_source is None
+
+
+def test_detach_reloads_a_clean_transformer_without_low_ram(tmp_path, monkeypatch):
+    pack = _pack(tmp_path)
+    (pack / "transformer-distilled.safetensors").write_bytes(b"")
+    pipe = DFRPipeline(str(pack), low_ram_streaming=False)
+    pipe.dit = "fused"
+    loaded = []
+    monkeypatch.setattr(pipe, "_load_transformer_with_optional_streaming", lambda p: loaded.append(p) or "clean")
+    pipe._detach_detailing_lora()
+    assert pipe.dit == "clean" and loaded[0].name.startswith("transformer")
