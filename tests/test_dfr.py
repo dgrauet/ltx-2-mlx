@@ -318,6 +318,53 @@ def test_cli_detailing_lora_requires_dfr(tmp_path):
         _cmd_generate(_build_parser().parse_args(_argv(tmp_path, "--distilled", "--detailing-lora", "/x.safetensors")))
 
 
+def test_cli_temporal_flags_require_dfr(tmp_path):
+    with pytest.raises(SystemExit, match="--temporal-upscalings"):
+        _cmd_generate(_build_parser().parse_args(_argv(tmp_path, "--distilled", "--temporal-upscalings", "1")))
+    with pytest.raises(SystemExit, match="--temporal-upsampler-path"):
+        _cmd_generate(_build_parser().parse_args(_argv(tmp_path, "--distilled", "--temporal-upsampler-path", "t")))
+
+
+def test_cli_temporal_upscalings_choices(tmp_path):
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(_argv(tmp_path, "--dfr", "--temporal-upscalings", "3"))
+
+
+def test_cli_temporal_flags_reach_the_pipeline(monkeypatch, tmp_path):
+    captured = {}
+
+    class _FakePipe:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def generate_and_save(self, **kw):
+            return "o.mp4"
+
+    monkeypatch.setattr(dfr_mod, "DFRPipeline", _FakePipe)
+    upsampler_path = str(tmp_path / "t.safetensors")
+    _cmd_generate(
+        _build_parser().parse_args(
+            _argv(tmp_path, "--dfr", "--temporal-upscalings", "2", "--temporal-upsampler-path", upsampler_path)
+        )
+    )
+    assert captured["temporal_upscalings"] == 2
+    assert captured["temporal_upsampler_path"] == upsampler_path
+
+
+def test_cli_rounds_refuse_segments(tmp_path):
+    with pytest.raises(SystemExit, match="--segment"):
+        _cmd_generate(
+            _build_parser().parse_args(_argv(tmp_path, "--dfr", "--temporal-upscalings", "1", "--segment", "a"))
+        )
+
+
+def test_cli_rounds_refuse_tiling(tmp_path):
+    with pytest.raises(SystemExit, match="--tile"):
+        _cmd_generate(
+            _build_parser().parse_args(_argv(tmp_path, "--dfr", "--temporal-upscalings", "1", "--tile-spatial", "2"))
+        )
+
+
 def test_decode_keyframes_from_slots_filters_the_canvas_padding(capsys):
     slots = mx.random.normal((1, 128, 3, 4, 4))
     kf = decode_keyframes_from_slots(slots, [24, 48, 72], num_frames=49, verbose=True)

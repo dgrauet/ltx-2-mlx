@@ -550,7 +550,7 @@ examples:
             "[experimental] DFR (Diffusion Fidelity Rendering) base path, LTX 2.5 packs only: distilled "
             "half-res stage with keyframe slots on a segment-aligned canvas, then a full-res detailing "
             "stage with the official detailing IC-LoRA guided by the stage-1 latent. Mirrors upstream "
-            "DFRPipeline (spatial_upscalings=1, temporal_upscalings=0). The detailing LoRA is a gated "
+            "DFRPipeline (spatial_upscalings=1). The detailing LoRA is a gated "
             "HuggingFace repo: accept its licence on the model page once before the first run."
         ),
     )
@@ -562,6 +562,24 @@ examples:
             "Detailing IC-LoRA for --dfr (local .safetensors or HF repo id). Default: the official LTX-2.5 "
             "detailing LoRA (Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler, gated: accept its licence "
             "on HuggingFace once, or pass a local file)."
+        ),
+    )
+    gen.add_argument(
+        "--temporal-upscalings",
+        type=int,
+        choices=(0, 1, 2),
+        default=0,
+        help=(
+            "DFR temporal x2 refine rounds: 0 = base fps, 1 = 2x frames and fps (2 tiles), "
+            "2 = 4x (4 tiles). --dfr only."
+        ),
+    )
+    gen.add_argument(
+        "--temporal-upsampler-path",
+        default=None,
+        help=(
+            "Temporal x2 latent upsampler for --temporal-upscalings (default: the pack's "
+            "temporal_upscaler_x2_v1_0.safetensors). --dfr only."
         ),
     )
     gen.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30 standard, 15 HQ)")
@@ -1074,8 +1092,17 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             raise SystemExit("--dfr runs the distilled flow; TeaCache does not apply.")
         if args.cfg_scale is not None or args.stg_scale is not None:
             raise SystemExit("--dfr runs the distilled flow (no CFG / STG); drop --cfg-scale / --stg-scale.")
-    elif args.detailing_lora != DEFAULT_DETAILING_LORA:
-        raise SystemExit("--detailing-lora only applies with --dfr.")
+        if args.temporal_upscalings and relay is not None:
+            raise SystemExit("--temporal-upscalings does not support --segment (Prompt Relay).")
+        if args.temporal_upscalings and _build_tile_count_config(args) is not None:
+            raise SystemExit("--temporal-upscalings does not support --tile-frames / --tile-spatial.")
+    else:
+        if args.detailing_lora != DEFAULT_DETAILING_LORA:
+            raise SystemExit("--detailing-lora only applies with --dfr.")
+        if args.temporal_upscalings:
+            raise SystemExit("--temporal-upscalings only applies with --dfr.")
+        if args.temporal_upsampler_path is not None:
+            raise SystemExit("--temporal-upsampler-path only applies with --dfr.")
 
     if args.one_stage:
         from ltx_pipelines_mlx.ti2vid_one_stage import TI2VidOneStagePipeline
@@ -1130,6 +1157,9 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             print("Mode: DFR (half-res + keyframe slots -> detailing IC-LoRA at full res)")
             print(f"  Model: {args.model}")
             print(f"  Detailing LoRA: {args.detailing_lora}")
+            if args.temporal_upscalings:
+                out_fps = args.frame_rate * 2**args.temporal_upscalings
+                print(f"  Temporal upscalings: {args.temporal_upscalings} ({out_fps:g} fps out)")
 
         pipe = DFRPipeline(
             model_dir=args.model,
@@ -1138,6 +1168,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             low_ram_streaming=getattr(args, "low_ram", False),
             tile_count=_build_tile_count_config(args),
             detailing_lora=args.detailing_lora,
+            temporal_upscalings=args.temporal_upscalings,
+            temporal_upsampler_path=args.temporal_upsampler_path,
         )
         pipe.verbose = not args.quiet
         pipe.stepwise = _build_stepwise(args)
