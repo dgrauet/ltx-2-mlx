@@ -577,6 +577,7 @@ examples:
     gen.add_argument(
         "--temporal-upsampler-path",
         default=None,
+        metavar="PATH",
         help=(
             "Temporal x2 latent upsampler for --temporal-upscalings (default: the pack's "
             "temporal_upscaler_x2_v1_0.safetensors). --dfr only."

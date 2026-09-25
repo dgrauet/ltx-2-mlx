@@ -1162,14 +1162,21 @@ that lookup), then cuts the doubled timeline into `2**round` keyframe-seam tiles
 tiling is a hard split, not a blend: the lead-in before a seam is dropped and the earlier tile keeps
 the seam frame. Each tile is re-denoised independently with the **distilled transformer, detailing
 LoRA detached** (`_detach_detailing_lora`, run once before round 1: under `--low-ram` this drops the
-`BlockLoraSource` from the streamer, otherwise it reloads a clean transformer) on the last 4 entries
-of the distilled sigma schedule (`TEMPORAL_SIGMAS = LTX_2_5_DISTILLED_SIGMAS[4:]`) via ancestral Euler
+`BlockLoraSource` from the streamer, otherwise it reloads a clean transformer) on the last 4 denoising
+steps of the distilled sigma schedule (`TEMPORAL_SIGMAS = LTX_2_5_DISTILLED_SIGMAS[4:]`, 5 sigma
+entries bracketing 4 steps) via ancestral Euler
 (`EulerAncestralDiffusionStep(eta=TEMPORAL_ANCESTRAL_ETA=0.5)`, noise seed `seed + 1000*round + tile`).
 Conditioning per tile: the carried keyframes anchor the tile at `ANCHOR_KEYFRAME_STRENGTH = 0.95`
 (soft, not a hard replace), plus fresh mid-segment generated-keyframe slots on the doubled
 timeline. Audio is **frozen**, not re-denoised: stage 1's audio latent is windowed to the tile's
 time range and resampled to the tile's new token count (`resample_audio_time`,
-`audio_latent_for_tile`) with `denoise_mask=0`. The transformer's conditioning fps is snapped by
+`audio_latent_for_tile`) with `denoise_mask=0`. Known divergence: upstream additionally builds this
+stream with `ModalitySpec(frozen=True, ...)`, which forces the audio sigma fed to the model to 0 too
+(driving the audio prompt AdaLN and the audio->video cross-attention gate); here the audio latent
+stays clean via `denoise_mask=0` alone, but the uniformly-zero mask makes the loop skip per-token
+timesteps for audio and fall back to the step's global sigma, so the model still sees the step sigma
+for audio instead of a frozen 0 — shared with `a2v` and `lipdub`, tracked as a follow-up. The
+transformer's conditioning fps is snapped by
 `conditioning_fps()` — RoPE fps above 30 snaps to 60 (`_MAX_CONDITIONING_FPS = 60.0`); the actual
 playback fps (`frame_rate * 2**temporal_upscalings`) is unchanged. After each round,
 `merge_carry_forward_keyframes` folds the round's new slots (lead-in duplicates: the earlier tile

@@ -44,13 +44,14 @@ from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization
 from ltx_pipelines_mlx.dfr_layout import TemporalTilePlan, resolve_canvas
-from ltx_pipelines_mlx.distilled import DistilledPipeline
+from ltx_pipelines_mlx.distilled import DistilledPipeline, Stage1Result
 from ltx_pipelines_mlx.iclora_utils import (
     read_lora_reference_downscale_factor,
     reference_conditioning_from_latent,
 )
 from ltx_pipelines_mlx.scheduler import LTX_2_5_DISTILLED_SIGMAS
 from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings, resolve_lora_path
+from ltx_pipelines_mlx.utils.args import ImageConditioningInput
 from ltx_pipelines_mlx.utils.progress import phase
 from ltx_pipelines_mlx.utils.types import DEFAULT_AUTO_DURATION, AutoDuration
 
@@ -187,8 +188,8 @@ def merge_carry_forward_keyframes(
 
 
 def rebase_image_conditionings(
-    images: Sequence, *, pixel_scale: int, pixel_start: int = 0, pixel_end: int | None = None
-) -> list:
+    images: Sequence[ImageConditioningInput], *, pixel_scale: int, pixel_start: int = 0, pixel_end: int | None = None
+) -> list[ImageConditioningInput]:
     """Map ``ImageConditioningInput.frame_idx`` onto a temporally upsampled grid (upstream ``_rebase_image_conditionings``).
 
     After ``r`` rounds a moment sits at ``frame_idx * 2**r``; with ``pixel_end`` only images inside
@@ -355,9 +356,28 @@ class DFRPipeline(DistilledPipeline):
         return path
 
     def _load_temporal_upsampler(self) -> LatentUpsampler:
-        """Build and load the temporal x2 latent upsampler."""
+        """Build and load the temporal x2 latent upsampler.
+
+        Raises:
+            ValueError: the resolved weights build a spatial (or otherwise non-temporal)
+                upsampler — either because the ``<stem>_config.json`` alongside the weights
+                is missing (``_build_upsampler`` then falls back to a default *spatial*
+                ``LatentUpsampler()``) or because it names a spatial variant. A spatial
+                upsampler silently wrecks the video exactly like the untrained-module case
+                :meth:`TI2VidTwoStagesPipeline._resolve_upsampler_path` guards against.
+        """
         with phase("Loading the temporal upsampler", verbose=self.verbose):
-            return self._build_upsampler(self._resolve_temporal_upsampler_path())
+            path = self._resolve_temporal_upsampler_path()
+            upsampler = self._build_upsampler(path)
+            if not upsampler.temporal_upsample:
+                raise ValueError(
+                    f"{path} does not build a temporal upsampler (LatentUpsampler.temporal_upsample is False). "
+                    "--temporal-upscalings needs a temporal x2 upsampler (pack file "
+                    f"'{TEMPORAL_UPSAMPLER_STEM}.safetensors') with its matching "
+                    f"'{TEMPORAL_UPSAMPLER_STEM}_config.json' alongside it; a spatial upsampler "
+                    "(or weights loaded without their config) will silently produce garbage output."
+                )
+            return upsampler
 
     # ---- generation -----------------------------------------------------------------
     def generate_two_stage(  # type: ignore[override]
@@ -521,13 +541,13 @@ class DFRPipeline(DistilledPipeline):
     # ---- temporal rounds ------------------------------------------------------------
     def _denoise_temporal_tile(
         self,
-        stage1,
+        stage1: Stage1Result,
         tile_video: mx.array,
         *,
         cond_fps: float,
         anchors: list[tuple[int, mx.array]],
         slots_local: list[int],
-        images: list,
+        images: list[ImageConditioningInput],
         audio_tokens: mx.array,
         noise_seed: int,
         init_seed: int,
@@ -589,7 +609,16 @@ class DFRPipeline(DistilledPipeline):
             sigma=TEMPORAL_SIGMAS[0],
             initial_latent=tokens,
         )
-        # Frozen audio (upstream ``ModalitySpec(frozen=True, noise_scale=0.0)``): clean, never denoised.
+        # Frozen audio: setting denoise_mask=0 below keeps the audio latent clean (never denoised)
+        # across the ancestral loop. Known divergence: upstream additionally builds this stream as
+        # ``ModalitySpec(frozen=True, ...)``, which forces the audio ``sigma`` fed to the model to
+        # 0 as well; that sigma drives the audio prompt AdaLN and the audio->video cross-attention
+        # gate. Here, because the mask is uniformly 0, ``euler_ancestral_denoising_loop`` treats the
+        # audio state as "uniform" and skips computing per-token timesteps for it, so the model
+        # falls back to the loop's *global* step sigma for the audio AdaLN / A->V gate instead of a
+        # frozen 0 — the audio latent itself still stays clean (denoise_mask blending is unaffected),
+        # but the model isn't told the audio is frozen. Shared with a2v and lipdub; tracked for a
+        # follow-up fix.
         audio_state = distilled_mod.create_noised_state(
             base_shape=audio_tokens.shape,
             conditionings=[],
@@ -618,7 +647,7 @@ class DFRPipeline(DistilledPipeline):
         return latent, slots
 
     def _run_temporal_rounds(
-        self, stage1, video_latent: mx.array, *, canvas_frames: int, frame_rate: float, seed: int
+        self, stage1: Stage1Result, video_latent: mx.array, *, canvas_frames: int, frame_rate: float, seed: int
     ) -> tuple[mx.array, int]:
         """Upstream ``DFRPipeline.__call__`` temporal rounds 1..T on the stage-2 canvas.
 

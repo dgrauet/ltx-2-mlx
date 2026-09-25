@@ -121,6 +121,24 @@ def test_temporal_upsampler_override_and_missing(tmp_path):
         pipe._resolve_temporal_upsampler_path()
 
 
+def test_load_temporal_upsampler_rejects_a_spatial_module(tmp_path, monkeypatch):
+    """A resolved-but-spatial (or config-less) upsampler must fail loud, not silently wreck the video."""
+    pack = _pack(tmp_path)
+    (pack / f"{TEMPORAL_UPSAMPLER_STEM}.safetensors").write_bytes(b"")
+    pipe = DFRPipeline(str(pack), temporal_upscalings=1)
+
+    class _Stub:
+        def __init__(self, temporal_upsample: bool):
+            self.temporal_upsample = temporal_upsample
+
+    monkeypatch.setattr(pipe, "_build_upsampler", lambda path: _Stub(temporal_upsample=False))
+    with pytest.raises(ValueError, match="does not build a temporal upsampler"):
+        pipe._load_temporal_upsampler()
+
+    monkeypatch.setattr(pipe, "_build_upsampler", lambda path: _Stub(temporal_upsample=True))
+    assert pipe._load_temporal_upsampler().temporal_upsample is True
+
+
 def test_upsample_latent_takes_an_explicit_upsampler(tmp_path):
     from tests.test_ltx25_distilled import _FakeVaeEncoder
 

@@ -33,6 +33,7 @@ from ltx_core_mlx.components.patchifiers import (
 )
 from ltx_core_mlx.conditioning.types.keyframe_slots import extract_generated_keyframes
 from ltx_core_mlx.model.transformer.model import X0Model
+from ltx_core_mlx.model.upsampler import LatentUpsampler
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import (
     compute_audio_positions,
@@ -495,7 +496,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             width,
         )
 
-    def _upsample_latent(self, video_half: mx.array, upsampler=None) -> mx.array:
+    def _upsample_latent(self, video_half: mx.array, upsampler: LatentUpsampler | None = None) -> mx.array:
         """Denormalize, upsample, and renormalize a stage-1 latent.
 
         Args:
