@@ -636,6 +636,9 @@ class DFRPipeline(DistilledPipeline):
         Raises:
             RuntimeError: missing carry keyframes, a tile without slots, or a stitched length mismatch.
         """
+        # stage1.x0_model wraps the detailing-fused DiT: drop it (in place, so the caller's alias goes too)
+        # or it stays resident beside the clean DiT the detach reloads. The rounds build their own X0Model.
+        stage1.x0_model = None
         self._detach_detailing_lora()
         temporal_upsampler = self._load_temporal_upsampler()
         # low_memory stage 2 frees the VAE encoder; the rounds need its latent stats (denorm/renorm

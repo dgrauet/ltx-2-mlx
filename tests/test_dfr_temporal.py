@@ -294,3 +294,18 @@ def test_rounds_reload_the_vae_encoder_freed_by_low_memory_stage2(tmp_path, monk
     video, _ = _run(pipe, num_frames=49)
     assert reloads == [True] and len(ancestral.calls) == 3
     assert video.shape[2] == ((49 - 1) * 2) // 8 + 1
+
+
+def test_rounds_release_the_fused_stage1_dit(tmp_path, monkeypatch):
+    """Stage1Result.x0_model wraps the detailing-fused DiT; it must not stay resident beside the clean reload."""
+    pipe, *_ = _make_rounds(tmp_path, monkeypatch, t=1, low_ram=False)
+    seen = []
+    real = pipe._denoise_temporal_tile
+
+    def spy(stage1, *args, **kwargs):
+        seen.append(stage1.x0_model)
+        return real(stage1, *args, **kwargs)
+
+    monkeypatch.setattr(pipe, "_denoise_temporal_tile", spy)
+    _run(pipe, num_frames=49)
+    assert seen and all(x0 is None for x0 in seen)

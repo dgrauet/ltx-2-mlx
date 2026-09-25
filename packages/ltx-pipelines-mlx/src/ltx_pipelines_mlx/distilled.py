@@ -83,7 +83,8 @@ class Stage1Result:
         video_embeds: Video text embeddings from prompt encoding.
         audio_embeds: Audio text embeddings from prompt encoding.
         relay_mask: Prompt Relay cross-attention mask builder.
-        x0_model: The stage 1 X0 model, reused for stage 2 when tiling is off.
+        x0_model: The stage 1 X0 model, reused for stage 2 when tiling is off; ``None`` once
+            released (DFR drops it before its temporal rounds reload a clean DiT).
     """
 
     video_tokens: mx.array
@@ -94,7 +95,7 @@ class Stage1Result:
     video_embeds: mx.array
     audio_embeds: mx.array
     relay_mask: Callable
-    x0_model: X0Model
+    x0_model: X0Model | None
 
 
 class DistilledPipeline(TI2VidTwoStagesPipeline):
