@@ -325,7 +325,8 @@ class LipDubPipeline(ICLoraPipeline):
             initial_latent=video_tokens_up,
         )
 
-        # Stage 2 audio is frozen (upstream noise_scale=0, frozen=True).
+        # Stage 2 audio is frozen (upstream ``dubit.py:319-325`` sets
+        # ``ModalitySpec(frozen=True, noise_scale=0.0)``).
         # sigma=0 + initial_latent=s1 keeps the audio unchanged through Euler steps.
         audio_state_2 = create_noised_state(
             base_shape=s1_audio_latent_tokens.shape,
@@ -335,6 +336,7 @@ class LipDubPipeline(ICLoraPipeline):
             seed=seed + 2,
             sigma=0.0,
             initial_latent=s1_audio_latent_tokens,
+            frozen=True,
         )
         audio_state_2 = ref_cond.apply(audio_state_2, num_noisy_tokens=audio_T)
 

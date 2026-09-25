@@ -239,12 +239,14 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             legacy_scalar_blend=True,
         )
 
-        # Audio frozen in Stage 1 (denoise_mask=0 = preserve)
+        # Audio frozen in Stage 1 (denoise_mask=0 = preserve; upstream
+        # ``a2vid_two_stage.py:264-273`` sets ``ModalitySpec(frozen=True)``).
         audio_state_1 = LatentState(
             latent=audio_tokens,
             clean_latent=audio_tokens,
             denoise_mask=mx.zeros((1, audio_tokens.shape[1], 1), dtype=mx.bfloat16),
             positions=audio_positions,
+            frozen=True,
         )
 
         # Stage 1 denoising
@@ -329,7 +331,8 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             legacy_scalar_blend=True,
         )
 
-        # Stage 2 audio: default mask path matches legacy noise_latent_state.
+        # Stage 2 audio: frozen (upstream ``a2vid_two_stage.py:302-313`` also
+        # sets ``ModalitySpec(frozen=True)`` in Stage 2).
         audio_state_2 = create_noised_state(
             base_shape=audio_tokens.shape,
             conditionings=[],
@@ -338,6 +341,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             seed=seed + 2,
             sigma=start_sigma,
             initial_latent=audio_tokens,
+            frozen=True,
         )
 
         self._pre_denoise_flush(video_state_2, audio_state_2)

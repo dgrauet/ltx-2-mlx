@@ -312,7 +312,11 @@ class RetakePipeline(BasePipeline):
         video_positions = compute_video_positions(F, H, W, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_T)
 
-        # Create video state with temporal mask (1 = regenerate, 0 = preserve)
+        # Create video state with temporal mask (1 = regenerate, 0 = preserve).
+        # Upstream ``retake.py:267-274`` also takes a ``regenerate_video`` flag
+        # and sets ``frozen=not regenerate_video``; our port always regenerates
+        # the video region (no ``regenerate_video`` parameter), so video is
+        # never a whole-stream-frozen conditioning here.
         region = TemporalRegionMask(start_frame, end_frame)
         denoise_mask = region.create_mask(F, tokens_per_frame)
 
@@ -340,11 +344,16 @@ class RetakePipeline(BasePipeline):
             # Preserve all audio (mask=0)
             audio_mask = mx.zeros((1, audio_T, 1), dtype=mx.bfloat16)
 
+        # Upstream ``retake.py:275-281``: ``frozen=initial_audio_latent is not
+        # None and not regenerate_audio``. ``source_audio_latent`` is always
+        # provided here (zeros when the source has no audio track), so the
+        # condition collapses to ``not regenerate_audio``.
         audio_state = LatentState(
             latent=audio_tokens,
             clean_latent=audio_tokens,
             denoise_mask=audio_mask,
             positions=audio_positions,
+            frozen=not regenerate_audio,
         )
         audio_state = noise_latent_state(audio_state, sigma=1.0, seed=seed + 1)
 
@@ -505,6 +514,10 @@ class RetakePipeline(BasePipeline):
         video_positions = compute_video_positions(F_total, H, W, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_total_T)
 
+        # No ``frozen`` marking here (nor for audio below): upstream's
+        # ``LatentState.frozen`` covers a *whole stream* that is pure
+        # conditioning; ``extend`` always regenerates a new segment on both
+        # modalities, so neither stream is ever entirely preserved.
         video_state = LatentState(
             latent=clean_video,
             clean_latent=clean_video,

@@ -93,6 +93,7 @@ def create_noised_state(
     initial_latent: mx.array | None = None,
     dtype: mx.Dtype = mx.bfloat16,
     legacy_scalar_blend: bool = False,
+    frozen: bool = False,
 ) -> LatentState:
     """Build a noised latent state from conditionings + optional initial latent.
 
@@ -122,6 +123,12 @@ def create_noised_state(
             region. ``None`` means start from zeros (typical stage 1).
             Provided as the upscaled stage-1 latent for stage 2.
         dtype: dtype of the resulting state arrays.
+        frozen: Whole stream is conditioning, not generated (upstream
+            ``ModalitySpec.frozen`` / ``LatentState.frozen``, see
+            ``ltx_pipelines.utils.blocks._build_state``). Zeroes the
+            resulting ``denoise_mask`` and sets ``LatentState.frozen``
+            after the normal build, so the state is otherwise identical
+            to the unfrozen path.
         legacy_scalar_blend: When True, apply scalar-sigma noise blend
             BEFORE conditionings (matches the legacy
             ``noise * sigma + clean * (1 - sigma)`` inline arithmetic
@@ -140,6 +147,13 @@ def create_noised_state(
     Returns:
         Noised LatentState ready to feed into the denoising loop.
     """
+    if frozen:
+        # Upstream always pairs ``ModalitySpec(frozen=True)`` with
+        # ``noise_scale=0.0`` -- forcing it here (rather than trusting the
+        # caller) keeps the noise blend below a no-op regardless of the
+        # ``sigma`` argument, since ``legacy_scalar_blend`` ignores the
+        # per-token mask and would otherwise corrupt ``initial_latent``.
+        sigma = 0.0
     if initial_latent is None:
         latent = mx.zeros(base_shape, dtype=dtype)
     else:
@@ -177,10 +191,14 @@ def create_noised_state(
         blended = noise * sigma + state.clean_latent * (1.0 - sigma)
         state = replace(state, latent=blended)
         state = state_with_conditionings(state, conditionings, spatial_dims)
-        return _noise_generated_keyframe_slots(state, sigma, seed)
+        state = _noise_generated_keyframe_slots(state, sigma, seed)
+    else:
+        state = state_with_conditionings(state, conditionings, spatial_dims)
+        state = noise_latent_state(state, sigma=sigma, seed=seed)
 
-    state = state_with_conditionings(state, conditionings, spatial_dims)
-    return noise_latent_state(state, sigma=sigma, seed=seed)
+    if frozen:
+        state = replace(state, denoise_mask=mx.zeros_like(state.denoise_mask), frozen=True)
+    return state
 
 
 #: Decorrelates the slot noise draw from the main latent draw (which reuses ``seed``).
