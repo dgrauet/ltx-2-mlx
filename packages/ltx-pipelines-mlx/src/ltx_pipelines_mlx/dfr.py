@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 import mlx.core as mx
 from huggingface_hub.errors import GatedRepoError
@@ -52,6 +53,8 @@ _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags mx.eval 
 DEFAULT_DETAILING_LORA = "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler"
 #: Upstream ``_DETAILING_LORA_STRENGTH``; not a user knob.
 DETAILING_LORA_STRENGTH = 0.5
+#: Pack file stem of the temporal x2 latent upsampler (LTX-2.5 packs).
+TEMPORAL_UPSAMPLER_STEM = "temporal_upscaler_x2_v1_0"
 #: Pixel frames per latent frame of the video VAE (there is no pipeline-level constant).
 _TEMPORAL_SCALE = 8
 
@@ -202,6 +205,10 @@ class DFRPipeline(DistilledPipeline):
         low_ram_streaming: Stream transformer blocks from disk.
         tile_count: Optional modality tiling configuration.
         detailing_lora: Local ``.safetensors`` path or HF repo id of the detailing IC-LoRA.
+        temporal_upscalings: Number of temporal-round passes (0, 1, or 2). 0 disables temporal
+            rounds (current base-path behaviour).
+        temporal_upsampler_path: Explicit path to the temporal x2 latent upsampler weights.
+            ``None`` resolves it from the pack (see :meth:`_resolve_temporal_upsampler_path`).
     """
 
     def __init__(
@@ -212,6 +219,8 @@ class DFRPipeline(DistilledPipeline):
         low_ram_streaming: bool = False,
         tile_count=None,
         detailing_lora: str = DEFAULT_DETAILING_LORA,
+        temporal_upscalings: int = 0,
+        temporal_upsampler_path: str | None = None,
     ):
         super().__init__(
             model_dir,
@@ -220,11 +229,15 @@ class DFRPipeline(DistilledPipeline):
             low_ram_streaming=low_ram_streaming,
             tile_count=tile_count,
         )
+        if temporal_upscalings not in (0, 1, 2):
+            raise ValueError(f"temporal_upscalings must be 0, 1 or 2, got {temporal_upscalings}")
         self.detailing_lora = detailing_lora
         self._detailing_lora_path: str | None = None
         self._detailing_downscale: int | None = None
         self.canvas_frames: int = 0
         self.generated_keyframe_positions: list[int] = []
+        self.temporal_upscalings = temporal_upscalings
+        self.temporal_upsampler_path = temporal_upsampler_path
 
     # ---- detailing LoRA -----------------------------------------------------------
     def _resolve_detailing_lora(self) -> str:
@@ -286,6 +299,32 @@ class DFRPipeline(DistilledPipeline):
             del model_sd, lora_sd, fused
             aggressive_cleanup()
             logger.info("Fused detailing LoRA: %s (strength=%s)", path, DETAILING_LORA_STRENGTH)
+
+    # ---- temporal upsampler -----------------------------------------------------------
+    def _resolve_temporal_upsampler_path(self) -> Path:
+        """The temporal x2 upsampler: ``temporal_upsampler_path`` when set, else the pack's file.
+
+        Raises:
+            FileNotFoundError: neither exists (a random temporal upsampler would silently wreck the video).
+        """
+        if self.temporal_upsampler_path is not None:
+            path = Path(self.temporal_upsampler_path)
+            if not path.exists():
+                raise FileNotFoundError(f"--temporal-upsampler-path {path} does not exist")
+            return path
+        path = self._resolve_safetensors(self.model_dir, TEMPORAL_UPSAMPLER_STEM)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Temporal upsampler weights not found in {self.model_dir} (looked for "
+                f"{TEMPORAL_UPSAMPLER_STEM}*.safetensors); --temporal-upscalings needs it. Pass "
+                "--temporal-upsampler-path or download it into the pack."
+            )
+        return path
+
+    def _load_temporal_upsampler(self):
+        """Build and load the temporal x2 latent upsampler."""
+        with phase("Loading the temporal upsampler", verbose=self.verbose):
+            return self._build_upsampler(self._resolve_temporal_upsampler_path())
 
     # ---- generation -----------------------------------------------------------------
     def generate_two_stage(  # type: ignore[override]

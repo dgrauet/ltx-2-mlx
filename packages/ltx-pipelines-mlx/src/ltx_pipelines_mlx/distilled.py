@@ -494,19 +494,22 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             width,
         )
 
-    def _upsample_latent(self, video_half: mx.array) -> mx.array:
-        """Denormalize, spatially upsample 2x, and renormalize a stage-1 latent.
+    def _upsample_latent(self, video_half: mx.array, upsampler=None) -> mx.array:
+        """Denormalize, upsample, and renormalize a stage-1 latent.
 
         Args:
             video_half: Stage 1 video latent, `(1, 128, F, H_half, W_half)`.
+            upsampler: Module to apply between denorm/renorm. `None` uses the
+                spatial `self.upsampler` (unchanged default behaviour).
 
         Returns:
-            Upscaled video latent, `(1, 128, F, 2*H_half, 2*W_half)`, materialized.
+            Upscaled video latent, `(1, 128, F', H', W')`, materialized.
         """
+        up = self.upsampler if upsampler is None else upsampler
         video_mlx = video_half.transpose(0, 2, 3, 4, 1)
         video_denorm = self.vae_encoder.denormalize_latent(video_mlx)
         video_denorm = video_denorm.transpose(0, 4, 1, 2, 3)
-        video_upscaled = self.upsampler(video_denorm)
+        video_upscaled = up(video_denorm)
         video_up_mlx = video_upscaled.transpose(0, 2, 3, 4, 1)
         video_upscaled = self.vae_encoder.normalize_latent(video_up_mlx)
         video_upscaled = video_upscaled.transpose(0, 4, 1, 2, 3)

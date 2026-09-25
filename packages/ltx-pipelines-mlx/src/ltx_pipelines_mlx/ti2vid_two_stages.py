@@ -306,6 +306,28 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             )
         return weights_path
 
+    def _build_upsampler(self, weights_path: Path) -> LatentUpsampler:
+        """Build a :class:`LatentUpsampler` from ``<stem>_config.json`` and load ``weights_path``."""
+        import json
+
+        config_path = weights_path.parent / f"{weights_path.stem}_config.json"
+        if config_path.exists():
+            raw_config = json.loads(config_path.read_text())
+            # Old format nests fields under a "config" key; newer conversions
+            # (e.g. LTX-2.5) emit the fields flat at the top level.
+            config = raw_config.get("config", raw_config)
+            upsampler = LatentUpsampler.from_config(config)
+        else:
+            upsampler = LatentUpsampler()
+
+        raw = load_split_safetensors(weights_path)
+        # Old format keys are prefixed with the stem; new format uses bare keys.
+        stem_prefix = weights_path.stem + "."
+        if raw and all(k.startswith(stem_prefix) for k in raw):
+            raw = {k[len(stem_prefix) :]: v for k, v in raw.items()}
+        upsampler.load_weights(list(raw.items()))
+        return upsampler
+
     def _load_upsampler(self) -> None:
         """Load the spatial upsampler from config and weights.
 
@@ -313,26 +335,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             FileNotFoundError: propagated from :meth:`_resolve_upsampler_path`
                 when no upsampler weights file is present in the model dir.
         """
-        import json
-
-        weights_path = self._resolve_upsampler_path()
-
-        config_path = self.model_dir / f"{weights_path.stem}_config.json"
-        if config_path.exists():
-            raw_config = json.loads(config_path.read_text())
-            # Old format nests fields under a "config" key; newer conversions
-            # (e.g. LTX-2.5) emit the fields flat at the top level.
-            config = raw_config.get("config", raw_config)
-            self.upsampler = LatentUpsampler.from_config(config)
-        else:
-            self.upsampler = LatentUpsampler()
-
-        raw = load_split_safetensors(weights_path)
-        # Old format keys are prefixed with the stem; new format uses bare keys.
-        stem_prefix = weights_path.stem + "."
-        if raw and all(k.startswith(stem_prefix) for k in raw):
-            raw = {k[len(stem_prefix) :]: v for k, v in raw.items()}
-        self.upsampler.load_weights(list(raw.items()))
+        self.upsampler = self._build_upsampler(self._resolve_upsampler_path())
         aggressive_cleanup()
 
     def load(self) -> None:

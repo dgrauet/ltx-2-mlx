@@ -1,5 +1,8 @@
 """DFR temporal-round helpers — pinned on upstream dfr_pipeline.py semantics."""
 
+import json
+from pathlib import Path
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -9,6 +12,8 @@ from ltx_pipelines_mlx.dfr import (
     ANCHOR_KEYFRAME_STRENGTH,
     TEMPORAL_ANCESTRAL_ETA,
     TEMPORAL_SIGMAS,
+    TEMPORAL_UPSAMPLER_STEM,
+    DFRPipeline,
     audio_latent_for_tile,
     conditioning_fps,
     dedupe_slots,
@@ -82,3 +87,43 @@ def test_rebase_image_conditionings_scales_filters_and_rebases():
     assert rebase_image_conditionings(imgs, pixel_scale=2, pixel_start=96, pixel_end=240) == [
         ImageConditioningInput("b.png", 24, 0.8)
     ]
+
+
+def _pack(tmp_path: Path) -> Path:
+    cfg = {"transformer": {"num_layers": 48, "ff_bias": False, "use_keyframes_abs_pos_embedding": True}}
+    (tmp_path / "embedded_config.json").write_text(json.dumps(cfg))
+    return tmp_path
+
+
+def test_temporal_upscalings_validated_at_construction(tmp_path):
+    with pytest.raises(ValueError, match="temporal_upscalings"):
+        DFRPipeline(str(_pack(tmp_path)), temporal_upscalings=3)
+
+
+def test_temporal_upsampler_resolves_from_the_pack(tmp_path):
+    pack = _pack(tmp_path)
+    (pack / f"{TEMPORAL_UPSAMPLER_STEM}.safetensors").write_bytes(b"")
+    pipe = DFRPipeline(str(pack), temporal_upscalings=1)
+    assert pipe._resolve_temporal_upsampler_path() == pack / f"{TEMPORAL_UPSAMPLER_STEM}.safetensors"
+
+
+def test_temporal_upsampler_override_and_missing(tmp_path):
+    pack = _pack(tmp_path)
+    other = tmp_path / "t.safetensors"
+    other.write_bytes(b"")
+    pipe = DFRPipeline(str(pack), temporal_upscalings=1, temporal_upsampler_path=str(other))
+    assert pipe._resolve_temporal_upsampler_path() == other
+    pipe = DFRPipeline(str(pack), temporal_upscalings=1)
+    with pytest.raises(FileNotFoundError, match=TEMPORAL_UPSAMPLER_STEM):
+        pipe._resolve_temporal_upsampler_path()
+
+
+def test_upsample_latent_takes_an_explicit_upsampler(tmp_path):
+    from tests.test_ltx25_distilled import _FakeVaeEncoder
+
+    pipe = DFRPipeline(str(_pack(tmp_path)))
+    pipe.vae_encoder = _FakeVaeEncoder()
+    pipe.upsampler = lambda x: x * 2
+    x = mx.ones((1, 2, 3, 1, 1))
+    assert float(pipe._upsample_latent(x).sum()) == 12.0  # default: self.upsampler
+    assert float(pipe._upsample_latent(x, upsampler=lambda y: y * 3).sum()) == 18.0
