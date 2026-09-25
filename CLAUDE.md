@@ -1166,18 +1166,31 @@ LoRA detached** (`_detach_detailing_lora`, run once before round 1: under `--low
 of the distilled sigma schedule (`TEMPORAL_SIGMAS = LTX_2_5_DISTILLED_SIGMAS[4:]`) via ancestral Euler
 (`EulerAncestralDiffusionStep(eta=TEMPORAL_ANCESTRAL_ETA=0.5)`, noise seed `seed + 1000*round + tile`).
 Conditioning per tile: the carried keyframes anchor the tile at `ANCHOR_KEYFRAME_STRENGTH = 0.95`
-(soft, not a hard replace), plus fresh mid-segment generated-keyframe slots at the new (doubled)
-resolution. Audio is **frozen**, not re-denoised: stage 1's audio latent is windowed to the tile's
+(soft, not a hard replace), plus fresh mid-segment generated-keyframe slots on the doubled
+timeline. Audio is **frozen**, not re-denoised: stage 1's audio latent is windowed to the tile's
 time range and resampled to the tile's new token count (`resample_audio_time`,
 `audio_latent_for_tile`) with `denoise_mask=0`. The transformer's conditioning fps is snapped by
 `conditioning_fps()` — RoPE fps above 30 snaps to 60 (`_MAX_CONDITIONING_FPS = 60.0`); the actual
-playback fps (`frame_rate * 2**temporal_upscalings`) is unchanged. After all rounds,
-`merge_carry_forward_keyframes` folds each tile's new slots plus its seam anchor into a single carry
-bag (`generated_keyframes` / `generated_keyframe_positions`) at the final resolution; this carry bag
+playback fps (`frame_rate * 2**temporal_upscalings`) is unchanged. After each round,
+`merge_carry_forward_keyframes` folds the round's new slots (lead-in duplicates: the earlier tile
+wins) and the seam anchors into one carry bag (`generated_keyframes` / `generated_keyframe_positions`)
+on that round's grid; the last round's bag
 is what the keyframe-aware decode (`--video-decoder diffusion`) consumes instead of the stage-2 slots
 — the conv decoder ignores it exactly as it ignores the stage-2 slots. Output frame count is
 `(requested - 1) * 2**T + 1` at `frame_rate * 2**T` fps. Rounds refuse `--segment` (Prompt Relay) and
 `--tile-frames` / `--tile-spatial` (modality tiling) up front, before any Gemma load.
+
+**Temporal rounds validated** (M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5, 512×768, `-f 121`):
+`--dfr` without rounds is byte-identical (sha256) to `main`. `--temporal-upscalings 1`: 241 frames at
+48 fps, 1735 s total (round 1 = 2 tiles in 1073 s, ~135 s per ancestral step on a 145-frame tile),
+max RSS 11.8 GB. `--temporal-upscalings 2`: 481 frames at 96 fps, 4173 s (round 2 = 4 tiles in 2393 s),
+max RSS 11.1 GB. Round 1 with `--video-decoder diffusion`: the 10-plane carry bag reaches the decoder
+(auto-tiled 3×1×3), 3382 s, 13.8 GB peak Metal. Tile seams show no visible cut (the round-1 seam's
+frame-to-frame change is at the clip's 99th percentile; round-2 seams are ordinary). One isolated
+stall-then-jump at a latent border inside a round-2 tile (frames 248→250 of the 96 fps render) was
+seen once in 480 transitions — the symptom upstream's 60 fps conditioning snap targets; not
+investigated. The first diffusion-decoder and T=2 attempts were killed by the macOS GPU watchdog
+(display active) and passed with `AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1`.
 
 **Not ported yet:** the spatial epilogue (`--spatial-upscalings 2`).
 
