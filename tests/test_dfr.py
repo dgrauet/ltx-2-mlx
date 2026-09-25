@@ -107,6 +107,47 @@ def test_stage2_gets_upsampled_slots_reference_and_detailing_lora(tmp_path, monk
     assert len(euler.calls) == 1
 
 
+def test_stage_positions_use_the_snapped_conditioning_fps(tmp_path, monkeypatch):
+    """Above 30 fps, stage 1/2 video-side RoPE positions and conditionings snap to 60 fps
+    (upstream ``_conditioning_fps``), while the stage-1 audio token count keeps the real
+    playback fps."""
+    from ltx_core_mlx.utils.positions import compute_audio_token_count, compute_video_positions
+
+    pipe, euler, ancestral, noised, _ = _make(tmp_path, monkeypatch)
+    _run(pipe, num_frames=49, frame_rate=48.0)
+
+    stage1_spatial_dims = noised[0]["spatial_dims"]
+    expected_pos_1 = compute_video_positions(*stage1_spatial_dims, frame_rate=60.0)
+    assert mx.array_equal(noised[0]["positions"], expected_pos_1)
+
+    stage2_spatial_dims = noised[2]["spatial_dims"]
+    expected_pos_2 = compute_video_positions(*stage2_spatial_dims, frame_rate=60.0)
+    assert mx.array_equal(noised[2]["positions"], expected_pos_2)
+
+    audio_T = compute_audio_token_count(49, frame_rate=48.0)
+    assert noised[1]["base_shape"][1] == audio_T
+
+    conds = noised[2]["conditionings"]
+    slots = [c for c in conds if isinstance(c, VideoGeneratedKeyframeSlots)]
+    assert slots[0].frame_rate == 60.0
+    refs = [c for c in conds if isinstance(c, VideoConditionByReferenceLatent)]
+    expected_ref_positions = compute_video_positions(*stage1_spatial_dims, frame_rate=60.0)
+    assert mx.array_equal(refs[0].reference_positions, expected_ref_positions)
+
+
+def test_stage_positions_unchanged_at_24fps(tmp_path, monkeypatch):
+    """At 24 fps (<= the 30 fps snap threshold), the conditioning fps equals the playback
+    fps, so nothing changes numerically."""
+    from ltx_core_mlx.utils.positions import compute_video_positions
+
+    pipe, euler, ancestral, noised, _ = _make(tmp_path, monkeypatch)
+    _run(pipe, num_frames=49, frame_rate=24.0)
+
+    stage1_spatial_dims = noised[0]["spatial_dims"]
+    expected_pos_1 = compute_video_positions(*stage1_spatial_dims, frame_rate=24.0)
+    assert mx.array_equal(noised[0]["positions"], expected_pos_1)
+
+
 def test_outputs_are_trimmed_to_the_requested_frames(tmp_path, monkeypatch):
     pipe, *_ = _make(tmp_path, monkeypatch)
     video, audio = _run(pipe, num_frames=137)  # canvas 145 -> 19 latent frames; keep 18

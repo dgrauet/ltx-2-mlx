@@ -1112,7 +1112,13 @@ the larger candidate on a tie. One generated keyframe slot is placed at every se
 duration after stage 2 — the padding never reaches the saved file, only its keyframe slots do
 (e.g. a 137-frame request pads to a 145-frame / 6-slot canvas and still writes 137 frames).
 
-**Two stages.**
+**Two stages.** Both stages, and the temporal rounds below, condition the transformer (RoPE
+video positions, re-encoded I2V anchors, and the stage-2 slot/reference conditionings) at the
+snapped `conditioning_fps(frame_rate)` (upstream `_conditioning_fps`: above 30 fps snaps to 60),
+while audio token count/positions and the actual playback fps stay at the real `frame_rate`.
+Matches upstream, which threads `fps=_conditioning_fps(frame_rate)` / `audio_fps=frame_rate`
+through both `self.stage(...)` calls. At `frame_rate <= 30` (the default 24) `conditioning_fps`
+is the identity, so nothing changes numerically; `--distilled` (outside DFR) is untouched.
 - **Stage 1** (`_stage1`, half resolution, distilled/ancestral on 2.5): runs on the padded canvas
   with the keyframe slots injected via the same `--num-generated-keyframes` mechanism
   ([Generated keyframe slots](#generated-keyframe-slots---num-generated-keyframes-n-25-packs)),

@@ -478,6 +478,7 @@ class DFRPipeline(DistilledPipeline):
             generated_keyframes=0,
             enable_teacache=False,
             canvas_for=canvas_for,
+            video_fps=conditioning_fps(frame_rate),
         )
         if not requested:
             raise RuntimeError(
@@ -494,15 +495,16 @@ class DFRPipeline(DistilledPipeline):
         self._attach_detailing_lora()
         assert self._detailing_downscale is not None
 
+        cond_fps_base = conditioning_fps(frame_rate)
         extra = [
             VideoGeneratedKeyframeSlots(
                 pixel_frame_indices=self.generated_keyframe_positions,
-                frame_rate=frame_rate,
+                frame_rate=cond_fps_base,
                 initial_keyframes=slots_upscaled,
             ),
             reference_conditioning_from_latent(
                 video_half,
-                frame_rate=frame_rate,
+                frame_rate=cond_fps_base,
                 downscale_factor=self._detailing_downscale,
                 strength=1.0,
             ),
@@ -515,6 +517,7 @@ class DFRPipeline(DistilledPipeline):
             seed=seed,
             stage2_steps=stage2_steps,
             extra_conditionings=extra,
+            video_fps=cond_fps_base,
         )
         # Stage 2 slots are kept in self.generated_keyframes (overwritten by _stage2's
         # extraction hook) for _decode_and_save_video to hand to the decoder as keyframes;

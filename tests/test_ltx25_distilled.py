@@ -229,6 +229,25 @@ def test_23_pack_keeps_the_deterministic_euler_loop(tmp_path, monkeypatch):
     assert [c["sigma"] for c in noised_calls[2:]] == [STAGE_2_SIGMAS[0], STAGE_2_SIGMAS[0]]
 
 
+def test_positions_use_the_raw_frame_rate_outside_dfr(tmp_path, monkeypatch):
+    """``DistilledPipeline.generate_two_stage`` never passes ``video_fps`` to ``_stage1``/
+    ``_stage2`` -- it defaults to ``frame_rate``, so RoPE positions never snap. Only
+    :class:`DFRPipeline` passes the snapped conditioning fps."""
+    from ltx_core_mlx.utils.positions import compute_video_positions
+
+    pipe, _, _, noised_calls = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
+
+    _run(pipe, frame_rate=48.0)
+
+    stage1_spatial_dims = noised_calls[0]["spatial_dims"]
+    expected_pos_1 = compute_video_positions(*stage1_spatial_dims, frame_rate=48.0)
+    assert mx.array_equal(noised_calls[0]["positions"], expected_pos_1)
+
+    stage2_spatial_dims = noised_calls[2]["spatial_dims"]
+    expected_pos_2 = compute_video_positions(*stage2_spatial_dims, frame_rate=48.0)
+    assert mx.array_equal(noised_calls[2]["positions"], expected_pos_2)
+
+
 def test_stage_step_truncation_applies_to_the_25_tables(tmp_path, monkeypatch):
     pipe, euler, ancestral, _ = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
 
