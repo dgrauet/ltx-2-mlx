@@ -146,6 +146,7 @@ class VideoGeneratedKeyframeSlots:
                 first_token=num_existing,
             ),
             generated_keyframes=state.generated_keyframes,
+            frozen=state.frozen,
         )
 
 

@@ -61,6 +61,10 @@ class LatentState:
         generated_keyframes: Denoised slot content as an unpatchified ``(B, C, K, H, W)``
             latent once extracted, one latent frame per keyframe. Decode each as a standalone
             one-frame clip, never as a K-frame video.
+        frozen: The whole stream is conditioning, not generated (upstream ``LatentState.frozen``):
+            the samplers then condition the model on sigma 0 for this modality -- its prompt
+            AdaLN and the other modality's cross-attention gate -- while its tokens are already
+            preserved by ``denoise_mask``. Conditionings that rebuild the state carry it through.
     """
 
     latent: mx.array
@@ -71,6 +75,7 @@ class LatentState:
     keyframes_mask: mx.array | None = None
     generated_keyframe_layout: GeneratedKeyframeLayout | None = None
     generated_keyframes: mx.array | None = None
+    frozen: bool = False
 
 
 class VideoConditionByLatentIndex:

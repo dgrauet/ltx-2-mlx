@@ -79,6 +79,29 @@ def _compute_per_token_timesteps(
     return (denoise_mask * sigma).squeeze(-1)
 
 
+def _frozen_sigma_kwargs(video_state: LatentState, audio_state: LatentState, batch_size: int) -> dict:
+    """Per-modality sigma kwargs for frozen streams (upstream ``modality_from_latent_state``).
+
+    A frozen state conditions the model on sigma 0: its prompt AdaLN and the other
+    modality's cross-attention gate. Non-frozen streams add nothing, so the model
+    falls back to the global step sigma exactly as before.
+
+    Args:
+        video_state: Video latent state.
+        audio_state: Audio latent state.
+        batch_size: Batch size of the model call.
+
+    Returns:
+        ``{"video_sigma": zeros(B)}`` and/or ``{"audio_sigma": zeros(B)}``, or ``{}``.
+    """
+    kwargs: dict = {}
+    if video_state.frozen:
+        kwargs["video_sigma"] = mx.zeros((batch_size,), dtype=mx.bfloat16)
+    if audio_state.frozen:
+        kwargs["audio_sigma"] = mx.zeros((batch_size,), dtype=mx.bfloat16)
+    return kwargs
+
+
 def _step_timed(estimator: StepEstimator, step_idx: int, video_x: mx.array, audio_x: mx.array) -> None:
     """Feed one completed step to the estimator, syncing only for the step it times."""
     if estimator.wants_sync:
@@ -183,6 +206,7 @@ def denoise_loop(
             call_kwargs["video_timesteps"] = _compute_per_token_timesteps(sigma, video_state.denoise_mask)
         if not audio_uniform:
             call_kwargs["audio_timesteps"] = _compute_per_token_timesteps(sigma, audio_state.denoise_mask)
+        call_kwargs.update(_frozen_sigma_kwargs(video_state, audio_state, B))
 
         # Predict x0
         video_x0, audio_x0 = model(**call_kwargs)
@@ -332,6 +356,7 @@ def euler_ancestral_denoising_loop(
             call_kwargs["video_timesteps"] = _compute_per_token_timesteps(sigma, video_state.denoise_mask)
         if not audio_uniform:
             call_kwargs["audio_timesteps"] = _compute_per_token_timesteps(sigma, audio_state.denoise_mask)
+        call_kwargs.update(_frozen_sigma_kwargs(video_state, audio_state, B))
 
         # Predict x0
         video_x0, audio_x0 = transformer(**call_kwargs)
@@ -612,6 +637,7 @@ def res2s_denoise_loop(
             base_kwargs["video_timesteps"] = _compute_per_token_timesteps(sig, video_state.denoise_mask)
         if not audio_uniform:
             base_kwargs["audio_timesteps"] = _compute_per_token_timesteps(sig, audio_state.denoise_mask)
+        base_kwargs.update(_frozen_sigma_kwargs(video_state, audio_state, B))
 
         if video_guider_factory is None:
             # Simple prediction (no guidance)
@@ -995,6 +1021,7 @@ def guided_denoise_loop(
             base_kwargs["video_timesteps"] = _compute_per_token_timesteps(sigma, video_state.denoise_mask)
         if not audio_uniform:
             base_kwargs["audio_timesteps"] = _compute_per_token_timesteps(sigma, audio_state.denoise_mask)
+        base_kwargs.update(_frozen_sigma_kwargs(video_state, audio_state, B))
 
         # --- Compute the gate signal once per step (cheap, runs prelude only).
         # Used both by tap and by teacache decisions. None when neither hook needs it.

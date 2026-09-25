@@ -86,4 +86,5 @@ class VideoConditionByReferenceLatent:
             # Reference tokens go after the existing ones, so the recorded slot range stays valid.
             generated_keyframe_layout=state.generated_keyframe_layout,
             generated_keyframes=state.generated_keyframes,
+            frozen=state.frozen,
         )

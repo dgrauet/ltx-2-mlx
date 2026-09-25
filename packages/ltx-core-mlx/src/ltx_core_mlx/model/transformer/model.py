@@ -559,6 +559,29 @@ class LTXModel(nn.Module):
         t_scaled = timestep * self.config.timestep_scale_multiplier
         return get_timestep_embedding(t_scaled, self.config.timestep_embedding_dim)
 
+    def _embed_modality_sigma(
+        self,
+        sigma: mx.array,
+        av_ca_factor: float,
+    ) -> tuple[mx.array, mx.array]:
+        """Embed a modality's scalar sigma for its prompt AdaLN and the cross gate.
+
+        Same casts and scaling as the global ``timestep`` path of ``__call__``.
+
+        Args:
+            sigma: (B,) modality sigma.
+            av_ca_factor: ``av_ca_timestep_scale_multiplier / timestep_scale_multiplier``.
+
+        Returns:
+            ``(prompt_emb, gate_emb)``, each (B, timestep_embedding_dim).
+        """
+        sigma = sigma.astype(mx.bfloat16)
+        gate_emb = get_timestep_embedding(
+            sigma * self.config.timestep_scale_multiplier * av_ca_factor,
+            self.config.timestep_embedding_dim,
+        )
+        return self._embed_timestep_scalar(sigma), gate_emb
+
     def _embed_timestep_per_token(
         self,
         per_token_timesteps: mx.array,
@@ -678,6 +701,8 @@ class LTXModel(nn.Module):
         tap: callable | None = None,
         block_stack_override: callable | None = None,
         block_provider: callable | None = None,
+        video_sigma: mx.array | None = None,
+        audio_sigma: mx.array | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Forward pass.
 
@@ -719,6 +744,13 @@ class LTXModel(nn.Module):
                 a single shared block module, capping resident memory
                 at ~1 block instead of ~num_layers blocks. Mutually
                 exclusive with ``block_stack_override``.
+            video_sigma: Optional (B,) sigma of the video modality (upstream
+                ``Modality.sigma``). Drives the video prompt AdaLN and the
+                V->A cross-attention gate. ``None`` = ``timestep``. A frozen
+                video stream passes 0.
+            audio_sigma: Optional (B,) sigma of the audio modality. Drives the
+                audio prompt AdaLN and the A->V cross-attention gate. ``None``
+                = ``timestep``. A frozen audio stream passes 0.
 
         Returns:
             Tuple of (video_velocity, audio_velocity), same shapes as inputs.
@@ -751,6 +783,17 @@ class LTXModel(nn.Module):
             self.config.timestep_embedding_dim,
         )
 
+        # Per-modality sigma (upstream ``Modality.sigma``): the prompt AdaLN of a
+        # modality reads its own sigma, the cross-attention gate reads the *other*
+        # modality's sigma (``transformer_args.py``: ``cross_modality_sigma``).
+        # Frozen streams pass 0; ``None`` reuses the global embeddings as is.
+        video_t_emb, video_t_emb_av_gate = t_emb, t_emb_av_gate
+        if video_sigma is not None:
+            video_t_emb, video_t_emb_av_gate = self._embed_modality_sigma(video_sigma, av_ca_factor)
+        audio_t_emb, audio_t_emb_av_gate = t_emb, t_emb_av_gate
+        if audio_sigma is not None:
+            audio_t_emb, audio_t_emb_av_gate = self._embed_modality_sigma(audio_sigma, av_ca_factor)
+
         # Video AdaLN: per-token or scalar
         # Note: prompt AdaLN always uses scalar timestep — text embeddings
         # don't correspond to individual latent tokens, so per-token
@@ -763,10 +806,11 @@ class LTXModel(nn.Module):
             video_adaln_emb, video_embedded_ts = self.adaln_single(t_emb)
             av_ca_video_emb, _ = self.av_ca_video_scale_shift_adaln_single(t_emb)
         # AV cross-attention gate always uses scalar timestep at av_ca scale,
-        # even in per-token mode. Reference: gate_adaln receives sigma * av_ca_factor (scalar).
-        av_ca_a2v_gate_emb, _ = self.av_ca_a2v_gate_adaln_single(t_emb_av_gate)
-        # Prompt AdaLN: always scalar (from global timestep)
-        video_prompt_emb, _ = self.prompt_adaln_single(t_emb)
+        # even in per-token mode. Reference: gate_adaln receives the cross
+        # modality's sigma * av_ca_factor (scalar) -- here the audio sigma.
+        av_ca_a2v_gate_emb, _ = self.av_ca_a2v_gate_adaln_single(audio_t_emb_av_gate)
+        # Prompt AdaLN: always scalar (from the video sigma)
+        video_prompt_emb, _ = self.prompt_adaln_single(video_t_emb)
 
         # Audio AdaLN: per-token or scalar
         if audio_timesteps is not None:
@@ -776,10 +820,10 @@ class LTXModel(nn.Module):
         else:
             audio_adaln_emb, audio_embedded_ts = self.audio_adaln_single(t_emb)
             av_ca_audio_emb, _ = self.av_ca_audio_scale_shift_adaln_single(t_emb)
-        # AV cross-attention gate always uses scalar timestep at av_ca scale
-        av_ca_v2a_gate_emb, _ = self.av_ca_v2a_gate_adaln_single(t_emb_av_gate)
-        # Audio prompt AdaLN: always scalar (from global timestep)
-        audio_prompt_emb, _ = self.audio_prompt_adaln_single(t_emb)
+        # AV cross-attention gate always uses scalar timestep at av_ca scale (video sigma)
+        av_ca_v2a_gate_emb, _ = self.av_ca_v2a_gate_adaln_single(video_t_emb_av_gate)
+        # Audio prompt AdaLN: always scalar (from the audio sigma)
+        audio_prompt_emb, _ = self.audio_prompt_adaln_single(audio_t_emb)
 
         # RoPE frequencies (per-head, using reference log-spaced grid)
         video_rope_freqs = None

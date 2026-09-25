@@ -81,6 +81,7 @@ class AudioConditionByReferenceLatent:
             keyframes_mask=extend_keyframes_mask(
                 state, num_new_tokens=new_latent.shape[1] - state.latent.shape[1], marked=False
             ),
+            frozen=state.frozen,
         )
 
 
