@@ -7,6 +7,8 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
+import ltx_pipelines_mlx.dfr as dfr_mod
+from ltx_core_mlx.conditioning.types.keyframe_slots import VideoGeneratedKeyframeSlots
 from ltx_core_mlx.utils.positions import compute_audio_token_count
 from ltx_pipelines_mlx.dfr import (
     ANCHOR_KEYFRAME_STRENGTH,
@@ -23,6 +25,7 @@ from ltx_pipelines_mlx.dfr import (
     slot_initials_from_video,
 )
 from ltx_pipelines_mlx.utils.args import ImageConditioningInput
+from tests.test_dfr import _make, _run
 
 
 def test_constants():
@@ -154,3 +157,140 @@ def test_detach_reloads_a_clean_transformer_without_low_ram(tmp_path, monkeypatc
     monkeypatch.setattr(pipe, "_load_transformer_with_optional_streaming", lambda p: loaded.append(p) or "clean")
     pipe._detach_detailing_lora()
     assert pipe.dit == "clean" and loaded[0].name.startswith("transformer")
+
+
+# ---- temporal rounds end to end (test doubles of tests/test_dfr.py) -------------------------------
+
+
+def _fake_temporal(x):
+    rep = mx.repeat(x, 2, axis=2)
+    return rep[:, :, 1:]  # 2L -> drop the first -> 2L - 1
+
+
+def _make_rounds(tmp_path, monkeypatch, *, t=1, low_ram=False):
+    pipe, euler, ancestral, noised, attached = _make(tmp_path, monkeypatch, low_ram=low_ram)
+    # generate_two_stage resolves the temporal upsampler path up front (before any Gemma load).
+    (tmp_path / f"{TEMPORAL_UPSAMPLER_STEM}.safetensors").write_bytes(b"")
+    pipe.temporal_upscalings = t
+    detached = []
+    monkeypatch.setattr(pipe, "_detach_detailing_lora", lambda: detached.append(True))
+    monkeypatch.setattr(pipe, "_load_temporal_upsampler", lambda: _fake_temporal)
+    return pipe, euler, ancestral, noised, attached, detached
+
+
+def test_round_1_on_121_frames(tmp_path, monkeypatch):
+    pipe, _, ancestral, noised, _, detached = _make_rounds(tmp_path, monkeypatch, t=1)
+    video, audio = _run(pipe, num_frames=121)
+    assert detached == [True]
+    assert video.shape[2] == (241 - 1) // 8 + 1  # 31 latent frames
+    tiles = ancestral.calls[1:]  # call 0 is stage 1
+    assert len(tiles) == 2
+    assert [c["noise_seed"] for c in tiles] == [7 + 1000, 7 + 1001]
+    assert all(c["stepper"].eta == 0.5 and c["sigmas"] == [0.975, 0.909375, 0.725, 0.421875, 0.0] for c in tiles)
+    # carry bag after round 1: seams (x2) + slots, every 24 frames
+    assert pipe.generated_keyframe_positions == list(range(24, 241, 24))
+    assert pipe.generated_keyframes.shape[2] == 10
+
+
+def test_round_tiles_use_anchors_slots_and_frozen_audio(tmp_path, monkeypatch):
+    from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
+
+    pipe, _, ancestral, noised, _, _ = _make_rounds(tmp_path, monkeypatch, t=1)
+    _run(pipe, num_frames=121)
+    tile_calls = [kw for kw in noised if kw["sigma"] == 0.975]
+    assert len(tile_calls) == 2
+    anchors = [c for c in tile_calls[0]["conditionings"] if isinstance(c, VideoConditionByKeyframeIndex)]
+    assert [a.frame_idx for a in anchors] == [48, 96, 144] and all(a.strength == 0.95 for a in anchors)
+    slots = [c for c in tile_calls[0]["conditionings"] if isinstance(c, VideoGeneratedKeyframeSlots)]
+    assert list(slots[0].pixel_frame_indices) == [24, 72, 120]
+    for call in ancestral.calls[1:]:
+        assert float(mx.abs(call["audio_state"].denoise_mask).max()) == 0.0  # frozen audio
+
+
+def test_round_2_runs_4_tiles_and_outputs_481_frames(tmp_path, monkeypatch):
+    pipe, _, ancestral, _, _, _ = _make_rounds(tmp_path, monkeypatch, t=2)
+    video, _ = _run(pipe, num_frames=121)
+    assert len(ancestral.calls) == 1 + 2 + 4
+    assert video.shape[2] == (481 - 1) // 8 + 1
+
+
+def test_rounds_trim_to_the_requested_duration(tmp_path, monkeypatch):
+    pipe, *_ = _make_rounds(tmp_path, monkeypatch, t=1)
+    video, audio = _run(pipe, num_frames=137)  # canvas 145 -> 289 frames after round 1
+    target = (137 - 1) * 2 + 1
+    assert video.shape[2] == (target - 1) // 8 + 1
+    assert audio.shape[2] == compute_audio_token_count(target, frame_rate=48.0)
+
+
+def test_rounds_on_a_single_segment_canvas(tmp_path, monkeypatch):
+    pipe, _, ancestral, _, _, _ = _make_rounds(tmp_path, monkeypatch, t=2)
+    video, _ = _run(pipe, num_frames=9)  # canvas 25, one seam
+    assert video.shape[2] == ((9 - 1) * 4) // 8 + 1
+
+
+def test_rounds_rebase_images_into_their_tiles(tmp_path, monkeypatch):
+    pipe, _, _, noised, _, _ = _make_rounds(tmp_path, monkeypatch, t=1)
+    seen = []
+    import ltx_pipelines_mlx.utils._orchestration as orch
+
+    # stages 1/2 import the helper locally from _orchestration at call time; the rounds use dfr's import
+    monkeypatch.setattr(orch, "combined_image_conditionings", lambda imgs, **kw: [])
+    monkeypatch.setattr(dfr_mod, "combined_image_conditionings", lambda imgs, **kw: seen.append(list(imgs)) or [])
+    _run(pipe, num_frames=121, images=[ImageConditioningInput("a.png", 60, 1.0)])
+    # 60 * 2 = 120: inside tile 0 [0, 144] and tile 1 [96, 240] -> local 120 and 24
+    assert [[i.frame_idx for i in s] for s in seen] == [[120], [24]]
+
+
+def test_rounds_refuse_modality_tiling_and_prompt_relay(tmp_path, monkeypatch):
+    pipe, *_ = _make_rounds(tmp_path, monkeypatch, t=1)
+    with pytest.raises(ValueError, match="Prompt Relay"):
+        _run(pipe, num_frames=49, prompt_relay=object())
+    pipe._tile_count = object()
+    with pytest.raises(ValueError, match="modality tiling"):
+        _run(pipe, num_frames=49)
+
+
+def test_rounds_run_with_frozen_audio_even_without_audio_output(tmp_path, monkeypatch):
+    pipe, _, ancestral, _, _, _ = _make_rounds(tmp_path, monkeypatch, t=1)
+    pipe.generate_audio = False
+    _run(pipe, num_frames=49)
+    assert all(c["audio_state"] is not None for c in ancestral.calls[1:])
+
+
+def test_t0_path_is_unchanged(tmp_path, monkeypatch):
+    pipe, _, ancestral, _, _, detached = _make_rounds(tmp_path, monkeypatch, t=0)
+    video, _ = _run(pipe, num_frames=49)
+    assert detached == [] and len(ancestral.calls) == 1 and video.shape[2] == 7
+
+
+def test_decode_writes_at_the_upsampled_fps(tmp_path, monkeypatch):
+    pipe, *_ = _make_rounds(tmp_path, monkeypatch, t=2)
+    seen = {}
+    base = next(c for c in type(pipe).__mro__[1:] if "_decode_and_save_video" in c.__dict__)
+    monkeypatch.setattr(
+        base,
+        "_decode_and_save_video",
+        lambda self, v, a, o, *, frame_rate, seed=0, keyframes=None: seen.setdefault("fps", frame_rate) and o,
+    )
+    pipe.generated_keyframes = None
+    pipe._decode_and_save_video(mx.zeros((1, 128, 3, 2, 2)), mx.zeros((1, 8, 4, 16)), "o.mp4", frame_rate=24.0)
+    assert seen["fps"] == 96.0
+
+
+def test_rounds_reload_the_vae_encoder_freed_by_low_memory_stage2(tmp_path, monkeypatch):
+    """low_memory (the default) frees the VAE encoder in stage 2; the rounds need it for denorm/renorm."""
+    from tests.test_ltx25_distilled import _FakeVaeEncoder
+
+    pipe, _, ancestral, _, _, _ = _make_rounds(tmp_path, monkeypatch, t=1)
+    pipe.low_memory = True
+    reloads = []
+
+    def load():
+        reloads.append(True)
+        pipe.image_conditioner._encoder = _FakeVaeEncoder()
+        return pipe.image_conditioner._encoder
+
+    monkeypatch.setattr(pipe.image_conditioner, "load", load)
+    video, _ = _run(pipe, num_frames=49)
+    assert reloads == [True] and len(ancestral.calls) == 3
+    assert video.shape[2] == ((49 - 1) * 2) // 8 + 1

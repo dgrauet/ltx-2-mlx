@@ -4,14 +4,19 @@ Stage 1 (half resolution, distilled, ancestral on 2.5) runs on a canvas padded t
 segments with one generated keyframe slot per segment boundary. Stage 2 (full resolution,
 deterministic) runs with the detailing IC-LoRA attached at strength 0.5, conditioned on the
 stage-1 latent as an IC-LoRA reference and on the spatially upsampled stage-1 slots. This port
-covers ``spatial_upscalings=1`` / ``temporal_upscalings=0``. The stage-2 keyframe slot latents
-are handed to the decoder as decoder keyframes (keyframe-aware decode on
-``--video-decoder diffusion``; the conv decoder ignores them with a warning). The temporal
-rounds and the spatial epilogue are follow-ups.
+covers ``spatial_upscalings=1`` with ``temporal_upscalings`` 0, 1 or 2. Each temporal round
+upsamples the latent x2 in time with the temporal upsampler, then re-denoises it in keyframe-seam
+tiles (carried keyframes as anchors, fresh slots between them, frozen stage-1 audio, 4-step
+ancestral Euler) with the distilled transformer without the detailing LoRA; the output plays at
+``frame_rate * 2**temporal_upscalings``. The final keyframe bag (stage-2 slots, or the carry bag
+after the rounds) is handed to the decoder as decoder keyframes (keyframe-aware decode on
+``--video-decoder diffusion``; the conv decoder ignores them with a warning). The spatial
+epilogue is a follow-up.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import sys
 from collections.abc import Sequence
@@ -20,7 +25,10 @@ from pathlib import Path
 import mlx.core as mx
 from huggingface_hub.errors import GatedRepoError
 
-from ltx_core_mlx.conditioning.types.keyframe_slots import VideoGeneratedKeyframeSlots
+import ltx_pipelines_mlx.distilled as distilled_mod
+from ltx_core_mlx.components.diffusion_steps import EulerAncestralDiffusionStep
+from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
+from ltx_core_mlx.conditioning.types.keyframe_slots import VideoGeneratedKeyframeSlots, extract_generated_keyframes
 from ltx_core_mlx.loader import (
     LTXV_LORA_BLOCK_PREFIX,
     LTXV_LORA_COMFY_RENAMING_MAP,
@@ -33,16 +41,16 @@ from ltx_core_mlx.loader.block_streaming import BlockLoraSource
 from ltx_core_mlx.model.upsampler import LatentUpsampler
 from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
 from ltx_core_mlx.utils.memory import aggressive_cleanup
-from ltx_core_mlx.utils.positions import compute_audio_token_count
+from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization
-from ltx_pipelines_mlx.dfr_layout import resolve_canvas
+from ltx_pipelines_mlx.dfr_layout import TemporalTilePlan, resolve_canvas
 from ltx_pipelines_mlx.distilled import DistilledPipeline
 from ltx_pipelines_mlx.iclora_utils import (
     read_lora_reference_downscale_factor,
     reference_conditioning_from_latent,
 )
 from ltx_pipelines_mlx.scheduler import LTX_2_5_DISTILLED_SIGMAS
-from ltx_pipelines_mlx.utils._orchestration import resolve_lora_path
+from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings, resolve_lora_path
 from ltx_pipelines_mlx.utils.progress import phase
 from ltx_pipelines_mlx.utils.types import DEFAULT_AUTO_DURATION, AutoDuration
 
@@ -211,6 +219,9 @@ class DFRPipeline(DistilledPipeline):
         temporal_upsampler_path: Explicit path to the temporal x2 latent upsampler weights.
             ``None`` resolves it from the pack (see :meth:`_resolve_temporal_upsampler_path`).
     """
+
+    #: Class default so a ``__new__``-built instance (tests) decodes at the base frame rate.
+    temporal_upscalings: int = 0
 
     def __init__(
         self,
@@ -403,6 +414,12 @@ class DFRPipeline(DistilledPipeline):
             raise ValueError("TeaCache is not available on the DFR path (distilled flow)")
         self._require_generated_keyframes_support([1])  # DFR always uses slots: refuse 2.3 packs up front
         self._require_num_frames_source(num_frames)
+        if self.temporal_upscalings:
+            if prompt_relay is not None:
+                raise ValueError("Prompt Relay (--segment) is not supported with DFR temporal rounds")
+            if self._tile_count is not None:
+                raise ValueError("DFR temporal rounds do not support modality tiling (--tile-*)")
+            self._resolve_temporal_upsampler_path()  # fail before any Gemma load
         # Resolve (and download) the detailing LoRA before any text encoding: it is required
         # by stage 2, so a bad path must fail here rather than after a full stage-1 render.
         self._resolve_detailing_lora()
@@ -480,15 +497,234 @@ class DFRPipeline(DistilledPipeline):
             extra_conditionings=extra,
         )
         # Stage 2 slots are kept in self.generated_keyframes (overwritten by _stage2's
-        # extraction hook) for _decode_and_save_video to hand to the decoder as keyframes.
+        # extraction hook) for _decode_and_save_video to hand to the decoder as keyframes;
+        # the temporal rounds replace them with their carry bag.
+        num_frames = canvas_frames
+        if self.temporal_upscalings:
+            video_latent, num_frames = self._run_temporal_rounds(
+                stage1, video_latent, canvas_frames=canvas_frames, frame_rate=frame_rate, seed=seed
+            )
 
         # Trim the canvas padding: video to the requested latent frames, audio (stage 1's, as
-        # upstream ships it) to the requested duration in audio tokens.
-        keep_latent = (requested - 1) // _TEMPORAL_SCALE + 1
+        # upstream ships it) to the requested duration in audio tokens, both on the final
+        # (temporally upsampled) grid.
+        scale = 2**self.temporal_upscalings
+        target = (requested - 1) * scale + 1
+        if target > num_frames:
+            raise RuntimeError(f"Target {target} frames exceeds the generated canvas {num_frames}")
+        keep_latent = (target - 1) // _TEMPORAL_SCALE + 1
         video_latent = video_latent[:, :, :keep_latent]
         audio_latent = self.audio_patchifier.unpatchify(stage1.audio_tokens)
-        audio_latent = audio_latent[:, :, : compute_audio_token_count(requested, frame_rate=frame_rate)]
+        audio_latent = audio_latent[:, :, : compute_audio_token_count(target, frame_rate=frame_rate * scale)]
         return video_latent, audio_latent
+
+    # ---- temporal rounds ------------------------------------------------------------
+    def _denoise_temporal_tile(
+        self,
+        stage1,
+        tile_video: mx.array,
+        *,
+        cond_fps: float,
+        anchors: list[tuple[int, mx.array]],
+        slots_local: list[int],
+        images: list,
+        audio_tokens: mx.array,
+        noise_seed: int,
+        init_seed: int,
+    ) -> tuple[mx.array, mx.array | None]:
+        """Re-denoise one temporal tile (upstream round body): anchors, fresh slots, frozen audio, ancestral Euler.
+
+        Args:
+            stage1: The stage-1 result (text embeddings).
+            tile_video: ``(1, 128, F, H, W)`` slice of the temporally upsampled latent.
+            cond_fps: Transformer fps (:func:`conditioning_fps`).
+            anchors: ``(local pixel index, (1, 128, 1, H, W) latent)`` carried keyframes.
+            slots_local: Local pixel positions of this tile's new slots.
+            images: Tile-local ``ImageConditioningInput`` anchors.
+            audio_tokens: ``(1, T, 128)`` frozen audio tokens for this tile.
+            noise_seed: Ancestral loop seed (``seed + 1000 * round + tile``).
+            init_seed: Seed of the initial partial re-noise.
+
+        Returns:
+            ``(tile latent (1, 128, F, H, W), slot latents (1, 128, K, H, W) or None)``.
+        """
+        F, H, W = tile_video.shape[2], tile_video.shape[3], tile_video.shape[4]
+        tokens, _ = self.video_patchifier.patchify(tile_video)
+        conditionings: list = []
+        if images:
+            conditionings = combined_image_conditionings(
+                images,
+                enc_h=H * 32,
+                enc_w=W * 32,
+                spatial_dims=(F, H, W),
+                video_encoder=self.vae_encoder,
+                frame_rate=cond_fps,
+            )
+        # Every seam in the window is a hard keyframe, including the one at local frame 0.
+        for local_index, latent in anchors:
+            kf_tokens, _ = self.video_patchifier.patchify(latent)
+            conditionings.append(
+                VideoConditionByKeyframeIndex(
+                    frame_idx=local_index,
+                    keyframe_latent=kf_tokens,
+                    spatial_dims=(F, H, W),
+                    frame_rate=cond_fps,
+                    strength=ANCHOR_KEYFRAME_STRENGTH,
+                )
+            )
+        if slots_local:
+            conditionings.append(
+                VideoGeneratedKeyframeSlots(
+                    pixel_frame_indices=slots_local,
+                    frame_rate=cond_fps,
+                    initial_keyframes=slot_initials_from_video(tile_video, slots_local),
+                )
+            )
+        video_state = distilled_mod.create_noised_state(
+            base_shape=tokens.shape,
+            conditionings=conditionings,
+            spatial_dims=(F, H, W),
+            positions=compute_video_positions(F, H, W, frame_rate=cond_fps),
+            seed=init_seed,
+            sigma=TEMPORAL_SIGMAS[0],
+            initial_latent=tokens,
+        )
+        # Frozen audio (upstream ``ModalitySpec(frozen=True, noise_scale=0.0)``): clean, never denoised.
+        audio_state = distilled_mod.create_noised_state(
+            base_shape=audio_tokens.shape,
+            conditionings=[],
+            spatial_dims=(F, H, W),  # unused
+            positions=compute_audio_positions(audio_tokens.shape[1]),
+            seed=init_seed + 1,
+            sigma=0.0,
+            initial_latent=audio_tokens,
+        )
+        audio_state = dataclasses.replace(audio_state, denoise_mask=mx.zeros_like(audio_state.denoise_mask))
+        output = distilled_mod.euler_ancestral_denoising_loop(
+            transformer=distilled_mod.X0Model(self.dit),
+            video_state=video_state,
+            audio_state=audio_state,
+            video_text_embeds=stage1.video_embeds,
+            audio_text_embeds=stage1.audio_embeds,
+            sigmas=TEMPORAL_SIGMAS,
+            stepper=EulerAncestralDiffusionStep(eta=TEMPORAL_ANCESTRAL_ETA),
+            noise_seed=noise_seed,
+        )
+        slots = extract_generated_keyframes(
+            output.video_latent, video_state.generated_keyframe_layout, self.video_patchifier, (H, W)
+        )
+        latent = self.video_patchifier.unpatchify(output.video_latent[:, : F * H * W, :], (F, H, W))
+        _materialize(latent, *([] if slots is None else [slots]))
+        return latent, slots
+
+    def _run_temporal_rounds(
+        self, stage1, video_latent: mx.array, *, canvas_frames: int, frame_rate: float, seed: int
+    ) -> tuple[mx.array, int]:
+        """Upstream ``DFRPipeline.__call__`` temporal rounds 1..T on the stage-2 canvas.
+
+        Args:
+            stage1: The stage-1 result (text embeddings, frozen audio tokens, I2V inputs).
+            video_latent: Stage-2 latent ``(1, 128, F, H, W)`` over the whole canvas.
+            canvas_frames: Pixel frames of the stage-2 canvas.
+            frame_rate: Stage-1/2 playback frame rate.
+            seed: Pipeline seed.
+
+        Returns:
+            ``(video latent after the last round, its pixel frame count)``; the carry bag is left in
+            ``self.generated_keyframes`` / ``self.generated_keyframe_positions`` for the decode.
+
+        Raises:
+            RuntimeError: missing carry keyframes, a tile without slots, or a stitched length mismatch.
+        """
+        self._detach_detailing_lora()
+        temporal_upsampler = self._load_temporal_upsampler()
+        # low_memory stage 2 frees the VAE encoder; the rounds need its latent stats (denorm/renorm
+        # around the temporal upsampler) and re-encode tile-local I2V images.
+        self.image_conditioner.load()
+        audio_full = self.audio_patchifier.unpatchify(stage1.audio_tokens)
+        source_duration = canvas_frames / frame_rate
+        carry_positions = list(self.generated_keyframe_positions)
+        carry_keyframes = self.generated_keyframes
+        num_frames, current_fps = canvas_frames, frame_rate
+        for round_idx in range(1, self.temporal_upscalings + 1):
+            if carry_keyframes is None or not carry_positions:
+                raise RuntimeError(f"Temporal round {round_idx}: missing carry-forward keyframes")
+            video_latent = self._upsample_latent(video_latent, upsampler=temporal_upsampler)
+            num_frames = 2 * (num_frames - 1) + 1
+            current_fps *= 2
+            cond_fps = conditioning_fps(current_fps)
+            # Carried keyframes are single-frame latents, so only their positions scale with the round.
+            seams = [2 * p for p in carry_positions]
+            seam_index = {p: i for i, p in enumerate(seams)}
+            plan = TemporalTilePlan(seams, num_frames, 2**round_idx)
+            pieces: list[mx.array] = []
+            slot_positions: list[int] = []
+            slot_latents: list[mx.array] = []
+            with phase(
+                f"Temporal round {round_idx}/{self.temporal_upscalings} ({len(plan)} tiles)", verbose=self.verbose
+            ):
+                for tile_index, (interval, pixel_start, pixel_end, anchor_global, slot_global) in enumerate(plan):
+                    local_frames = (interval.end - interval.start - 1) * _TEMPORAL_SCALE + 1
+                    tile_video = video_latent[:, :, interval.start : interval.end]
+                    missing = [p for p in anchor_global if p not in seam_index]
+                    if missing:
+                        raise RuntimeError(f"Anchor seams {missing} missing from the carry-forward bag")
+                    anchors = [
+                        (p - pixel_start, carry_keyframes[:, :, seam_index[p] : seam_index[p] + 1])
+                        for p in anchor_global
+                    ]
+                    tile_audio = audio_latent_for_tile(
+                        audio_full,
+                        pixel_start=pixel_start,
+                        local_frames=local_frames,
+                        playback_fps=current_fps,
+                        source_duration=source_duration,
+                        cond_fps=cond_fps,
+                    )
+                    audio_tokens, _ = self.audio_patchifier.patchify(tile_audio)
+                    latent, slots = self._denoise_temporal_tile(
+                        stage1,
+                        tile_video,
+                        cond_fps=cond_fps,
+                        anchors=anchors,
+                        slots_local=[p - pixel_start for p in slot_global],
+                        images=rebase_image_conditionings(
+                            stage1.resolved_images,
+                            pixel_scale=2**round_idx,
+                            pixel_start=pixel_start,
+                            pixel_end=pixel_end,
+                        ),
+                        audio_tokens=audio_tokens,
+                        # Tiles are positionally identical: a shared ancestral seed would inject
+                        # byte-identical noise into every one of them (upstream).
+                        noise_seed=seed + 1000 * round_idx + tile_index,
+                        # Upstream shares one GaussianNoiser for the initial re-noise; MLX noise is not
+                        # torch-comparable anyway, so a per-tile seed (+500) is an MLX-side choice.
+                        init_seed=seed + 1000 * round_idx + tile_index + 500,
+                    )
+                    pieces.append(latent[:, :, interval.left_ramp :])
+                    if slot_global:
+                        if slots is None:
+                            raise RuntimeError(f"Temporal round {round_idx}: tile {tile_index} produced no slots")
+                        slot_positions.extend(slot_global)
+                        slot_latents.append(slots)
+                    aggressive_cleanup()
+            video_latent = mx.concatenate(pieces, axis=2)
+            expected = (num_frames - 1) // _TEMPORAL_SCALE + 1
+            if video_latent.shape[2] != expected:
+                raise RuntimeError(f"Stitched latent T={video_latent.shape[2]} != expected {expected}")
+            new_positions: list[int] = []
+            new_latents = None
+            if slot_positions:
+                # Lead-in segments repeat the previous tile's slots; the earlier tile's version wins.
+                new_positions, new_latents = dedupe_slots(slot_positions, mx.concatenate(slot_latents, axis=2))
+            carry_positions, carry_keyframes = merge_carry_forward_keyframes(
+                seams, carry_keyframes, new_positions, new_latents
+            )
+            _materialize(video_latent, carry_keyframes)
+        self.generated_keyframes = carry_keyframes
+        self.generated_keyframe_positions = carry_positions
+        return video_latent, num_frames
 
     def _decode_and_save_video(
         self,
@@ -500,9 +736,11 @@ class DFRPipeline(DistilledPipeline):
         seed: int = 0,
         keyframes: DecodeKeyframes | None = None,
     ) -> str:
-        """Decode with the stage-2 keyframe slots as decoder keyframes (upstream's final ``decode_keyframes_from_slots`` handoff).
+        """Decode with the final keyframe bag as decoder keyframes (upstream's final ``decode_keyframes_from_slots`` handoff).
 
-        The conv decoder ignores them with a warning; ``--video-decoder diffusion`` runs the keyframe-aware decode.
+        The keyframes are the carry bag after the temporal rounds, else the stage-2 slots. The conv decoder
+        ignores them with a warning; ``--video-decoder diffusion`` runs the keyframe-aware decode. The output
+        is written at ``frame_rate * 2**temporal_upscalings`` (each round doubles the frame count).
         """
         if keyframes is None:
             num_frames = (video_latent.shape[2] - 1) * _TEMPORAL_SCALE + 1
@@ -510,7 +748,12 @@ class DFRPipeline(DistilledPipeline):
                 self.generated_keyframes, self.generated_keyframe_positions, num_frames, verbose=self.verbose
             )
         return super()._decode_and_save_video(
-            video_latent, audio_latent, output_path, frame_rate=frame_rate, seed=seed, keyframes=keyframes
+            video_latent,
+            audio_latent,
+            output_path,
+            frame_rate=frame_rate * 2**self.temporal_upscalings,
+            seed=seed,
+            keyframes=keyframes,
         )
 
 
