@@ -342,6 +342,8 @@ class NADiffusionDecoder(nn.Module):
     ) -> mx.array:
         """Stages 4 + 5 on one tile with the planes it needs (upstream ``_decode_one_tile_with_keyframes``)."""
         cs = keyframes.clip_start_frame
+        # When called from tiled_decode the planes are already narrowed to this tile (as upstream's
+        # caller does), and re-selecting on that narrowed set keeps all of them.
         keep = planes_for_tile(
             keyframes.pixel_frame_indices, tile.out_t.start, tile.out_t.stop - 1, clip_start_frame=cs
         )

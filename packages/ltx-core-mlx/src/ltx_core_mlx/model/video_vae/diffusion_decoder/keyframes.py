@@ -150,12 +150,12 @@ def planes_for_tile(
     lo, hi = frame_lo + clip_start_frame, frame_hi + clip_start_frame
     idx = list(pixel_frame_indices)
     keep = [lo <= f <= hi for f in idx]
-    before = [(f, i) for i, f in enumerate(idx) if f < lo]
+    before = [(f, -i) for i, f in enumerate(idx) if f < lo]
     if before:
-        keep[max(before)[1]] = True
+        keep[-max(before)[1]] = True  # latest frame; lowest index on a tie (torch argmax keeps the first)
     after = [(f, i) for i, f in enumerate(idx) if f > hi]
     if after:
-        keep[min(after)[1]] = True
+        keep[min(after)[1]] = True  # earliest frame; lowest index on a tie
     return keep
 
 

@@ -325,7 +325,7 @@ def test_decode_keyframes_from_slots_filters_the_canvas_padding(capsys):
         isinstance(kf, DecodeKeyframes) and kf.pixel_frame_indices == (24, 48) and kf.latents.shape == (1, 128, 2, 4, 4)
     )
     assert mx.array_equal(kf.latents[:, :, 1], slots[:, :, 1]) and kf.clip_start_frame == 0
-    assert "dropping 1 keyframe slot" in capsys.readouterr().out
+    assert "dropping 1 keyframe slot" in capsys.readouterr().err
     assert decode_keyframes_from_slots(slots, [72, 96, 120], num_frames=49) is None
     assert decode_keyframes_from_slots(None, [], num_frames=49) is None
     with pytest.raises(ValueError, match="slot count"):

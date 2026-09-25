@@ -46,6 +46,11 @@ def test_clip_times_subtract_the_origin_instead_of_rebasing():
     assert np.array(keyframe_clip_times((24,), 2, 0, extra_origin=3.0)).tolist() == pytest.approx([ts(24, 2) - 3.0])
 
 
+def test_planes_for_tile_breaks_ties_on_the_lowest_index_like_upstream():
+    # two planes at the same frame on each side: upstream's argmax/argmin keep the first
+    assert planes_for_tile((10, 10, 90, 90), 40, 60) == [True, False, True, False]
+
+
 def test_planes_for_tile_keeps_inside_planes_plus_one_neighbour_each_side():
     idx = (96, 24, 72, 48, 120)  # unsorted on purpose
     assert planes_for_tile(idx, 40, 80) == [

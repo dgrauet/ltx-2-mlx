@@ -415,6 +415,9 @@ def test_conv_video_decoder_warns_and_drops_keyframes(monkeypatch, tmp_path, cap
     kf = DecodeKeyframes(mx.zeros((1, 128, 1, 2, 3)), (4,))
     vd.decode_and_stream(mx.zeros((1, 128, 2, 2, 3)), str(tmp_path / "o.mp4"), seed=3, keyframes=kf)
     assert calls["kwargs"]["seed"] == 3
+    assert "keyframes are ignored" not in capsys.readouterr().err  # quiet: no note
+    vd.verbose = True
+    vd.decode_and_stream(mx.zeros((1, 128, 2, 2, 3)), str(tmp_path / "o.mp4"), seed=3, keyframes=kf)
     assert "keyframes are ignored by the conv decoder" in capsys.readouterr().err
 
 

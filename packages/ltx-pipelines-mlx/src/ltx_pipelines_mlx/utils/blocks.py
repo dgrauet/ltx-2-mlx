@@ -514,12 +514,13 @@ class VideoDecoder:
             mx.reset_peak_memory()
         decoder = self.load()
         if keyframes is not None and self.video_decoder != "diffusion":
-            print(
-                "[vae-decode] keyframes are ignored by the conv decoder (use --video-decoder diffusion "
-                "for the keyframe-aware decode)",
-                file=sys.stderr,
-                flush=True,
-            )
+            if self.verbose:
+                print(
+                    "[vae-decode] keyframes are ignored by the conv decoder (use --video-decoder diffusion "
+                    "for the keyframe-aware decode)",
+                    file=sys.stderr,
+                    flush=True,
+                )
             keyframes = None
         extra = {"keyframes": keyframes} if keyframes is not None else {}
         decoder.decode_and_stream(

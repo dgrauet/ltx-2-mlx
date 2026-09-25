@@ -13,6 +13,7 @@ rounds and the spatial epilogue are follow-ups.
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Sequence
 
 import mlx.core as mx
@@ -222,6 +223,7 @@ class DFRPipeline(DistilledPipeline):
                 print(
                     f"[dfr] canvas {canvas_frames} frames (requested {resolved_frames}), segment {segment}, "
                     f"{len(positions)} keyframe slots at {positions}",
+                    file=sys.stderr,
                     flush=True,
                 )
             self.canvas_frames = canvas_frames
@@ -336,7 +338,11 @@ def decode_keyframes_from_slots(
     keep = [i for i, p in enumerate(positions) if 0 <= p < num_frames]
     dropped = len(positions) - len(keep)
     if verbose and dropped:
-        print(f"[dfr] dropping {dropped} keyframe slot(s) beyond the trimmed {num_frames} frames", flush=True)
+        print(
+            f"[dfr] dropping {dropped} keyframe slot(s) beyond the trimmed {num_frames} frames",
+            file=sys.stderr,
+            flush=True,
+        )
     if not keep:
         return None
     return DecodeKeyframes(
