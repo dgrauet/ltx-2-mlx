@@ -10,6 +10,28 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.10](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.9...v0.15.10) (2026-09-26)
+
+
+### Features
+
+* **core:** keyframe-aware diffusion decode for dfr (--video-decoder diffusion) ([#156](https://github.com/dgrauet/ltx-2-mlx/issues/156)) ([86f6b94](https://github.com/dgrauet/ltx-2-mlx/commit/86f6b941446e10237bf0d7558efd00a673bd5cac))
+* **pipelines:** dfr spatial epilogue (--spatial-upscalings 2) ([#161](https://github.com/dgrauet/ltx-2-mlx/issues/161)) ([714f71b](https://github.com/dgrauet/ltx-2-mlx/commit/714f71b6fcd679450f7d429b49aa59724d2d9538))
+* **pipelines:** dfr temporal rounds (--temporal-upscalings) ([#158](https://github.com/dgrauet/ltx-2-mlx/issues/158)) ([15e7f00](https://github.com/dgrauet/ltx-2-mlx/commit/15e7f002f8944d5c647286ef801c595a4f28ac6f))
+
+
+### Bug Fixes
+
+* **core:** frozen modality streams use sigma 0 like upstream (a2v, lipdub, retake shift) ([#159](https://github.com/dgrauet/ltx-2-mlx/issues/159)) ([9b91fe2](https://github.com/dgrauet/ltx-2-mlx/commit/9b91fe24481a99afb0a023c2e0c8187ccd763e11))
+* **core:** ic-lora reference positions follow the frame rate; diffusion decoder casts its input ([#153](https://github.com/dgrauet/ltx-2-mlx/issues/153)) ([ab7a2b0](https://github.com/dgrauet/ltx-2-mlx/commit/ab7a2b0d6f364a4a3fc2b64a7f2af8c2c028b8dc))
+* **core:** upstream-iso modality tiling (interval conditioning keep, seam split, position normalize) ([#160](https://github.com/dgrauet/ltx-2-mlx/issues/160)) ([84e22ab](https://github.com/dgrauet/ltx-2-mlx/commit/84e22abf6eed3e23eedd47de1477aa6c7c000602))
+* **pipelines:** dfr keyframe decode follow-ups (tie-break, stderr notes, quiet conv note) ([#157](https://github.com/dgrauet/ltx-2-mlx/issues/157)) ([3b2e77f](https://github.com/dgrauet/ltx-2-mlx/commit/3b2e77fd73af5f08961f4436ae979c0579d5deed))
+
+
+### Documentation
+
+* the dfr detailing lora is a gated hf repo; name the licence page on failure ([#151](https://github.com/dgrauet/ltx-2-mlx/issues/151)) ([7296f23](https://github.com/dgrauet/ltx-2-mlx/commit/7296f236acf12cbf7f7653e3d0acdd4174d7be1e))
+
 ## [0.15.9](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.8...v0.15.9) (2026-09-21)
 
 
