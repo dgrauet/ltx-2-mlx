@@ -3,7 +3,8 @@
 MLX-native port of upstream ``ltx_core.modality_tiling``. Splits the
 flat patchified video token sequence into spatial/temporal tiles so
 each tile can be denoised independently, then blends the tile outputs
-back into the full token space with trapezoidal weights at overlaps.
+back into the full token space with trapezoidal weights at overlaps
+(or, on a seam split, rectangular weights that drop the overlap).
 
 Combined with ``--low-ram`` (block streaming), this lets long / high-
 resolution video generations fit into memory by trading wall-clock for
@@ -14,75 +15,120 @@ API differences vs upstream
 
 Upstream operates on a ``Modality`` dataclass that bundles latent +
 sigma + timesteps + positions + context + masks. Our pipeline passes
-those as separate args to :meth:`LTXModel.__call__`, so this helper
-takes the relevant tensors directly.
+those as separate args to :meth:`LTXModel.__call__`, so
+:class:`TiledLTXModel` wraps them into a :class:`Modality` at the
+boundary. The helper is constructed from the latent ``(F, H, W)`` shape
+instead of upstream's ``VideoLatentTools``.
 
-Upstream positions are stored per-token as ``(start, end)`` intervals
-on each spatial/temporal axis (shape ``(B, num_axes, T, 2)``). Our
-positions are point coordinates (shape ``(B, T, num_axes)``). The
-overlap test for kept conditioning tokens is therefore adapted:
-a conditioning token is kept iff its point coordinate falls inside
-``[tile_start, tile_end)`` on every spatial/temporal dimension that
-the tile splits.
+Upstream positions are per-token ``[start, end)`` intervals (shape
+``(B, num_axes, T, 2)``); ours are the interval midpoints (shape
+``(B, T, num_axes)``). The conditioning keep test and the position
+normalisation are nonetheless exact: each tile's generated extent is
+rebuilt from the generated tokens' exact pixel intervals (temporal
+``[max(0, 8 f0 - 7), 8 (f1 - 1) + 1) / fps`` with the causal first
+frame, spatial ``[32 h0, 32 h1)``), and a conditioning token is kept
+iff its midpoint lies in that **closed** extent on every axis (or its
+time is negative). For every conditioning lattice the pipelines append
+(single-pixel-frame keyframes / slots, 32-px cells, x2 reference cells,
+8-frame reference latents) this equals upstream's
+``start < tile_end and end > tile_start``.
 
 Conditioning token bookkeeping
 ------------------------------
 
 When a pipeline appends conditioning tokens to the end of the latent
-(keyframe / reference video), the helper keeps each conditioning
-token in every tile whose generated-token window covers the token's
-spatial/temporal coordinate. Cond-token contributions from multiple
-tiles are weighted by ``1 / num_tiles_that_kept_this_token`` so they
-sum to one in the final output.
+(keyframe / reference video), the helper keeps each conditioning token
+in every tile whose generated extent overlaps it. Cond-token
+contributions from multiple tiles are weighted by
+``1 / num_tiles_that_kept_this_token`` so they sum to one in the final
+output.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import partial
 
 import mlx.core as mx
 import numpy as np
 
 from ltx_core_mlx.model.transformer.modality import Modality
 from ltx_core_mlx.model.video_vae.tiling import (
+    DimensionTilingConfig,
+    SplitOperation,
     Tile,
     TileCountConfig,
     create_tiles,
     identity_mapping_operation,
+    split_at_seams,
     split_by_count,
 )
+from ltx_core_mlx.utils.positions import VIDEO_SPATIAL_SCALE, VIDEO_TEMPORAL_SCALE
 
+logger = logging.getLogger(__name__)
 
-def _bool_to_indices(mask: mx.array) -> mx.array:
-    """Convert a 1-D bool mask to an int32 array of True positions.
-
-    MLX doesn't support boolean indexing yet, so we round-trip through
-    numpy. Cost is O(num_total) per call, dominated by the host
-    materialization.
-    """
-    return mx.array(np.flatnonzero(np.asarray(mask)))
-
-
-__all__ = ["TileContext", "VideoModalityTiler"]
+__all__ = ["TiledLTXModel", "TilingContext", "VideoModalityTiler", "seam_split"]
 
 
 @dataclass(frozen=True)
-class TileContext:
-    """Opaque context produced by :meth:`VideoModalityTiler.tile`.
+class TilingContext:
+    """Opaque context produced by :meth:`VideoModalityTiler.tile_modality`.
 
-    Carries the token-level keep mask and per-conditioning-token blend
+    Carries the token-level keep indices and per-conditioning-token blend
     weights needed by :meth:`VideoModalityTiler.blend`.
 
     Attributes:
-        keep_mask: ``(num_total,)`` bool mask — True for tokens
-            included in the tile.
+        keep_indices: ``(num_kept,)`` int32 — indices of the tokens the tile
+            processes: its generated tokens (row-major) then its kept
+            conditioning tokens (ascending).
+        num_total_tokens: Total number of tokens in the full (untiled) sequence.
         cond_blend_weights: ``(num_kept_cond,)`` weight per kept
             conditioning token, equal to ``1 / num_tiles_that_keep_it``.
             ``None`` when no conditioning tokens are appended.
     """
 
-    keep_mask: mx.array
+    keep_indices: mx.array
+    num_total_tokens: int
     cond_blend_weights: mx.array | None
+
+
+def seam_split(
+    seams: Sequence[int],
+    latent_frames: int,
+    frames: DimensionTilingConfig,
+) -> SplitOperation | None:
+    """A temporal split cut on ``seams``, or ``None`` when they cannot carry one.
+
+    Mirrors upstream ``ltx_core.modality_tiling.seam_split``. ``seams`` are interior
+    latent-frame indices supplied by the caller. A boundary there needs no blending: the
+    overlap is denoised for context and dropped (:func:`split_at_seams`). Leftover segments go
+    to the leading tiles. Missing or non-interior seams fall back to the requested overlap
+    split, which blends.
+
+    Args:
+        seams: Candidate seam cells (latent frames).
+        latent_frames: Number of latent frames ``F``.
+        frames: Temporal tiling config (tile count + context overlap).
+
+    Returns:
+        The seam split, or ``None`` with one frame tile or no interior seam.
+    """
+    if frames.num_tiles < 2:
+        return None
+    interior = sorted({cell for cell in seams if 0 < cell < latent_frames - 1})
+    if not interior:
+        if seams:
+            logger.info(
+                "Temporal tiling: seams %s are not interior to %d latent frames; keeping blended tiles",
+                list(seams),
+                latent_frames,
+            )
+        return None
+    boundaries = [0, *interior, latent_frames - 1]
+    logger.info("Temporal tiling: %d tiles cut on seams %s", frames.num_tiles, boundaries)
+    return split_at_seams(boundaries, frames.num_tiles, overlap=frames.overlap)
 
 
 class VideoModalityTiler:
@@ -90,13 +136,17 @@ class VideoModalityTiler:
 
     Stateless helper. Construct once with a :class:`TileCountConfig`
     and the latent ``(F, H, W)`` shape; iterate over :attr:`tiles`,
-    call :meth:`tile` to slice out each tile's sub-modality, run the
+    call :meth:`tile_modality` to slice out each tile's sub-modality, run the
     DiT on it, then accumulate the result via :meth:`blend`.
 
     Args:
         tiling: ``TileCountConfig`` describing tile counts + overlap
             per dimension.
         latent_shape: ``(F, H, W)`` of the patchified token grid.
+        seams: Interior latent-frame indices a temporal split may land on instead
+            of blended overlaps (:func:`seam_split`); missing or non-interior seams
+            keep the blended split. A regular keyframe belongs in that list only at
+            strength 0; generated keyframe slots never do.
 
     Notes:
         ``F``/``H``/``W`` are token-grid units, not pixel units —
@@ -104,29 +154,65 @@ class VideoModalityTiler:
         :func:`ltx_core_mlx.components.patchifiers.compute_video_latent_shape`.
     """
 
-    def __init__(self, tiling: TileCountConfig, latent_shape: tuple[int, int, int]) -> None:
+    def __init__(
+        self,
+        tiling: TileCountConfig,
+        latent_shape: tuple[int, int, int],
+        seams: Sequence[int] = (),
+    ) -> None:
         self._latent_shape = latent_shape
         F, H, W = latent_shape
         self._num_generated_tokens = F * H * W
+        frames = split_by_count(tiling.frames.num_tiles, tiling.frames.overlap)
+        frames_mapper = identity_mapping_operation
+        seam_op = seam_split(seams, F, tiling.frames)
+        if seam_op is not None:
+            frames, frames_mapper = seam_op, partial(identity_mapping_operation, rectangular=True)
         self._tiles: list[Tile] = create_tiles(
             (F, H, W),
             splitters=[
-                split_by_count(tiling.frames.num_tiles, tiling.frames.overlap),
+                frames,
                 split_by_count(tiling.height.num_tiles, tiling.height.overlap),
                 split_by_count(tiling.width.num_tiles, tiling.width.overlap),
             ],
-            mappers=[identity_mapping_operation] * 3,
+            mappers=[frames_mapper, identity_mapping_operation, identity_mapping_operation],
         )
+        # Exact generated extent of each tile in pixel units, (num_tiles, 3) [time, h, w]:
+        # the union of its generated tokens' intervals (temporal causal fix on frame 0).
+        starts, ends = [], []
+        for tile in self._tiles:
+            f, h, w = tile.in_coords
+            starts.append(
+                [
+                    max(0, VIDEO_TEMPORAL_SCALE * f.start - 7),
+                    VIDEO_SPATIAL_SCALE * h.start,
+                    VIDEO_SPATIAL_SCALE * w.start,
+                ]
+            )
+            ends.append(
+                [VIDEO_TEMPORAL_SCALE * (f.stop - 1) + 1, VIDEO_SPATIAL_SCALE * h.stop, VIDEO_SPATIAL_SCALE * w.stop]
+            )
+        self._extent_starts_px = np.asarray(starts, dtype=np.float32)
+        self._extent_ends_px = np.asarray(ends, dtype=np.float32)
 
     @property
     def tiles(self) -> list[Tile]:
-        """All tiles for the configured layout (call :meth:`tile` per tile)."""
+        """All tiles for the configured layout (call :meth:`tile_modality` per tile)."""
         return self._tiles
 
     @property
     def num_generated_tokens(self) -> int:
         """Number of generated (non-conditioning) tokens in the full sequence."""
         return self._num_generated_tokens
+
+    def _tile_index(self, tile: Tile) -> int:
+        tile_idx = next((i for i, t in enumerate(self._tiles) if t.in_coords == tile.in_coords), None)
+        if tile_idx is None:
+            raise RuntimeError(
+                f"Tile with in_coords={tile.in_coords} is not in this helper's tile set; "
+                f"pass a tile obtained from `tiler.tiles`."
+            )
+        return tile_idx
 
     def _tile_generated_token_count(self, tile: Tile) -> int:
         f, h, w = tile.in_coords
@@ -141,55 +227,49 @@ class VideoModalityTiler:
         w_idx = mx.arange(w.start, w.stop)
         return (f_idx[:, None, None] * H * W + h_idx[None, :, None] * W + w_idx[None, None, :]).reshape(-1)
 
-    def _keep_mask(self, num_total: int, positions: mx.array, tile: Tile) -> mx.array:
-        """Boolean ``(num_total,)`` mask — True for tokens this tile processes.
+    def _tile_extents(self, positions: mx.array) -> tuple[mx.array, mx.array]:
+        """Per-tile generated extents in position units, each ``(num_tiles, B, 3)``.
 
-        Generated tokens are selected by grid position. Conditioning
-        tokens (the trailing ``num_total - num_generated`` slots) are
-        kept when their point position falls inside the tile range on
-        every dimension, or when they have a negative time coord
-        (reference tokens with ``t < 0``).
+        Pixel extents are converted to seconds on the temporal axis with the frame
+        duration recovered from the first generated token, whose midpoint
+        ``compute_video_positions`` puts at ``0.5 / fps`` (so ``1 / fps = 2 * t0``).
         """
-        mask = mx.zeros(num_total, dtype=mx.bool_)
-        gen_idx = self._generated_token_indices(tile)
-        mask[gen_idx] = mx.array(True)
+        frame_duration = 2.0 * positions[:, 0, 0]  # (B,)
+        if not bool(mx.all(frame_duration > 0).item()):
+            raise ValueError(
+                "VideoModalityTiler expects pixel-space video positions whose first generated token sits at "
+                f"0.5 / fps (compute_video_positions); got t0={np.asarray(positions[:, 0, 0]).tolist()}"
+            )
+        ones = mx.ones_like(frame_duration)
+        scale = mx.stack([frame_duration, ones, ones], axis=-1)  # (B, 3)
+        starts = mx.array(self._extent_starts_px)[:, None, :] * scale[None]
+        ends = mx.array(self._extent_ends_px)[:, None, :] * scale[None]
+        return starts, ends
 
-        if num_total <= self._num_generated_tokens:
-            return mask
+    def _all_tiles_cond_keep(self, positions: mx.array) -> np.ndarray:
+        """Vectorised ``(num_tiles, num_cond)`` bool: which tiles keep each conditioning token.
 
-        # Compute tile spatial/temporal range from kept generated positions.
-        # positions shape: (B, T, 3) for video. Use B=0 (assume positions
-        # are batch-shared, which holds in our pipelines).
-        gen_pos = positions[0, gen_idx, :]  # (num_tile_gen, 3)
-        tile_start = gen_pos.min(axis=0)  # (3,)
-        tile_end = gen_pos.max(axis=0)  # (3,)
-        cond_pos = positions[0, self._num_generated_tokens :, :]  # (num_cond, 3)
-
-        # Keep cond tokens whose point coords fall in [start, end] on
-        # every axis. Inclusive end matches upstream's interval-overlap
-        # logic for degenerate point intervals.
-        in_range = (cond_pos >= tile_start[None, :]) & (cond_pos <= tile_end[None, :])
-        keep_cond = in_range.all(axis=-1)  # (num_cond,)
-
-        # Reference / negative-time tokens (e.g. IC-LoRA refs) are kept
-        # in every tile.
-        has_negative_time = cond_pos[:, 0] < 0
-        keep_cond = keep_cond | has_negative_time
-
-        mask[self._num_generated_tokens :] = keep_cond
-        return mask
+        A conditioning token is kept by a tile when its midpoint lies in the tile's closed
+        generated extent on all three axes (upstream: its ``[start, end)`` interval overlaps
+        the tile), or when it has a negative time coordinate (reference token).
+        """
+        starts, ends = self._tile_extents(positions)  # (num_tiles, B, 3)
+        cond = positions[:, self._num_generated_tokens :, :]  # (B, num_cond, 3)
+        inside = (cond[None] >= starts[:, :, None, :]) & (cond[None] <= ends[:, :, None, :])
+        keep = inside.all(axis=-1) | (cond[None, :, :, 0] < 0)  # (num_tiles, B, num_cond)
+        return np.asarray(keep.any(axis=1))
 
     def tile_modality(
         self,
         modality: Modality,
         tile: Tile,
         normalize_positions: bool = True,
-    ) -> tuple[Modality, TileContext]:
+    ) -> tuple[Modality, TilingContext]:
         """Slice ``modality`` to the tokens covered by ``tile``.
 
         Mirrors upstream ``VideoModalityTilingHelper.tile_modality``
         signature. Returns a new :class:`Modality` for the tile + an
-        opaque :class:`TileContext` to pass back to :meth:`blend`.
+        opaque :class:`TilingContext` to pass back to :meth:`blend`.
 
         Args:
             modality: input modality. ``modality.latent``, ``timesteps``,
@@ -198,12 +278,13 @@ class VideoModalityTiler:
                 forwarded unchanged. ``attention_mask``, when present,
                 is reduced to the kept tokens x kept tokens submatrix.
             tile: which tile to extract (one of :attr:`tiles`).
-            normalize_positions: when True, shift positions so the
-                tile's generated tokens start at zero on every axis.
+            normalize_positions: when True, shift all positions so the
+                tile's generated tokens' intervals start at zero on every
+                axis (upstream semantics; midpoints keep their half-cell).
 
         Returns:
             ``(tiled_modality, context)``. ``context`` carries the
-            keep mask and per-cond-token blend weights needed by
+            keep indices and per-cond-token blend weights needed by
             :meth:`blend`.
         """
         latent = modality.latent
@@ -211,16 +292,26 @@ class VideoModalityTiler:
         attention_mask = modality.attention_mask
 
         num_total = latent.shape[1]
-        keep_mask = self._keep_mask(num_total, positions, tile)
-        keep_idx = _bool_to_indices(keep_mask)
+        gen_idx = self._generated_token_indices(tile)
+        tile_idx = self._tile_index(tile)
+
+        cond_blend_weights: mx.array | None = None
+        if num_total > self._num_generated_tokens:
+            keep_per_tile_cond = self._all_tiles_cond_keep(positions)  # (num_tiles, num_cond)
+            my_cond_keep = keep_per_tile_cond[tile_idx]
+            cond_idx = mx.array(self._num_generated_tokens + np.flatnonzero(my_cond_keep), dtype=gen_idx.dtype)
+            keep_idx = mx.concatenate([gen_idx, cond_idx])
+            total_keepers = keep_per_tile_cond.sum(axis=0).astype(np.float32)  # (num_cond,)
+            cond_blend_weights = mx.array(1.0 / total_keepers[my_cond_keep])
+        else:
+            keep_idx = gen_idx
 
         tiled_latent = latent[:, keep_idx, :]
         tiled_positions = positions[:, keep_idx, :]
         tiled_timesteps = modality.timesteps[:, keep_idx]
         if normalize_positions:
-            num_tile_gen = self._tile_generated_token_count(tile)
-            offset = tiled_positions[:, :num_tile_gen, :].min(axis=1, keepdims=True)
-            tiled_positions = tiled_positions - offset
+            starts, _ = self._tile_extents(positions)
+            tiled_positions = tiled_positions - starts[tile_idx][:, None, :]
 
         tiled_attention_mask: mx.array | None = None
         if attention_mask is not None:
@@ -228,21 +319,6 @@ class VideoModalityTiler:
         tiled_keyframes_mask: mx.array | None = None
         if modality.keyframes_mask is not None:
             tiled_keyframes_mask = modality.keyframes_mask[:, keep_idx, :]
-
-        cond_blend_weights: mx.array | None = None
-        if num_total > self._num_generated_tokens:
-            cond_keep = keep_mask[self._num_generated_tokens :]
-            n_kept = int(cond_keep.sum().item())
-            if n_kept > 0:
-                # Count how many tiles keep each cond token, restrict to
-                # tokens kept by THIS tile.
-                cond_counts = mx.zeros(n_kept, dtype=mx.float32)
-                cond_keep_idx_in_full = _bool_to_indices(cond_keep)
-                for other in self._tiles:
-                    other_mask = self._keep_mask(num_total, positions, other)
-                    other_cond = other_mask[self._num_generated_tokens :]
-                    cond_counts = cond_counts + other_cond[cond_keep_idx_in_full].astype(mx.float32)
-                cond_blend_weights = 1.0 / cond_counts
 
         tiled = Modality(
             latent=tiled_latent,
@@ -255,30 +331,32 @@ class VideoModalityTiler:
             attention_mask=tiled_attention_mask,
             keyframes_mask=tiled_keyframes_mask,
         )
-        return tiled, TileContext(keep_mask=keep_mask, cond_blend_weights=cond_blend_weights)
+        return tiled, TilingContext(
+            keep_indices=keep_idx, num_total_tokens=num_total, cond_blend_weights=cond_blend_weights
+        )
 
     def blend(
         self,
         tile_output: mx.array,
         tile: Tile,
-        ctx: TileContext,
+        ctx: TilingContext,
         output: mx.array | None = None,
     ) -> mx.array:
         """Blend-weight the tile result and accumulate into the full token buffer.
 
         The tile's generated-token output is multiplied by the tile's
-        per-token trapezoidal blend mask before being added to the
-        output buffer at the matching positions. Conditioning-token
-        output is multiplied by ``ctx.cond_blend_weights`` (so summed
-        contributions from all tiles equal 1).
+        per-token blend mask before being added to the output buffer at
+        the matching positions. Conditioning-token output is multiplied by
+        ``ctx.cond_blend_weights`` (so summed contributions from all tiles
+        equal 1).
 
         Args:
             tile_output: ``(B, num_tile_tokens, D)`` from the model.
                 The first ``num_tile_gen`` rows are generated tokens
                 (in the tile's order), the remainder are kept cond
                 tokens (in their original order in the full sequence).
-            tile: the :class:`Tile` used in :meth:`tile`.
-            ctx: the :class:`TileContext` from :meth:`tile`.
+            tile: the :class:`Tile` used in :meth:`tile_modality`.
+            ctx: the :class:`TilingContext` from :meth:`tile_modality`.
             output: optional pre-allocated ``(B, num_total, D)`` buffer
                 to accumulate into. ``None`` allocates a fresh
                 zero-filled buffer.
@@ -287,7 +365,7 @@ class VideoModalityTiler:
             The output buffer with the tile's contribution added.
         """
         B, _, D = tile_output.shape
-        num_total = ctx.keep_mask.shape[0]
+        num_total = ctx.num_total_tokens
         if output is None:
             output = mx.zeros((B, num_total, D), dtype=tile_output.dtype)
         elif output.shape != (B, num_total, D):
@@ -300,10 +378,8 @@ class VideoModalityTiler:
         gen_part = tile_output[:, :num_tile_gen, :] * blend_mask[None, :, None]
         output[:, gen_idx, :] = output[:, gen_idx, :] + gen_part
 
-        if num_total > self._num_generated_tokens and ctx.cond_blend_weights is not None:
-            cond_keep = ctx.keep_mask[self._num_generated_tokens :]
-            cond_idx_local = _bool_to_indices(cond_keep)
-            cond_idx_full = self._num_generated_tokens + cond_idx_local
+        if ctx.cond_blend_weights is not None and ctx.cond_blend_weights.size > 0:
+            cond_idx_full = ctx.keep_indices[num_tile_gen:]
             weights = ctx.cond_blend_weights.astype(tile_output.dtype)
             cond_part = tile_output[:, num_tile_gen:, :] * weights[None, :, None]
             output[:, cond_idx_full, :] = output[:, cond_idx_full, :] + cond_part
@@ -334,11 +410,15 @@ class TiledLTXModel:
         inner: An ``LTXModel`` (or another wrapper around it) — anything
             whose ``__call__`` signature matches LTXModel's.
         tiler: A pre-built :class:`VideoModalityTiler`.
+        normalize_positions: Forwarded to :meth:`VideoModalityTiler.tile_modality`:
+            shift each tile's positions so its generated intervals start at zero.
+            Default False (the ``--tile-*`` behaviour).
     """
 
-    def __init__(self, inner, tiler: VideoModalityTiler) -> None:
+    def __init__(self, inner, tiler: VideoModalityTiler, normalize_positions: bool = False) -> None:
         self._inner = inner
         self._tiler = tiler
+        self._normalize_positions = normalize_positions
 
     def __call__(self, *args, **kwargs):
         if args:
@@ -354,7 +434,9 @@ class TiledLTXModel:
         audio_outs: list[mx.array] = []
 
         for tile in self._tiler.tiles:
-            tiled_modality, ctx = self._tiler.tile_modality(video_modality, tile, normalize_positions=False)
+            tiled_modality, ctx = self._tiler.tile_modality(
+                video_modality, tile, normalize_positions=self._normalize_positions
+            )
 
             tile_kwargs = dict(kwargs)
             tile_kwargs["video_latent"] = tiled_modality.latent
@@ -416,7 +498,7 @@ class TiledLTXModel:
 
     def __getattr__(self, name: str):
         # Proxy other attribute reads (e.g. ``self.config``) to the inner model.
-        if name in {"_inner", "_tiler"}:
+        if name in {"_inner", "_tiler", "_normalize_positions"}:
             raise AttributeError(name)
         try:
             inner = object.__getattribute__(self, "_inner")

@@ -11,6 +11,8 @@ import itertools
 from collections.abc import Iterator, Sequence
 from typing import NamedTuple, overload
 
+from ltx_core_mlx.model.video_vae.tiling import split_at_seams as core_split_at_seams
+
 #: Candidate keyframe segment lengths in pixel frames (upstream ``SEGMENT_CANDIDATES``).
 SEGMENT_CANDIDATES: tuple[int, ...] = (24, 32)
 #: Pixel frames per latent frame of the video VAE.
@@ -79,37 +81,16 @@ def split_at_seams(boundaries: Sequence[int], num_tiles: int, overlap: int, dim_
     cell. Segments are dealt so leftovers go to the leading tiles; ``num_tiles`` above ``K`` is clamped.
     Every tile but the first starts ``overlap`` cells before the cell it resumes at; that lead-in is its
     ``left_ramp`` (context only, dropped when stitching), so the earlier tile keeps the boundary cell.
+    Delegates to the core :func:`ltx_core_mlx.model.video_vae.tiling.split_at_seams`.
 
     Raises:
         ValueError: invalid ``num_tiles`` / ``overlap`` / boundaries, or boundaries not ending at ``dim_size - 1``.
     """
-    boundaries = tuple(boundaries)
-    if num_tiles < 1:
-        raise ValueError(f"num_tiles must be >= 1, got {num_tiles}")
-    if overlap < 0:
-        raise ValueError(f"overlap must be >= 0, got {overlap}")
-    if len(boundaries) < 2 or boundaries[0] != 0:
-        raise ValueError(f"boundaries must start at 0 and hold at least one segment, got {list(boundaries)}")
-    if any(b <= a for a, b in itertools.pairwise(boundaries)):
-        raise ValueError(f"boundaries must be strictly increasing, got {list(boundaries)}")
-    if boundaries[-1] != dim_size - 1:
-        raise ValueError(f"boundaries must end at the last cell ({dim_size - 1}), got {boundaries[-1]}")
-    n_segments = len(boundaries) - 1
-    n_tiles = min(num_tiles, n_segments)
-    base, leftover = divmod(n_segments, n_tiles)
-    counts = [base + (1 if index < leftover else 0) for index in range(n_tiles)]
-    intervals: list[TemporalInterval] = []
-    cursor = 0
-    for tile_index, count in enumerate(counts):
-        resume = boundaries[cursor] + 1
-        start = 0 if tile_index == 0 else max(0, resume - overlap)
-        cursor += count
-        intervals.append(
-            TemporalInterval(
-                start=start, end=boundaries[cursor] + 1, left_ramp=0 if tile_index == 0 else resume - start
-            )
-        )
-    return intervals
+    intervals = core_split_at_seams(boundaries, num_tiles, overlap)(dim_size)
+    return [
+        TemporalInterval(start=start, end=end, left_ramp=left_ramp)
+        for start, end, left_ramp in zip(intervals.starts, intervals.ends, intervals.left_ramps, strict=True)
+    ]
 
 
 def split_canvas_at_seams(seams: Sequence[int], num_tiles: int, overlap: int, dim_size: int) -> list[TemporalInterval]:

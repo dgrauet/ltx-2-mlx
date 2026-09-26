@@ -9,7 +9,7 @@ Ported from ltx-core/src/ltx_core/model/video_vae/tiling.py
 from __future__ import annotations
 
 import itertools
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import NamedTuple
 
@@ -645,8 +645,8 @@ def prepare_tiles_for_encoding(
 # Token-grid tiling primitives (used by VideoModalityTiler)
 # ---------------------------------------------------------------------------
 # These are MLX-native ports of the upstream `split_by_size`,
-# `split_by_count`, `identity_mapping_operation`, `DimensionTilingConfig`,
-# and `TileCountConfig` from `ltx_core.tiling`. They operate on the
+# `split_by_count`, `split_at_seams`, `identity_mapping_operation`,
+# `DimensionTilingConfig`, and `TileCountConfig` from `ltx_core.tiling`. They operate on the
 # patchified token grid (F, H, W) consumed by the DiT, not the VAE pixel
 # grid. The grid units match `compute_video_latent_shape` output.
 #
@@ -690,6 +690,11 @@ def split_by_count(num_tiles: int, overlap: int = 0) -> SplitOperation:
 
         total = dim_size + overlap * (num_tiles - 1)
         tile_size = total // num_tiles
+        if tile_size <= overlap:
+            raise ValueError(
+                f"split_by_count produced size={tile_size} <= overlap={overlap} "
+                f"for dim_size={dim_size}, num_tiles={num_tiles}"
+            )
         remainder = total % num_tiles
 
         # Use split_by_size on the rounded-down dimension, then absorb
@@ -714,20 +719,84 @@ def split_by_count(num_tiles: int, overlap: int = 0) -> SplitOperation:
     return split
 
 
+def split_at_seams(boundaries: Sequence[int], num_tiles: int, overlap: int = 0) -> SplitOperation:
+    """Split a dimension on boundary cells whose content is already known, dropping the overlap.
+
+    Mirrors upstream ``ltx_core.tiling.split_at_seams``. ``boundaries`` are the ``K + 1`` segment
+    edges in grid cells, starting at 0 and ending at the last cell of the dimension. The ``K``
+    segments are dealt so leftover segments go to the leading tiles; ``num_tiles`` larger than
+    ``K`` is clamped. Each tile but the first starts ``overlap`` cells before the boundary it
+    resumes after. That run-up is context only: it lands in the interval's ``left_ramp``, which
+    :func:`identity_mapping_operation` with ``rectangular=True`` masks to zero, so the earlier tile
+    keeps the boundary cell and this one contributes strictly after it. ``right_ramps`` are all 0.
+
+    Args:
+        boundaries: Segment edges in grid cells, strictly increasing, starting at 0.
+        num_tiles: Number of tiles. Must be >= 1. Extra tiles beyond the segment count are dropped.
+        overlap: Context cells each non-first tile denoises before the cell it resumes at, in grid
+            units. Clamped at the start of the dimension.
+
+    Returns:
+        A SplitOperation callable; it raises ``ValueError`` when ``boundaries`` do not end at the
+        last cell of the dimension it is called on.
+
+    Raises:
+        ValueError: invalid ``num_tiles`` / ``overlap`` / ``boundaries``.
+    """
+    boundaries = tuple(boundaries)
+    if num_tiles < 1:
+        raise ValueError(f"num_tiles must be >= 1, got {num_tiles}")
+    if overlap < 0:
+        raise ValueError(f"overlap must be >= 0, got {overlap}")
+    if len(boundaries) < 2 or boundaries[0] != 0:
+        raise ValueError(f"boundaries must start at 0 and hold at least one segment, got {list(boundaries)}")
+    if any(b <= a for a, b in itertools.pairwise(boundaries)):
+        raise ValueError(f"boundaries must be strictly increasing, got {list(boundaries)}")
+    n_segments = len(boundaries) - 1
+    n_tiles = min(num_tiles, n_segments)
+    base, leftover = divmod(n_segments, n_tiles)
+    counts = [base + (1 if index < leftover else 0) for index in range(n_tiles)]
+
+    def split(dim_size: int) -> DimensionIntervals:
+        if boundaries[-1] != dim_size - 1:
+            raise ValueError(f"boundaries must end at the last cell ({dim_size - 1}), got {boundaries[-1]}")
+        starts: list[int] = []
+        ends: list[int] = []
+        left_ramps: list[int] = []
+        cursor = 0
+        for tile_index, count in enumerate(counts):
+            resume = boundaries[cursor] + 1
+            start = 0 if tile_index == 0 else max(0, resume - overlap)
+            cursor += count
+            starts.append(start)
+            ends.append(boundaries[cursor] + 1)
+            left_ramps.append(0 if tile_index == 0 else resume - start)
+        return DimensionIntervals(starts=starts, ends=ends, left_ramps=left_ramps, right_ramps=[0] * len(starts))
+
+    return split
+
+
 def identity_mapping_operation(
     intervals: DimensionIntervals,
+    *,
+    rectangular: bool = False,
 ) -> tuple[list[slice], list[mx.array | None]]:
-    """Each interval maps to the same output range with a trapezoidal blend mask.
+    """Each interval maps to the same output range with a 1-D blend mask.
 
     Mirrors upstream ``ltx_core.tiling.identity_mapping_operation``. Used
     when tile coordinates in the input grid match coordinates in the
-    output grid (the typical case for token-level modality tiling).
+    output grid (the typical case for token-level modality tiling). The
+    default mask is trapezoidal (blend on the ramps); ``rectangular=True``
+    zeroes the ramps outright: the overlap is context the tile denoised but
+    does not contribute. Pair it with a split whose ramps are one-sided, such
+    as :func:`split_at_seams` -- ramps on both sides would leave a hole.
     """
+    mask_1d = compute_rectangular_mask_1d if rectangular else compute_trapezoidal_mask_1d
     out_slices: list[slice] = []
     masks: list[mx.array | None] = []
     for s, e, lr, rr in zip(intervals.starts, intervals.ends, intervals.left_ramps, intervals.right_ramps, strict=True):
         out_slices.append(slice(s, e))
-        masks.append(compute_trapezoidal_mask_1d(e - s, lr, rr))
+        masks.append(mask_1d(e - s, lr, rr))
     return out_slices, masks
 
 
