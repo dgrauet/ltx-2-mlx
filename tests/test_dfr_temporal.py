@@ -223,6 +223,7 @@ def test_round_tiles_use_anchors_slots_and_frozen_audio(tmp_path, monkeypatch):
     assert list(slots[0].pixel_frame_indices) == [24, 72, 120]
     for call in ancestral.calls[1:]:
         assert float(mx.abs(call["audio_state"].denoise_mask).max()) == 0.0  # frozen audio
+        assert call["audio_state"].frozen is True  # model conditions its audio AdaLN / A->V gate on sigma 0
 
 
 def test_round_2_runs_4_tiles_and_outputs_481_frames(tmp_path, monkeypatch):

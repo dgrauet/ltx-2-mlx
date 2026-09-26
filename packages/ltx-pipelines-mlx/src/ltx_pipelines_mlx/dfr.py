@@ -16,7 +16,6 @@ epilogue is a follow-up.
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 import sys
 from collections.abc import Sequence
@@ -612,16 +611,8 @@ class DFRPipeline(DistilledPipeline):
             sigma=TEMPORAL_SIGMAS[0],
             initial_latent=tokens,
         )
-        # Frozen audio: setting denoise_mask=0 below keeps the audio latent clean (never denoised)
-        # across the ancestral loop. Known divergence: upstream additionally builds this stream as
-        # ``ModalitySpec(frozen=True, ...)``, which forces the audio ``sigma`` fed to the model to
-        # 0 as well; that sigma drives the audio prompt AdaLN and the audio->video cross-attention
-        # gate. Here, because the mask is uniformly 0, ``euler_ancestral_denoising_loop`` treats the
-        # audio state as "uniform" and skips computing per-token timesteps for it, so the model
-        # falls back to the loop's *global* step sigma for the audio AdaLN / A->V gate instead of a
-        # frozen 0 — the audio latent itself still stays clean (denoise_mask blending is unaffected),
-        # but the model isn't told the audio is frozen. Shared with a2v and lipdub; tracked for a
-        # follow-up fix.
+        # Frozen audio, as upstream ``ModalitySpec(frozen=True, noise_scale=0.0)``: an all-zero denoise mask keeps
+        # the latent clean, and ``frozen`` makes the loop feed sigma 0 to the audio prompt AdaLN and the A->V gate.
         audio_state = distilled_mod.create_noised_state(
             base_shape=audio_tokens.shape,
             conditionings=[],
@@ -630,8 +621,8 @@ class DFRPipeline(DistilledPipeline):
             seed=init_seed + 1,
             sigma=0.0,
             initial_latent=audio_tokens,
+            frozen=True,
         )
-        audio_state = dataclasses.replace(audio_state, denoise_mask=mx.zeros_like(audio_state.denoise_mask))
         output = distilled_mod.euler_ancestral_denoising_loop(
             transformer=distilled_mod.X0Model(self.dit),
             video_state=video_state,

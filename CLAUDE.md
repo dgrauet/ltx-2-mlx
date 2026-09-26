@@ -1176,12 +1176,8 @@ Conditioning per tile: the carried keyframes anchor the tile at `ANCHOR_KEYFRAME
 (soft, not a hard replace), plus fresh mid-segment generated-keyframe slots on the doubled
 timeline. Audio is **frozen**, not re-denoised: stage 1's audio latent is windowed to the tile's
 time range and resampled to the tile's new token count (`resample_audio_time`,
-`audio_latent_for_tile`) with `denoise_mask=0`. Known divergence: upstream additionally builds this
-stream with `ModalitySpec(frozen=True, ...)`, which forces the audio sigma fed to the model to 0 too
-(driving the audio prompt AdaLN and the audio->video cross-attention gate); here the audio latent
-stays clean via `denoise_mask=0` alone, but the uniformly-zero mask makes the loop skip per-token
-timesteps for audio and fall back to the step's global sigma, so the model still sees the step sigma
-for audio instead of a frozen 0 — shared with `a2v` and `lipdub`, tracked as a follow-up. The
+`audio_latent_for_tile`) as a `frozen` state (all-zero `denoise_mask`, sigma 0 for the audio prompt
+AdaLN and the A→V gate — see "Frozen streams and per-modality sigma"), as upstream. The
 transformer's conditioning fps is snapped by
 `conditioning_fps()` — RoPE fps above 30 snaps to 60 (`_MAX_CONDITIONING_FPS = 60.0`); the actual
 playback fps (`frame_rate * 2**temporal_upscalings`) is unchanged. After each round,
