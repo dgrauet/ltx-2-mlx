@@ -77,7 +77,7 @@ def _make_a2v(tmp_path, monkeypatch):
     _write_23_pack(tmp_path)
     pipe = A2VidPipelineTwoStage(str(tmp_path), low_memory=False)
 
-    pipe._encode_text_with_negative = lambda prompt: (  # type: ignore[method-assign]
+    pipe._encode_text_with_negative = lambda prompt, negative_prompt=None: (  # type: ignore[method-assign]
         mx.zeros((1, 4, 4096), dtype=mx.bfloat16),
         mx.zeros((1, 4, 2048), dtype=mx.bfloat16),
         mx.zeros((1, 4, 4096), dtype=mx.bfloat16),
@@ -217,7 +217,7 @@ def _make_retake(tmp_path, monkeypatch):
     _write_23_pack(tmp_path)
     pipe = RetakePipeline(str(tmp_path), low_memory=False)
 
-    pipe._encode_text_with_negative = lambda prompt: (  # type: ignore[method-assign]
+    pipe._encode_text_with_negative = lambda prompt, negative_prompt=None: (  # type: ignore[method-assign]
         mx.zeros((1, 4, 4096), dtype=mx.bfloat16),
         mx.zeros((1, 4, 2048), dtype=mx.bfloat16),
         mx.zeros((1, 4, 4096), dtype=mx.bfloat16),
