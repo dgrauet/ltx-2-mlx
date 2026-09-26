@@ -19,10 +19,13 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import mlx.core as mx
+import numpy as np
 from huggingface_hub.errors import GatedRepoError
+from PIL import Image
 
 import ltx_pipelines_mlx.distilled as distilled_mod
 from ltx_core_mlx.components.diffusion_steps import EulerAncestralDiffusionStep
@@ -39,6 +42,7 @@ from ltx_core_mlx.loader import (
 from ltx_core_mlx.loader.block_streaming import BlockLoraSource
 from ltx_core_mlx.model.upsampler import LatentUpsampler
 from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
+from ltx_core_mlx.model.video_vae.tiling import DimensionTilingConfig, TileCountConfig
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization
@@ -76,10 +80,102 @@ TEMPORAL_SIGMAS: list[float] = list(LTX_2_5_DISTILLED_SIGMAS[4:])
 _MAX_CONDITIONING_FPS = 60.0
 _SNAP_CONDITIONING_FPS_ABOVE = 30.0
 
+#: Upstream ``_EPILOGUE_SPATIAL_OVERLAP``: 2x2 spatial tiles inside the epilogue overlap by this
+#: many token-grid cells (clamped per-axis by :func:`clamp_tile_counts` on a small latent).
+EPILOGUE_SPATIAL_OVERLAP = 12
+#: Upstream ``_EPILOGUE_KEYFRAME_STRENGTH``: the epilogue's re-encoded keyframe planes are a hard
+#: anchor, not a soft one like the temporal rounds' carried keyframes.
+EPILOGUE_KEYFRAME_STRENGTH = 1.0
+#: Seed offset for decoding each carry plane before Lanczos-upsampling it into the epilogue's
+#: keyframe conditionings (mirrors ``KEYFRAME_PLANE_DECODE_SEED_OFFSET = seed + 4000 + i``).
+KEYFRAME_PLANE_DECODE_SEED_OFFSET = 4000
+#: Seed offset for the epilogue's own noise draw (``seed + 2000``), decorrelated from stage 1/2
+#: and the temporal rounds' per-tile noise (``seed + 1000 * round + tile``).
+EPILOGUE_NOISE_SEED_OFFSET = 2000
+
 
 def conditioning_fps(playback_fps: float) -> float:
     """Transformer RoPE fps (upstream ``_conditioning_fps``): above 30 snaps to 60; playback fps is unchanged."""
     return _MAX_CONDITIONING_FPS if playback_fps > _SNAP_CONDITIONING_FPS_ABOVE else playback_fps
+
+
+def lanczos_x2(frames: np.ndarray) -> np.ndarray:
+    """Stretch each frame 2x with Lanczos resampling (upstream ``_lanczos_x2_fhwc``).
+
+    Args:
+        frames: ``(F, H, W, C)`` array in ``[0, 1]``, ``C`` in ``{1, 3}``.
+
+    Returns:
+        ``(F, 2H, 2W, C)`` float32 array in ``[0, 1]``.
+
+    Raises:
+        ValueError: ``frames`` is not 4-D, has no frames, or an unsupported channel count.
+    """
+    if frames.ndim != 4:
+        raise ValueError(f"Expected (F, H, W, C), got shape {tuple(frames.shape)}")
+    if frames.shape[0] < 1:
+        raise ValueError("Need at least one frame to Lanczos-upsample")
+    channels = frames.shape[-1]
+    if channels not in (1, 3):
+        raise ValueError(f"Lanczos x2 expects 1 or 3 channels, got {channels}")
+    out: list[np.ndarray] = []
+    for frame in frames:
+        height, width, _channels = frame.shape
+        array = (np.clip(frame, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+        image = Image.fromarray(array[..., 0], mode="L") if channels == 1 else Image.fromarray(array, mode="RGB")
+        image = image.resize((width * 2, height * 2), resample=Image.Resampling.LANCZOS)
+        resized = np.asarray(image, dtype=np.float32) / 255.0
+        if resized.ndim == 2:
+            resized = resized[..., None]
+        out.append(resized)
+    return np.stack(out, axis=0)
+
+
+def _clamp_dim_tiling(cfg: DimensionTilingConfig, dim_size: int, axis: str) -> DimensionTilingConfig:
+    """Clamp a single dimension's tile count and overlap to the latent's extent.
+
+    Mirrors upstream ``_clamp_dim_tiling``. ``split_by_count`` requires ``overlap < tile_size``;
+    with ``tile_size = (dim_size + overlap * (n - 1)) // n`` this reduces to
+    ``overlap <= dim_size - n``. When the configured overlap exceeds this bound it is clamped;
+    if the latent is too small to hold ``n`` tiles at all, tiling falls back to a single tile.
+    """
+    n = cfg.num_tiles
+    if n <= 1:
+        return cfg
+    if dim_size < n:
+        logger.warning("%s tiling: dim_size=%d < num_tiles=%d; falling back to 1 tile on this axis.", axis, dim_size, n)
+        return DimensionTilingConfig(1, 0)
+    max_overlap = dim_size - n
+    if cfg.overlap <= max_overlap:
+        return cfg
+    logger.warning(
+        "%s tiling: overlap=%d exceeds latent bound (%d); clamping to %d.", axis, cfg.overlap, max_overlap, max_overlap
+    )
+    return DimensionTilingConfig(n, max_overlap)
+
+
+def clamp_tile_counts(tiling: TileCountConfig, latent_fhw: tuple[int, int, int]) -> TileCountConfig:
+    """Clamp frame, height, and width tilings to the latent's extents (upstream ``_clamp_tile_to_latent``).
+
+    Args:
+        tiling: Requested tile counts.
+        latent_fhw: ``(F, H, W)`` latent extents in token-grid units.
+
+    Returns:
+        A :class:`TileCountConfig` with each axis clamped by :func:`_clamp_dim_tiling`.
+    """
+    frames, height, width = latent_fhw
+    return replace(
+        tiling,
+        frames=_clamp_dim_tiling(tiling.frames, frames, "Frame"),
+        height=_clamp_dim_tiling(tiling.height, height, "Height"),
+        width=_clamp_dim_tiling(tiling.width, width, "Width"),
+    )
+
+
+def floor_to_multiple(value: int, multiple: int) -> int:
+    """Round ``value`` down to the nearest multiple of ``multiple``."""
+    return (value // multiple) * multiple
 
 
 def resample_audio_time(audio_latent: mx.array, src_start: float, src_end: float, out_frames: int) -> mx.array:
@@ -822,13 +918,20 @@ __all__ = [
     "ANCHOR_KEYFRAME_STRENGTH",
     "DEFAULT_DETAILING_LORA",
     "DETAILING_LORA_STRENGTH",
+    "EPILOGUE_KEYFRAME_STRENGTH",
+    "EPILOGUE_NOISE_SEED_OFFSET",
+    "EPILOGUE_SPATIAL_OVERLAP",
+    "KEYFRAME_PLANE_DECODE_SEED_OFFSET",
     "TEMPORAL_ANCESTRAL_ETA",
     "TEMPORAL_SIGMAS",
     "DFRPipeline",
     "audio_latent_for_tile",
+    "clamp_tile_counts",
     "conditioning_fps",
     "decode_keyframes_from_slots",
     "dedupe_slots",
+    "floor_to_multiple",
+    "lanczos_x2",
     "merge_carry_forward_keyframes",
     "rebase_image_conditionings",
     "resample_audio_time",

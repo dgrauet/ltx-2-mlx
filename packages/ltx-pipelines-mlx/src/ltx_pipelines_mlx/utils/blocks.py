@@ -534,6 +534,33 @@ class VideoDecoder:
             )
         return output_path
 
+    def decode_single_frame(self, latent: mx.array, *, seed: int = 0) -> mx.array:
+        """Decode a single-frame latent as its own one-frame clip (upstream ``iter_decoded_single_frames``).
+
+        Used by the DFR spatial epilogue to re-decode each carried keyframe plane before
+        Lanczos-upsampling and re-encoding it. ``seed`` only affects the diffusion decoder's
+        noise draw; the conv decoder is deterministic and ignores it.
+
+        Args:
+            latent: ``(1, C, 1, H, W)`` normalised latent, PyTorch layout.
+            seed: Noise seed for the diffusion decoder.
+
+        Returns:
+            ``(1, H*32, W*32, 3)`` float32 pixels in ``[0, 1]``.
+
+        Raises:
+            ValueError: ``latent`` is not a single-frame ``(B, C, 1, H, W)`` tensor.
+        """
+        if latent.ndim != 5 or latent.shape[2] != 1:
+            raise ValueError(f"decode_single_frame expects (B, C, 1, H, W) latents, got {tuple(latent.shape)}")
+        decoder = self.load()
+        if self.video_decoder == "diffusion":
+            pixels = decoder._decoder.decode(latent, seed=seed)
+        else:
+            pixels = decoder.decode(latent)
+        pixels = mx.clip((pixels.astype(mx.float32) + 1.0) / 2.0, 0.0, 1.0)
+        return pixels.transpose(0, 2, 3, 4, 1)[:, 0]
+
 
 class AudioDecoder:
     """Owns the audio VAE decoder + vocoder + BWE lifecycle.
