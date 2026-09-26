@@ -1225,6 +1225,14 @@ pre-epilogue slots) become the decoder keyframes for the final keyframe-aware de
 the epilogue's own tiling) and `--segment` (Prompt Relay), both up front in the CLI before any
 Gemma load, mirroring the temporal-rounds refusals above.
 
+**Spatial epilogue validated** (M2 Pro 32 GB, LTX-2.5 q8, `--dfr --low-ram --no-audio`, seed 5, `-f 49`):
+`--spatial-upscalings 1` is byte-identical (sha256) to main. `--spatial-upscalings 2` at 1536×1024: 1482 s total,
+epilogue 1158 s (3 steps × 4 tiles, ~95 s per tile forward), max RSS 12.6 GB, decode peak Metal 11.2 GB; with
+`--temporal-upscalings 1` (97 frames @ 48 fps): 4524 s, epilogue 3657 s over 8 tiles (seams [6, 12]), decode peak
+16.9 GB. No visible spatial seam (gradients at the 12-cell blend ramps stay at the frame's ordinary level) and the
+temporal cut at 48→49 is within the range of the rounds' seams; mean |Laplacian| 1.268 vs 1.202 for a direct
+`--spatial-upscalings 1` render at 1536×1024 (1190 s).
+
 **Keyframe decode validated** (M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5, 512×768×49,
 baselines at the pre-keyframe base): `--dfr` (conv) and `--distilled --video-decoder diffusion` are
 byte-identical (sha256) to the baselines; `--dfr --video-decoder diffusion` now decodes 2 planes
