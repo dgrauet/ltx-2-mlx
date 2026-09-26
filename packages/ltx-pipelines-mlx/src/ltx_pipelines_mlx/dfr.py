@@ -978,6 +978,7 @@ class DFRPipeline(DistilledPipeline):
 
         Raises:
             RuntimeError: missing carry keyframes.
+            ValueError: the re-encoded plane count differs from the carry positions.
         """
         carry_positions = list(self.generated_keyframe_positions)
         carry_keyframes = self.generated_keyframes
@@ -1014,8 +1015,18 @@ class DFRPipeline(DistilledPipeline):
             sample = mx.array(rgb * 2.0 - 1.0).transpose(3, 0, 1, 2)[None].astype(mx.bfloat16)
             encoded.append(self.vae_encoder.encode(sample))
         encoded_kfs = mx.concatenate(encoded, axis=2)
-        _materialize(encoded_kfs)
-        del pixel_planes, encoded
+        # Materialise everything the encoder produced so the low_memory free below takes effect at once.
+        image_tokens = [
+            tokens
+            for c in conditionings
+            for tokens in (getattr(c, "clean_latent", None), getattr(c, "keyframe_latent", None))
+            if tokens is not None
+        ]
+        _materialize(encoded_kfs, *image_tokens)
+        del pixel_planes, encoded, image_tokens
+        if encoded_kfs.shape[2] != len(carry_positions):
+            # Upstream ``_keyframe_conditionings_from_latents``; MLX slicing would silently clamp instead.
+            raise ValueError(f"Expected {len(carry_positions)} keyframe latents, got K={encoded_kfs.shape[2]}")
         for index, position in enumerate(carry_positions):
             kf_tokens, _ = self.video_patchifier.patchify(encoded_kfs[:, :, index : index + 1])
             conditionings.append(

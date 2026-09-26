@@ -443,3 +443,51 @@ def test_single_segment_rounds_fall_back_to_a_blended_frame_split(tmp_path, monk
     assert (t.frames.num_tiles, t.frames.overlap) == (2, 5)  # overlap 7 clamped to 7 - 2
     assert (t.height.num_tiles, t.height.overlap) == (2, 2)
     assert video.shape == (1, 128, ((9 - 1) * 2) // 8 + 1, 4, 4)
+
+
+def test_images_reach_every_stage_at_its_resolution_and_the_epilogue_on_the_final_grid(tmp_path, monkeypatch):
+    """Review focus 5: a frame-0 and an interior image, T=1, spatial x2 — real image conditionings."""
+    from ltx_core_mlx.conditioning.types.latent_cond import VideoConditionByLatentIndex
+
+    pipe, _, noised, _, _, _ = _make_epilogue(tmp_path, monkeypatch, t=1)
+    paths = []
+    for name, value in (("a.png", 64), ("b.png", 192)):
+        path = tmp_path / name
+        Image.fromarray(np.full((64, 64, 3), value, dtype=np.uint8)).save(path)
+        paths.append(str(path))
+    enc_dims: list[tuple[str, int, int]] = []
+
+    def spy(module, label):
+        real = module.combined_image_conditionings
+
+        def wrapped(imgs, **kw):
+            enc_dims.append((label, kw["enc_h"], kw["enc_w"]))
+            return real(imgs, **kw)
+
+        monkeypatch.setattr(module, "combined_image_conditionings", wrapped)
+
+    spy(orch, "stage")  # stages 1/2 import it from _orchestration at call time
+    spy(dfr_mod, "dfr")  # the rounds and the epilogue
+    images = [ImageConditioningInput(paths[0], 0, 1.0), ImageConditioningInput(paths[1], 24, 1.0)]
+    _run(pipe, height=256, width=384, num_frames=49, images=images)
+
+    assert enc_dims[0] == ("stage", 64, 96)  # stage 1 at H/4
+    assert enc_dims[1] == ("stage", 128, 192)  # stage 2 at H/2
+    assert all(d == ("dfr", 128, 192) for d in enc_dims[2:-1])  # temporal-round tiles at H/2
+    assert enc_dims[-1] == ("dfr", 256, 384)  # epilogue at full resolution
+    conds = noised[-2]["conditionings"]
+    assert isinstance(conds[0], VideoConditionByLatentIndex) and conds[0].frame_indices == [0]
+    assert conds[0].clean_latent.shape == (1, 8 * 12, 128)  # full-res frame-0 tokens
+    assert isinstance(conds[1], VideoConditionByKeyframeIndex) and conds[1].frame_idx == 48  # 24 * 2**1
+    assert conds[1].keyframe_latent.shape == (1, 8 * 12, 128)
+    planes = [c for c in conds[2:] if isinstance(c, VideoConditionByKeyframeIndex)]
+    assert [p.frame_idx for p in planes] == pipe.generated_keyframe_positions
+
+
+def test_epilogue_refuses_a_plane_count_mismatch(tmp_path, monkeypatch):
+    """Upstream ``_keyframe_conditionings_from_latents``: K latents must match the carry positions."""
+    pipe, *_ = _make_epilogue(tmp_path, monkeypatch)
+    real = pipe._decode_lanczos_carry_keyframes
+    monkeypatch.setattr(pipe, "_decode_lanczos_carry_keyframes", lambda kfs, seed: real(kfs, seed)[:-1])
+    with pytest.raises(ValueError, match="keyframe latents"):
+        _run(pipe, height=256, width=256, num_frames=49)
