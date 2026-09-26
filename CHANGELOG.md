@@ -10,6 +10,14 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.11](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.10...v0.15.11) (2026-09-26)
+
+
+### Features
+
+* **pipelines:** user-supplied negative_prompt on every CFG pipeline ([#155](https://github.com/dgrauet/ltx-2-mlx/issues/155)) ([a8b92ff](https://github.com/dgrauet/ltx-2-mlx/commit/a8b92ff876966dcf5d2d5fd26c0892cecabc9034))
+* **trainer:** per-step metrics callback with loss and lr ([#154](https://github.com/dgrauet/ltx-2-mlx/issues/154)) ([3e199e5](https://github.com/dgrauet/ltx-2-mlx/commit/3e199e5fe9e2bcc394ee9df698514b5a3b782397))
+
 ## [0.15.10](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.9...v0.15.10) (2026-09-26)
 
 
