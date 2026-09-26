@@ -406,6 +406,60 @@ def test_cli_rounds_refuse_tiling(tmp_path):
         )
 
 
+def test_cli_spatial_upscalings_flag_parses_with_default(tmp_path):
+    args = _build_parser().parse_args(_argv(tmp_path, "--dfr"))
+    assert args.spatial_upscalings == 1
+    args = _build_parser().parse_args(_argv(tmp_path, "--dfr", "--spatial-upscalings", "2"))
+    assert args.spatial_upscalings == 2
+
+
+def test_cli_spatial_upscalings_choices(tmp_path):
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(_argv(tmp_path, "--dfr", "--spatial-upscalings", "3"))
+
+
+def test_cli_spatial_upscalings_requires_dfr(tmp_path):
+    with pytest.raises(SystemExit, match="--spatial-upscalings"):
+        _cmd_generate(_build_parser().parse_args(_argv(tmp_path, "--distilled", "--spatial-upscalings", "2")))
+
+
+def test_cli_spatial_upscalings_reaches_the_pipeline(monkeypatch, tmp_path):
+    captured = {}
+
+    class _FakePipe:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def generate_and_save(self, **kw):
+            return "o.mp4"
+
+    monkeypatch.setattr(dfr_mod, "DFRPipeline", _FakePipe)
+    _cmd_generate(_build_parser().parse_args(_argv(tmp_path, "--dfr", "--spatial-upscalings", "2")))
+    assert captured["spatial_upscalings"] == 2
+
+
+def test_cli_spatial_upscalings_2_refuses_segments_before_pipeline_load(monkeypatch, tmp_path):
+    def _boom(*a, **k):
+        raise AssertionError("DFRPipeline must not be constructed when the CLI refuses --segment up front")
+
+    monkeypatch.setattr(dfr_mod, "DFRPipeline", _boom)
+    with pytest.raises(SystemExit, match="--segment"):
+        _cmd_generate(
+            _build_parser().parse_args(_argv(tmp_path, "--dfr", "--spatial-upscalings", "2", "--segment", "a"))
+        )
+
+
+def test_cli_spatial_upscalings_2_refuses_tiling_before_pipeline_load(monkeypatch, tmp_path):
+    def _boom(*a, **k):
+        raise AssertionError("DFRPipeline must not be constructed when the CLI refuses --tile-* up front")
+
+    monkeypatch.setattr(dfr_mod, "DFRPipeline", _boom)
+    with pytest.raises(SystemExit, match="--tile"):
+        _cmd_generate(
+            _build_parser().parse_args(_argv(tmp_path, "--dfr", "--spatial-upscalings", "2", "--tile-spatial", "2"))
+        )
+
+
 def test_decode_keyframes_from_slots_filters_the_canvas_padding(capsys):
     slots = mx.random.normal((1, 128, 3, 4, 4))
     kf = decode_keyframes_from_slots(slots, [24, 48, 72], num_frames=49, verbose=True)

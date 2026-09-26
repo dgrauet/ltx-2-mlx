@@ -379,7 +379,7 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 
 | Command | Pipeline | Tier | Description |
 |---------|----------|------|-------------|
-| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. `-f/--frames` defaults to auto-predicted duration on 2.5 packs (via `DurationHead`) and is **required** on 2.3 packs (immediate `ValueError` before any Gemma load if omitted). `--auto-duration MIN:MAX` overrides the predictor's clamp range on 2.5 packs. `--no-audio` skips audio decode + mux (mp4 with no audio track; video unchanged, audio latents still generated jointly). `--num-generated-keyframes N` (2.5 packs) adds N generated keyframe slots to stage 1 for fast motion. `--dfr` (2.5 packs) adds `--temporal-upscalings {0,1,2}` for post-hoc temporal x2 refine rounds (default 0). |
+| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. `-f/--frames` defaults to auto-predicted duration on 2.5 packs (via `DurationHead`) and is **required** on 2.3 packs (immediate `ValueError` before any Gemma load if omitted). `--auto-duration MIN:MAX` overrides the predictor's clamp range on 2.5 packs. `--no-audio` skips audio decode + mux (mp4 with no audio track; video unchanged, audio latents still generated jointly). `--num-generated-keyframes N` (2.5 packs) adds N generated keyframe slots to stage 1 for fast motion. `--dfr` (2.5 packs) adds `--temporal-upscalings {0,1,2}` for post-hoc temporal x2 refine rounds (default 0) and `--spatial-upscalings {1,2}` for a full-res spatial detailing epilogue (default 1). |
 | `keyframe` | Keyframe interpolation | Stable | Two-stage interpolation between start/end frames |
 | `ic-lora` | IC-LoRA | Stable | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
 | `hdr-ic-lora` | HDR IC-LoRA | Stable | Two-stage HDR generation via IC-LoRA + LogC3 inverse (saves SDR mp4 + linear-HDR `.npz`) |
@@ -1205,7 +1205,25 @@ pack weights — model-authentic, not a port bug; the round-2 tile denoise neith
 The first diffusion-decoder and T=2 attempts were killed by the macOS GPU watchdog
 (display active) and passed with `AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1`.
 
-**Not ported yet:** the spatial epilogue (`--spatial-upscalings 2`).
+**Spatial epilogue (`--spatial-upscalings 2`).** With `spatial_upscalings=2` (the CLI's
+`--spatial-upscalings {1,2}`, default 1) the dims are floored to multiples of 128 px (a stderr
+warning when this changes the requested size), stage 1 runs at H/4 and stage 2 plus every temporal
+round run at H/2 instead of the default H/2 / full res split — one extra spatial halving deferred
+to a final epilogue. After stage 2 (and any temporal rounds) finish, `_run_spatial_epilogue`
+details the H/2 latent up to full resolution: the carry keyframe bag is decoded one plane at a
+time with the render's own decoder (conv or diffusion, seeded `seed + 4000 + i`), Lanczos-upsampled
+×2 in RGB, and re-encoded as strength-1.0 keyframe conditionings at full resolution; the H/2 video
+latent is spatially upsampled once more (same latent upsampler as stage 2) and re-denoised with the
+distilled transformer + detailing LoRA (0.5), conditioned on the re-encoded keyframes plus an
+IC-LoRA reference built from the pre-upsample H/2 latent, on the stage-2 sigma table (3-step
+deterministic Euler) with stage 1's audio carried through frozen. Every model call in the epilogue
+goes through `X0Model(TiledLTXModel(..., normalize_positions=True))`: 2×2 spatial tiles (overlap
+12) and `2**temporal_upscalings` temporal tiles cut on the last round's seams, since the full-res
+token count would otherwise be too large for one forward. The re-encoded keyframes (not the
+pre-epilogue slots) become the decoder keyframes for the final keyframe-aware decode. `--dfr
+--spatial-upscalings 2` refuses `--tile-frames` / `--tile-spatial` (modality tiling collides with
+the epilogue's own tiling) and `--segment` (Prompt Relay), both up front in the CLI before any
+Gemma load, mirroring the temporal-rounds refusals above.
 
 **Keyframe decode validated** (M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5, 512×768×49,
 baselines at the pre-keyframe base): `--dfr` (conv) and `--distilled --video-decoder diffusion` are
@@ -1248,7 +1266,7 @@ dtype on entry (like the conv decoder) and the same decode peaks at ~12 GB (5.8 
 | `--enable-teacache` | raises `ValueError` — 2.3 polynomial isn't calibrated for 2.5 |
 | Modality tiling, Prompt Relay | validated on 2.3 only |
 | Generated keyframe slots (`--num-generated-keyframes N`) | supported on `generate` (all four modes, stage 1 only); refused up front on 2.3 packs (no `use_keyframes_abs_pos_embedding`) |
-| DFR (`DFRPipeline`) | base path shipped as `generate --dfr` (spatial detailing with the official 2.5 detailing IC-LoRA + keyframe-aware decode on `--video-decoder diffusion`) plus temporal rounds (`--temporal-upscalings {1,2}`); spatial epilogue pending |
+| DFR (`DFRPipeline`) | complete — shipped as `generate --dfr`: base path (spatial detailing with the official 2.5 detailing IC-LoRA), keyframe-aware decode on `--video-decoder diffusion`, temporal rounds (`--temporal-upscalings {1,2}`), and the spatial epilogue (`--spatial-upscalings {1,2}`) |
 | Diffusion video decoder | opt-in `--video-decoder diffusion` (experimental; tiled automatically above the decode budget, `--diffvae-tile` override); conv remains default |
 
 The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once

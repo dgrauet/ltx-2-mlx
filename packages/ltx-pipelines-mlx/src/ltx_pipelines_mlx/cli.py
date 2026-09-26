@@ -565,6 +565,18 @@ examples:
         ),
     )
     gen.add_argument(
+        "--spatial-upscalings",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help=(
+            "DFR spatial epilogue: 1 = stage 2 at full resolution (default), 2 = stage 1 at H/4 and "
+            "stage 2 + temporal rounds at H/2, then a full-res detailing epilogue (Lanczos-upsampled "
+            "re-encoded keyframes + 2x2 spatially-tiled denoise). Dims are floored to multiples of "
+            "128 px, with a warning. --dfr only; not compatible with --segment or --tile-*."
+        ),
+    )
+    gen.add_argument(
         "--temporal-upscalings",
         type=int,
         choices=(0, 1, 2),
@@ -1097,9 +1109,15 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             raise SystemExit("--temporal-upscalings does not support --segment (Prompt Relay).")
         if args.temporal_upscalings and _build_tile_count_config(args) is not None:
             raise SystemExit("--temporal-upscalings does not support --tile-frames / --tile-spatial.")
+        if args.spatial_upscalings == 2 and relay is not None:
+            raise SystemExit("--spatial-upscalings 2 does not support --segment (Prompt Relay).")
+        if args.spatial_upscalings == 2 and _build_tile_count_config(args) is not None:
+            raise SystemExit("--spatial-upscalings 2 does not support --tile-frames / --tile-spatial.")
     else:
         if args.detailing_lora != DEFAULT_DETAILING_LORA:
             raise SystemExit("--detailing-lora only applies with --dfr.")
+        if args.spatial_upscalings != 1:
+            raise SystemExit("--spatial-upscalings only applies with --dfr.")
         if args.temporal_upscalings:
             raise SystemExit("--temporal-upscalings only applies with --dfr.")
         if args.temporal_upsampler_path is not None:
@@ -1158,6 +1176,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             print("Mode: DFR (half-res + keyframe slots -> detailing IC-LoRA at full res)")
             print(f"  Model: {args.model}")
             print(f"  Detailing LoRA: {args.detailing_lora}")
+            if args.spatial_upscalings == 2:
+                print("  Spatial upscalings: 2 (H/4 stage 1, H/2 stage 2 + rounds, full-res epilogue)")
             if args.temporal_upscalings:
                 out_fps = args.frame_rate * 2**args.temporal_upscalings
                 print(f"  Temporal upscalings: {args.temporal_upscalings} ({out_fps:g} fps out)")
@@ -1169,6 +1189,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             low_ram_streaming=getattr(args, "low_ram", False),
             tile_count=_build_tile_count_config(args),
             detailing_lora=args.detailing_lora,
+            spatial_upscalings=args.spatial_upscalings,
             temporal_upscalings=args.temporal_upscalings,
             temporal_upsampler_path=args.temporal_upsampler_path,
         )
