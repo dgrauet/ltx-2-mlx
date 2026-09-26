@@ -392,7 +392,8 @@ class DFRPipeline(DistilledPipeline):
         Streaming (``--low-ram``): append a :class:`BlockLoraSource` (fused at each block bind,
         exactly like ``ICLoraPipeline._fuse_loras``). Otherwise fuse in place and re-quantize:
         stage 1 is finished and the model is reused clean only by the temporal rounds, which
-        reload it (see :meth:`_detach_detailing_lora`).
+        reload it (see :meth:`_detach_detailing_lora`); the spatial epilogue then re-attaches the
+        LoRA onto that clean model.
         """
         assert self.dit is not None
         path = self._resolve_detailing_lora()

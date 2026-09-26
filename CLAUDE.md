@@ -1102,8 +1102,7 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
 
 ### DFR base path (`generate --dfr`, 2.5 packs, experimental)
 
-Port of upstream `DFRPipeline` (spatial_upscalings=1, temporal_upscalings=0/1/2 — the spatial
-epilogue is the only remaining follow-up). Runs on top of `DistilledPipeline`'s
+Port of upstream `DFRPipeline` (spatial_upscalings 1/2, temporal_upscalings 0/1/2 — complete). Runs on top of `DistilledPipeline`'s
 `_stage1` / `_upsample_latent` / `_stage2` split.
 
 **Canvas layout** (`dfr_layout.py`). The requested clip is padded to a whole number of keyframe
