@@ -322,9 +322,12 @@ reads the video sigma). `LTXModel.__call__` takes optional `video_sigma` / `audi
 global `timestep`); the four sampler loops pass `0` for a frozen state on every pass (CFG / STG /
 modality passes, both res_2s evaluations) and pass nothing otherwise, so renders without a frozen stream
 are byte-identical. Per-token timesteps (`sigma * denoise_mask`) already zeroed the frozen stream's
-9-param AdaLN and x0. Before this fix the prompt AdaLNs and both gates saw the step sigma: **a2v,
+9-param AdaLN and x0. a2v stage 2 additionally used to re-noise its audio (`sigma=start_sigma`, all-ones
+mask) and denoise it with the video; it is now frozen like upstream (`frozen=True, noise_scale=0.0`).
+Before this fix the prompt AdaLNs and both gates saw the step sigma: **a2v,
 lipdub stage 2 and retake `--no-regen-audio` outputs shift** (a2v q8 512×768×49 seed 5: PSNR 20.8 dB vs
-the old render, same frozen audio track; retake `--no-regen-audio` on a 49-frame clip, latent frames 2-4: 50.1 dB,
+the old render; the muxed audio is unchanged by construction — a2v muxes the input wav, retake
+`--no-regen-audio` already preserved it; retake `--no-regen-audio` on a 49-frame clip, latent frames 2-4: 50.1 dB,
 audio identical; `--distilled` byte-identical).
 
 ### Conditioning Items
