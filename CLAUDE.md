@@ -1199,10 +1199,12 @@ is what the keyframe-aware decode (`--video-decoder diffusion`) consumes instead
 max RSS 11.8 GB. `--temporal-upscalings 2`: 481 frames at 96 fps, 4173 s (round 2 = 4 tiles in 2393 s),
 max RSS 11.1 GB. Round 1 with `--video-decoder diffusion`: the 10-plane carry bag reaches the decoder
 (auto-tiled 3×1×3), 3382 s, 13.8 GB peak Metal. Tile seams show no visible cut (the round-1 seam's
-frame-to-frame change is at the clip's 99th percentile; round-2 seams are ordinary). One isolated
-stall-then-jump at a latent border inside a round-2 tile (frames 248→250 of the 96 fps render) was
-seen once in 480 transitions — the symptom upstream's 60 fps conditioning snap targets; not
-investigated. The first diffusion-decoder and T=2 attempts were killed by the macOS GPU watchdog
+frame-to-frame change is at the clip's 99th percentile; round-2 seams are ordinary). One isolated stall-
+then-jump at a latent border inside a round-2 tile (frames 248→250 of the 96 fps render, once in 480
+transitions) comes from the model's temporal upsampler itself: it is already there when round 2 skips
+denoising (upsample only), and our temporal `LatentUpsampler` matches upstream torch to 1.6e-5 on the
+pack weights — model-authentic, not a port bug; the round-2 tile denoise neither creates nor removes it.
+The first diffusion-decoder and T=2 attempts were killed by the macOS GPU watchdog
 (display active) and passed with `AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1`.
 
 **Not ported yet:** the spatial epilogue (`--spatial-upscalings 2`).
