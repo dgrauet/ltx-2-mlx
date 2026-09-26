@@ -310,6 +310,22 @@ When conditioning (I2V, retake, extend), use per-token timesteps `sigma * denois
 - `denoise_mask`: `1.0` = denoise (generate), `0.0` = preserve (keep clean)
 - `positions`: (B, N, num_axes) pixel-space positions for RoPE
 - `attention_mask`: (B, N, N) optional self-attention mask [0,1]
+- `frozen`: `True` marks a stream that is conditioning only (upstream `LatentState.frozen`); it always carries an
+  all-zero `denoise_mask`. `create_noised_state(..., frozen=True)` builds one. Set where upstream sets
+  `frozen=True`: a2v audio (both stages), lipdub stage-2 audio, retake audio with `--no-regen-audio`.
+
+### Frozen streams and per-modality sigma
+Upstream gives each modality its own `Modality.sigma` and forces it to 0 for a frozen stream
+(`modality_from_latent_state`). That sigma drives the modality's **prompt AdaLN** and the **other**
+modality's **cross-attention gate** (the A→V gate on the video side reads the audio sigma, the V→A gate
+reads the video sigma). `LTXModel.__call__` takes optional `video_sigma` / `audio_sigma` (default: the
+global `timestep`); the four sampler loops pass `0` for a frozen state on every pass (CFG / STG /
+modality passes, both res_2s evaluations) and pass nothing otherwise, so renders without a frozen stream
+are byte-identical. Per-token timesteps (`sigma * denoise_mask`) already zeroed the frozen stream's
+9-param AdaLN and x0. Before this fix the prompt AdaLNs and both gates saw the step sigma: **a2v,
+lipdub stage 2 and retake `--no-regen-audio` outputs shift** (a2v q8 512×768×49 seed 5: PSNR 20.8 dB vs
+the old render, same frozen audio track; retake `--no-regen-audio` on a 49-frame clip, latent frames 2-4: 50.1 dB,
+audio identical; `--distilled` byte-identical).
 
 ### Conditioning Items
 - `VideoConditionByLatentIndex(frame_indices, clean_latent, strength)` — replace tokens at frame index (I2V)
