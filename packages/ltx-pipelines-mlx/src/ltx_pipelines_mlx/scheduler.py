@@ -40,6 +40,7 @@ __all__ = [
     "STAGE_2_SIGMAS",
     "get_sigma_schedule",
     "ltx2_schedule",
+    "shorten_schedule",
     "sigma_to_timestep",
 ]
 
@@ -115,6 +116,44 @@ def get_sigma_schedule(
     if num_steps is not None:
         sigmas = sigmas[:num_steps]
     return sigmas
+
+
+def shorten_schedule(
+    table: list[float],
+    steps: int | None,
+    *,
+    keep: str = "head",
+) -> list[float]:
+    """Return a ``steps``-step version of ``table`` that still ends at ``table[-1]``.
+
+    A plain slice (``table[: steps + 1]``) drops the terminal sigma, so the
+    denoising loop stops part way down the schedule and returns a latent that
+    still carries noise (``DISTILLED_SIGMAS[:4]`` ends at 0.98125). Every
+    shortened schedule built here keeps the table's last value (0.0).
+
+    Args:
+        table: A full sigma table, ending at 0.0.
+        steps: Number of denoising steps wanted. ``None`` or 0, or a value
+            at or above the table's own step count, returns ``table`` unchanged.
+        keep: ``"head"`` keeps the table's first ``steps`` sigmas and jumps to
+            the terminal one; use it for a stage that starts from pure noise,
+            which must start at ``table[0]``. ``"tail"`` keeps the last
+            ``steps + 1`` sigmas, so the stage starts lower and does less
+            re-noising; use it for a refinement stage, as the IC-LoRA refine
+            already does with ``DISTILLED_SIGMAS``.
+
+    Returns:
+        A list of ``steps + 1`` sigmas (or ``table`` itself).
+    """
+    if not steps or steps >= len(table) - 1:
+        return table
+    if steps < 0:
+        raise ValueError(f"steps must be positive, got {steps}")
+    if keep == "head":
+        return [*table[:steps], table[-1]]
+    if keep == "tail":
+        return table[len(table) - 1 - steps :]
+    raise ValueError(f"keep must be 'head' or 'tail', got {keep!r}")
 
 
 def sigma_to_timestep(sigma: float) -> mx.array:

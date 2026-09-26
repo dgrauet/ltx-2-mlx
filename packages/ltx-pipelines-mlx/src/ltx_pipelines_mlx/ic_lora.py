@@ -41,7 +41,7 @@ from ltx_pipelines_mlx.iclora_utils import (
     append_ic_lora_reference_video_conditionings,
     read_lora_reference_downscale_factor,
 )
-from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS
+from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS, shorten_schedule
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.samplers import denoise_loop
 
@@ -505,7 +505,7 @@ class ICLoraPipeline(BasePipeline):
 
         # Denoise stage 1. Dev and distilled share the fixed 8-step DISTILLED_SIGMAS
         # (the Comfy IC-LoRA workflows use these exact ManualSigmas for stage 1).
-        sigmas_1 = DISTILLED_SIGMAS[: stage1_steps + 1] if stage1_steps else DISTILLED_SIGMAS
+        sigmas_1 = shorten_schedule(DISTILLED_SIGMAS, stage1_steps, keep="head")
         x0_model = X0Model(self.dit)
 
         self._pre_denoise_flush(video_state, audio_state)
@@ -634,7 +634,7 @@ class ICLoraPipeline(BasePipeline):
             n = max(1, min(int(refine_steps), len(DISTILLED_SIGMAS) - 1))
             sigmas_2 = DISTILLED_SIGMAS[len(DISTILLED_SIGMAS) - 1 - n :]
         else:
-            sigmas_2 = STAGE_2_SIGMAS[: stage2_steps + 1] if stage2_steps else STAGE_2_SIGMAS
+            sigmas_2 = shorten_schedule(STAGE_2_SIGMAS, stage2_steps, keep="tail")
         start_sigma = sigmas_2[0]
 
         video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
