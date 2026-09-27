@@ -509,7 +509,7 @@ ltx-2-mlx generate \
   --distilled --auto-duration 2:6 -o output.mp4
 ```
 
-Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3), `--image`, `-f/--frames` (required on 2.3 packs; optional on 2.5 packs — auto-predicted when omitted), `--auto-duration MIN:MAX` (2.5 packs only — overrides the predictor's clamp range; explicit `-f` wins over `--auto-duration` if both are given, with a warning).
+Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3; a shorter count takes the **last** N sigmas of the stage-2 table via `scheduler.shorten_schedule(..., keep="tail")`, so it always ends at σ=0 — a stage 1 on the fixed distilled table uses `keep="start"`: σ=1.0 then the last N sigmas), `--image`, `-f/--frames` (required on 2.3 packs; optional on 2.5 packs — auto-predicted when omitted), `--auto-duration MIN:MAX` (2.5 packs only — overrides the predictor's clamp range; explicit `-f` wins over `--auto-duration` if both are given, with a warning).
 
 ### Prompt Relay (`--segment`)
 

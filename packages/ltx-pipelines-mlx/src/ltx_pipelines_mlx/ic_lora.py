@@ -505,7 +505,7 @@ class ICLoraPipeline(BasePipeline):
 
         # Denoise stage 1. Dev and distilled share the fixed 8-step DISTILLED_SIGMAS
         # (the Comfy IC-LoRA workflows use these exact ManualSigmas for stage 1).
-        sigmas_1 = shorten_schedule(DISTILLED_SIGMAS, stage1_steps, keep="head")
+        sigmas_1 = shorten_schedule(DISTILLED_SIGMAS, stage1_steps, keep="start")
         x0_model = X0Model(self.dit)
 
         self._pre_denoise_flush(video_state, audio_state)

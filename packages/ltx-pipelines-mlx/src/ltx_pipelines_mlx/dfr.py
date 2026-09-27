@@ -61,7 +61,7 @@ from ltx_pipelines_mlx.iclora_utils import (
     read_lora_reference_downscale_factor,
     reference_conditioning_from_latent,
 )
-from ltx_pipelines_mlx.scheduler import LTX_2_5_DISTILLED_SIGMAS, LTX_2_5_STAGE_2_DISTILLED_SIGMAS
+from ltx_pipelines_mlx.scheduler import LTX_2_5_DISTILLED_SIGMAS, LTX_2_5_STAGE_2_DISTILLED_SIGMAS, shorten_schedule
 from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings, resolve_lora_path
 from ltx_pipelines_mlx.utils.args import ImageConditioningInput
 from ltx_pipelines_mlx.utils.progress import phase
@@ -976,7 +976,7 @@ class DFRPipeline(DistilledPipeline):
             frame_rate: Stage-1/2 playback frame rate (the canvas plays at ``frame_rate * 2**T``).
             seed: Pipeline seed.
             epilogue_seams: The last temporal round's seams in pixel frames (``[]`` without rounds).
-            stage2_steps: Truncates the stage-2 sigma table, as for stage 2 (upstream shares it).
+            stage2_steps: Shortens the stage-2 sigma table, as for stage 2 (upstream shares it).
 
         Returns:
             The full-resolution latent ``(1, 128, F, 2H, 2W)``. ``self.generated_keyframes`` becomes the
@@ -1070,8 +1070,7 @@ class DFRPipeline(DistilledPipeline):
         model = distilled_mod.X0Model(TiledLTXModel(self.dit, tiler, normalize_positions=True))
 
         tokens, _ = self.video_patchifier.patchify(video_latent)
-        sigmas = LTX_2_5_STAGE_2_DISTILLED_SIGMAS
-        sigmas = sigmas[: stage2_steps + 1] if stage2_steps else sigmas
+        sigmas = shorten_schedule(LTX_2_5_STAGE_2_DISTILLED_SIGMAS, stage2_steps, keep="tail")
         video_state = distilled_mod.create_noised_state(
             base_shape=tokens.shape,
             conditionings=conditionings,

@@ -459,7 +459,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         )
 
         stage1_table = LTX_2_5_DISTILLED_SIGMAS if self._is_25 else DISTILLED_SIGMAS
-        sigmas_1 = shorten_schedule(stage1_table, stage1_steps, keep="head")
+        sigmas_1 = shorten_schedule(stage1_table, stage1_steps, keep="start")
 
         stage1_dit = self.dit
         if self._tile_count is not None:

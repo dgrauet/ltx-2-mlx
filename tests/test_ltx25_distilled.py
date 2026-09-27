@@ -253,9 +253,9 @@ def test_stage_step_truncation_applies_to_the_25_tables(tmp_path, monkeypatch):
 
     _run(pipe, stage1_steps=3, stage2_steps=2)
 
-    # Stage 1 starts from pure noise, so it keeps the head of the table and
-    # still jumps to the terminal sigma; stage 2 takes the tail.
-    assert ancestral.calls[0]["sigmas"] == [*LTX_2_5_DISTILLED_SIGMAS[:3], 0.0]
+    # Stage 1 starts from pure noise, so it pins sigma 1.0 and then takes the
+    # table's last steps; stage 2 takes the tail. Both end at 0.0.
+    assert ancestral.calls[0]["sigmas"] == [LTX_2_5_DISTILLED_SIGMAS[0], *LTX_2_5_DISTILLED_SIGMAS[-3:]]
     assert euler.calls[0]["sigmas"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS[1:]
     for call in (ancestral.calls[0], euler.calls[0]):
         assert call["sigmas"][-1] == 0.0

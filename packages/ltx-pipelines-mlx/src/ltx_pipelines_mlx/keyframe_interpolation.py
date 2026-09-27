@@ -280,7 +280,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
             num_tokens = F * H_half * W_half
             sigmas_1 = ltx2_schedule(s1_steps, num_tokens=num_tokens)
         else:
-            sigmas_1 = shorten_schedule(DISTILLED_SIGMAS, stage1_steps, keep="head")
+            sigmas_1 = shorten_schedule(DISTILLED_SIGMAS, stage1_steps, keep="start")
         x0_model = X0Model(self.dit)
 
         if cfg_scale != 1.0 or video_guider_params is not None:

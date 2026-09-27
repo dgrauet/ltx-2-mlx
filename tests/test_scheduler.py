@@ -4,6 +4,8 @@ import pytest
 
 from ltx_pipelines_mlx.scheduler import (
     DISTILLED_SIGMAS,
+    LTX_2_5_DISTILLED_SIGMAS,
+    LTX_2_5_STAGE_2_DISTILLED_SIGMAS,
     STAGE_2_SIGMAS,
     get_sigma_schedule,
     ltx2_schedule,
@@ -194,26 +196,55 @@ class TestLtx2Schedule:
 class TestShortenSchedule:
     def test_full_or_unset_returns_table(self):
         for steps in (None, 0, len(DISTILLED_SIGMAS) - 1, 99):
-            assert shorten_schedule(DISTILLED_SIGMAS, steps) is DISTILLED_SIGMAS
+            for keep in ("start", "tail"):
+                assert shorten_schedule(DISTILLED_SIGMAS, steps, keep=keep) is DISTILLED_SIGMAS
 
     def test_every_shortened_schedule_ends_at_zero(self):
-        for table in (DISTILLED_SIGMAS, STAGE_2_SIGMAS):
+        for table in (DISTILLED_SIGMAS, STAGE_2_SIGMAS, LTX_2_5_DISTILLED_SIGMAS, LTX_2_5_STAGE_2_DISTILLED_SIGMAS):
             for steps in range(1, len(table) - 1):
-                for keep in ("head", "tail"):
+                for keep in ("start", "tail"):
                     sigmas = shorten_schedule(table, steps, keep=keep)
                     assert len(sigmas) == steps + 1
                     assert sigmas[-1] == 0.0
                     assert sigmas == sorted(sigmas, reverse=True)
+                    assert len(set(sigmas)) == len(sigmas)
 
-    def test_head_keeps_the_starting_sigma(self):
-        assert shorten_schedule(DISTILLED_SIGMAS, 3) == [1.0, 0.99375, 0.9875, 0.0]
+    def test_start_pins_pure_noise_and_keeps_the_large_steps(self):
+        assert shorten_schedule(DISTILLED_SIGMAS, 1, keep="start") == [1.0, 0.0]
+        assert shorten_schedule(DISTILLED_SIGMAS, 3, keep="start") == [1.0, 0.725, 0.421875, 0.0]
+        for steps in range(1, len(DISTILLED_SIGMAS) - 1):
+            assert shorten_schedule(DISTILLED_SIGMAS, steps, keep="start")[0] == 1.0
 
     def test_tail_matches_the_refine_convention(self):
         assert shorten_schedule(STAGE_2_SIGMAS, 1, keep="tail") == [0.421875, 0.0]
         assert shorten_schedule(STAGE_2_SIGMAS, 2, keep="tail") == [0.725, 0.421875, 0.0]
+        # ``ic_lora --refine-steps n`` slices DISTILLED_SIGMAS the same way.
+        n = 3
+        assert shorten_schedule(DISTILLED_SIGMAS, n, keep="tail") == DISTILLED_SIGMAS[len(DISTILLED_SIGMAS) - 1 - n :]
 
     def test_rejects_bad_arguments(self):
         with pytest.raises(ValueError):
-            shorten_schedule(STAGE_2_SIGMAS, -1)
+            shorten_schedule(STAGE_2_SIGMAS, -1, keep="tail")
         with pytest.raises(ValueError):
-            shorten_schedule(STAGE_2_SIGMAS, 1, keep="middle")
+            shorten_schedule(STAGE_2_SIGMAS, 1, keep="middle")  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            shorten_schedule(STAGE_2_SIGMAS, None, keep="head")  # type: ignore[arg-type]
+
+
+def test_no_pipeline_truncates_a_sigma_table_with_a_plain_slice():
+    """``table[: steps + 1]`` drops the terminal 0.0; every site must go through ``shorten_schedule``."""
+    import re
+    from pathlib import Path
+
+    import ltx_pipelines_mlx
+
+    pattern = re.compile(r"\[:\s*\w*steps\w*\s*\+\s*1\s*\]")
+    root = Path(ltx_pipelines_mlx.__file__).parent
+    offenders = [
+        f"{path.relative_to(root)}:{lineno}"
+        for path in root.rglob("*.py")
+        if path.name != "scheduler.py"  # its docstring quotes the old slice
+        for lineno, line in enumerate(path.read_text().splitlines(), 1)
+        if pattern.search(line)
+    ]
+    assert offenders == []

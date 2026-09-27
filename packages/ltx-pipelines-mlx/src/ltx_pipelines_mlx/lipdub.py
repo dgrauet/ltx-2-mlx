@@ -241,7 +241,7 @@ class LipDubPipeline(ICLoraPipeline):
         )
         audio_state = ref_cond.apply(audio_state, num_noisy_tokens=audio_T)
 
-        sigmas_1 = shorten_schedule(DISTILLED_SIGMAS, stage1_steps, keep="head")
+        sigmas_1 = shorten_schedule(DISTILLED_SIGMAS, stage1_steps, keep="start")
         x0_model = X0Model(self.dit)
         self._pre_denoise_flush(video_state, audio_state)
         output_1 = denoise_loop(
