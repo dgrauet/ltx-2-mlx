@@ -71,7 +71,6 @@ jobs:
       - run: uv sync --all-extras
       - name: Type-check with ty
         run: uv run ty check
-        continue-on-error: true
       # faulthandler_timeout dumps all thread stacks if any single test
       # exceeds 10 min, so a GPU-side hang leaves a usable trace in the log.
       - run: uv run pytest tests/ -v -m "not slow" --tb=short -o faulthandler_timeout=600
