@@ -74,6 +74,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--width", type=int, default=704)
     p.add_argument("--num-frames", type=int, default=97)
+    p.add_argument("--frame-rate", type=float, default=24.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--cfg-scale", type=float, default=3.0)
     p.add_argument("--stg-scale", type=float, default=0.0)
@@ -129,6 +130,7 @@ def main() -> int:
             height=args.height,
             width=args.width,
             num_frames=args.num_frames,
+            frame_rate=args.frame_rate,
             seed=args.seed + i,
             stage1_steps=args.num_steps,
             stage2_steps=3,

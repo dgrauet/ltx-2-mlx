@@ -88,10 +88,12 @@ markers = [
 
 [tool.ty.src]
 # Exclude code paths that don't type-check cleanly under strict mode:
-# - parity_keyframe tests import upstream PyTorch reference (no torch in deps; runs in a separate venv).
+# - parity_keyframe tests and tests/parity_*_reference.py import the upstream PyTorch
+#   reference (no torch in deps; they run in a separate, disposable venv).
 # - ltx-trainer pulls in HF/transformers/datasets which aren't typed as strict deps.
 exclude = [
   "tests/parity_keyframe/**",
+  "tests/parity_*_reference.py",
   "packages/ltx-trainer/**",
 ]
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import struct
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import ClassVar
 
@@ -79,7 +80,7 @@ def _remap_mean_std_stats(shapes: dict[str, tuple[int, ...]]) -> dict[str, tuple
 def _assert_load_contract(
     model: object,
     pack_shapes: dict[str, tuple[int, ...]],
-    quantized_keys: set[str] = frozenset(),
+    quantized_keys: AbstractSet[str] = frozenset(),
 ) -> None:
     """Bidirectional key-set check, plus a shape check for non-quantized keys."""
     from mlx.utils import tree_flatten

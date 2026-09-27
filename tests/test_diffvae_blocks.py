@@ -39,9 +39,9 @@ def test_qkv_rope_pipeline():
     raw = attn.qkv(x)
     rq, rk, rv = (a.reshape(1, 3, 4, 5, 2, 4) for a in mx.split(raw, 3, axis=-1))
     assert mx.array_equal(v, rv)
-    pos = [mx.arange(n).astype(mx.float32) for n in (3, 4, 5)]
-    exp_q = apply_axial_rope(attn.q_norm(rq) * 0.5, *pos, attn.split, attn.inv)  # 4 ** -0.5 = 0.5
-    exp_k = apply_axial_rope(attn.k_norm(rk), *pos, attn.split, attn.inv)
+    t_pos, h_pos, w_pos = (mx.arange(n).astype(mx.float32) for n in (3, 4, 5))
+    exp_q = apply_axial_rope(attn.q_norm(rq) * 0.5, t_pos, h_pos, w_pos, attn.split, attn.inv)  # 4 ** -0.5 = 0.5
+    exp_k = apply_axial_rope(attn.k_norm(rk), t_pos, h_pos, w_pos, attn.split, attn.inv)
     assert mx.allclose(q, exp_q, atol=1e-6).item() and mx.allclose(k, exp_k, atol=1e-6).item()
 
 
