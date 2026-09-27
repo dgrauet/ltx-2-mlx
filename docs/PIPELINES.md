@@ -125,7 +125,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** video driven by an existing audio track, optionally anchored on an image. Dev model + CFG, two stages.
 - **Packs:** 2.3 and 2.5. **Tier:** Beta.
 - **Required:** `--prompt`, `--output`, `--frame-rate`, `--audio`.
-- **Own flags:** `--frames` (97), `--audio-start` (0 s), `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--negative-prompt`, `--stg-scale` (1.0), `--image`.
+- **Own flags:** `--frames` (97), `--audio-start` (0 s), `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--negative-prompt`, `--stg-scale` (1.0), `--image`, `--enable-teacache` / `--teacache-thresh` (LTX-2.3 packs; about 1.30× at 30 steps).
 - **Example:** `ltx-2-mlx a2v -p "a singer performing" --audio music.wav -i photo.jpg -f 97 --frame-rate 24 -o out.mp4`
 - **Notes:** sync quality depends on how well the prompt matches the audio. Audio CFG runs at 7.0.
 
@@ -215,7 +215,7 @@ would otherwise not fit. On a 32 GB Mac at typical token counts, prefer `--low-r
 
 | Flag or variable | Default | Effect | Applies to |
 |---|---|---|---|
-| `--enable-teacache` | off | Timestep-aware residual caching in stage 1. About 1.46× on the Euler sampler and 1.78× on res_2s. [Details](../CLAUDE.md#teacache-opt-in-stage-1-acceleration). | `generate --two-stage`, `generate --two-stages-hq` |
+| `--enable-teacache` | off | Timestep-aware residual caching in stage 1. About 1.46× on the Euler sampler and 1.78× on res_2s. [Details](../CLAUDE.md#teacache-opt-in-stage-1-acceleration). LTX-2.3 packs only (refused on 2.5). | `generate --two-stage`, `generate --two-stages-hq`, `a2v` |
 | `--teacache-thresh F` | 0.5 Euler, 1.0 res_2s | How aggressively steps are skipped. Higher is faster and lossier. Ignored without `--enable-teacache`. | with `--enable-teacache` |
 | `--stage2-steps N` | full table (3) | Fewer stage-2 refine steps. Takes the **last** N sigmas of the stage-2 table, so the refine re-noises less and always finishes at σ=0 (`1` → `[0.421875, 0.0]`, `2` → `[0.725, 0.421875, 0.0]`). A one-step refine gives a usable preview of the shot, not a softer copy of it. | every two-stage pipeline |
 | `--stage1-steps N` | full table (8) | On a pipeline whose stage 1 uses the fixed distilled table, keeps σ=1.0 and then the **last** N sigmas of the table (`3` → `[1.0, 0.725, 0.421875, 0.0]`). On `--two-stage`, `--two-stages-hq`, `a2v` and dev-mode `keyframe`, stage 1 uses the dynamic schedule instead and N is simply its step count. | every two-stage pipeline |
@@ -273,8 +273,8 @@ are utilities and have no column.
 | `--tile-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | `--tile-spatial` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | `--tile-overlap` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `--enable-teacache` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--teacache-thresh` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--enable-teacache` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| `--teacache-thresh` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | `--stepwise-image-output-dir` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `--stepwise-interval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `--stepwise-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

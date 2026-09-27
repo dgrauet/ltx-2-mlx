@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import mlx.core as mx
+from mlx_arsenal.diffusion import TeaCacheController
 
 from ltx_core_mlx.components.guiders import (
     MultiModalGuiderParams,
@@ -68,7 +69,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         cfg_scale: float = 3.0,
         stg_scale: float = 1.0,
         on_step: OnStepFn | None = None,
-        teacache_controller=None,
+        teacache_controller: TeaCacheController | None = None,
     ) -> object:
         """Run Stage 1 denoising with Euler + CFG. Override for HQ (res2s)."""
         # Video: full guidance (ref LTX_2_3_PARAMS)
@@ -146,12 +147,19 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             negative_prompt: Negative prompt for CFG. ``None`` (default) uses
                 ``DEFAULT_NEGATIVE_PROMPT``; any string (including ``""``) is
                 encoded verbatim.
+            enable_teacache: When True, run stage 1 with a TeaCacheController
+                built from the Euler coefficients calibrated for
+                ``--two-stage`` (opt-in, default False). Raises on LTX-2.5 packs.
+            teacache_thresh: Optional override for the preset's default
+                ``rel_l1_thresh``. Higher = more skipping = faster but
+                lossier. Ignored when ``enable_teacache=False``.
 
         Returns:
             Path to the output video file.
         """
         if audio_path is None:
             raise ValueError("audio_path is required for A2VidPipelineTwoStage")
+        self._check_teacache_supported(enable_teacache)
 
         if audio_max_duration is None:
             audio_max_duration = num_frames / frame_rate
@@ -264,11 +272,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         sigmas_1 = ltx2_schedule(stage1_steps, num_tokens=num_tokens)
         x0_model = X0Model(self.dit)
 
-        teacache_controller = None
-        if enable_teacache:
-            from ltx_pipelines_mlx.ti2vid_two_stages import _build_teacache_controller
-            teacache_controller = _build_teacache_controller(stage1_steps, teacache_thresh)
-            teacache_controller.reset()
+        teacache_controller = self._make_stage1_teacache(enable_teacache, stage1_steps, teacache_thresh)
 
         output_1 = self._denoise_stage1(
             x0_model=x0_model,

@@ -567,7 +567,7 @@ ltx-2-mlx a2v \
   --audio music.wav --two-stages-hq -o output.mp4
 ```
 
-Flags: `--audio` (required), `--frame-rate` (required, mirrors upstream `frame_rate=`), `--image` (optional I2V), `--two-stages-hq` (res_2s), `--cfg-scale`, `--stg-scale`, `--stage1-steps` (default 30 standard, 15 HQ).
+Flags: `--audio` (required), `--frame-rate` (required, mirrors upstream `frame_rate=`), `--image` (optional I2V), `--two-stages-hq` (res_2s), `--cfg-scale`, `--stg-scale`, `--stage1-steps` (default 30 standard, 15 HQ), `--enable-teacache` / `--teacache-thresh` (LTX-2.3 packs).
 
 ### Retake / Extend Example
 
@@ -699,7 +699,7 @@ pipeline.generate_and_save(
 )
 ```
 
-Equivalent CLI flag (works on both `--two-stage` and `--two-stages-hq`):
+Equivalent CLI flag (works on `--two-stage`, `--two-stages-hq` and `a2v`, whose stage 1 is the same Euler + CFG loop and reuses the Euler coefficients via `TI2VidTwoStagesPipeline._make_stage1_teacache`; ~1.30× at 30 steps on a2v, where the default `stg_scale=1.0` also caches the STG pass; refused on LTX-2.5 packs):
 
 ```bash
 ltx-2-mlx generate --prompt "..." --two-stage -f 97 --enable-teacache -o out.mp4

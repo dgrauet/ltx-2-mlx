@@ -88,6 +88,16 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         distilled_lora_strength: LoRA fusion strength.
     """
 
+    def _make_stage1_teacache(
+        self, enable_teacache: bool, stage1_steps: int, teacache_thresh: float | None
+    ) -> TeaCacheController | None:
+        """Same as the Euler base, with the coefficients calibrated on res_2s."""
+        if not enable_teacache:
+            return None
+        controller = _build_hq_teacache_controller(stage1_steps, teacache_thresh)
+        controller.reset()
+        return controller
+
     def generate_two_stage(
         self,
         prompt: str,
@@ -237,10 +247,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         audio_factory = create_multimodal_guider_factory(audio_guider_params, negative_context=neg_audio_embeds)
 
         # Stage 1: res_2s with guidance
-        teacache_controller = None
-        if enable_teacache:
-            teacache_controller = _build_hq_teacache_controller(stage1_steps, teacache_thresh)
-            teacache_controller.reset()
+        teacache_controller = self._make_stage1_teacache(enable_teacache, stage1_steps, teacache_thresh)
         self._pre_denoise_flush(video_state, audio_state)
         output_1 = res2s_denoise_loop(
             model=x0_model,

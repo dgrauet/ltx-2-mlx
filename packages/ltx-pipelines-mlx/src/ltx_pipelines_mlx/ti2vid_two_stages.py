@@ -306,6 +306,29 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             )
         return weights_path
 
+    def _make_stage1_teacache(
+        self, enable_teacache: bool, stage1_steps: int, teacache_thresh: float | None
+    ) -> TeaCacheController | None:
+        """Build a fresh stage-1 TeaCacheController, or ``None`` when TeaCache is off.
+
+        Uses the coefficients calibrated on the Euler sampler (``guided_denoise_loop``);
+        the HQ pipeline overrides this with its res_2s calibration. Callers run
+        :meth:`_check_teacache_supported` up front, before any model load.
+
+        Args:
+            enable_teacache: Whether TeaCache was requested.
+            stage1_steps: Number of stage-1 denoising steps.
+            teacache_thresh: Optional ``rel_l1_thresh`` override.
+
+        Returns:
+            A reset controller, or ``None`` when ``enable_teacache`` is False.
+        """
+        if not enable_teacache:
+            return None
+        controller = _build_teacache_controller(stage1_steps, teacache_thresh)
+        controller.reset()
+        return controller
+
     def _build_upsampler(self, weights_path: Path) -> LatentUpsampler:
         """Build a :class:`LatentUpsampler` from ``<stem>_config.json`` and load ``weights_path``."""
         import json
@@ -555,10 +578,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         video_factory = create_multimodal_guider_factory(video_guider_params, negative_context=neg_video_embeds)
         audio_factory = create_multimodal_guider_factory(audio_guider_params, negative_context=neg_audio_embeds)
 
-        teacache_controller = None
-        if enable_teacache:
-            teacache_controller = _build_teacache_controller(stage1_steps, teacache_thresh)
-            teacache_controller.reset()
+        teacache_controller = self._make_stage1_teacache(enable_teacache, stage1_steps, teacache_thresh)
 
         self._pre_denoise_flush(video_state, audio_state)
         output_1 = guided_denoise_loop(

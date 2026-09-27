@@ -638,9 +638,9 @@ examples:
         "--enable-teacache",
         action="store_true",
         help=(
-            "Two-stage (--two-stage / --two-stages-hq) only: enable TeaCache stage-1 "
-            "acceleration (opt-in, ~1.46x speedup on Euler at default thresh; "
-            "see CLAUDE.md)"
+            "generate --two-stage / --two-stages-hq and a2v only (LTX-2.3 packs): enable "
+            "TeaCache stage-1 acceleration (opt-in, ~1.46x speedup on Euler at default "
+            "thresh; see CLAUDE.md)"
         ),
     )
     gen.add_argument(
@@ -1109,9 +1109,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
 
     if args.enable_teacache and not (args.two_stages_hq or args.two_stage):
         raise SystemExit(
-            "--enable-teacache requires --two-stage (or --two-stages-hq, but HQ is not yet "
-            "supported). The one-stage distilled path does not benefit from "
-            "TeaCache (only 8 denoising steps)."
+            "--enable-teacache requires --two-stage or --two-stages-hq. The other "
+            "generate modes do not support TeaCache."
         )
 
     if sum(map(bool, (args.two_stages_hq, args.two_stage, args.distilled, args.one_stage, args.dfr))) > 1:
@@ -1406,9 +1405,9 @@ def _cmd_a2v(args: argparse.Namespace) -> None:
         kwargs["stg_scale"] = args.stg_scale
     if args.negative_prompt is not None:
         kwargs["negative_prompt"] = args.negative_prompt
-    if getattr(args, "enable_teacache", False):
+    if args.enable_teacache:
         kwargs["enable_teacache"] = True
-        if getattr(args, "teacache_thresh", None) is not None:
+        if args.teacache_thresh is not None:
             kwargs["teacache_thresh"] = args.teacache_thresh
     pipe.generate_and_save(**kwargs)
 

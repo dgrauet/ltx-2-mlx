@@ -1,92 +1,118 @@
-"""A2VidPipelineTwoStage stage-1 must thread its TeaCache controller through.
+"""A2VidPipelineTwoStage stage 1: TeaCache wiring and the LTX-2.5 guard.
 
-``TI2VidTwoStagesPipeline`` has carried calibrated TeaCache Euler coefficients and a
-``_build_teacache_controller`` helper for a while, and ``_add_generation_args`` already
-exposes ``--enable-teacache`` on every generate subcommand — but the a2v pipeline never
-passed a controller down to ``guided_denoise_loop``, so the flag was accepted and silently
-ignored on ``a2v``. These pin the wiring.
-
-The assertions are deliberately at ``_denoise_stage1`` rather than through
-``generate_and_save``: the wiring under test is one keyword argument's journey into
-``guided_denoise_loop``, and standing up the full pipeline (VAE, text encoder, audio
-encoder, upsampler) to observe it would test the stubs more than the code.
+``--enable-teacache`` is added to every generation subcommand by ``_add_generation_args``,
+but the a2v pipeline used to accept it and never hand a controller to
+``guided_denoise_loop``. These drive ``generate_and_save`` over a synthetic pack, with
+the heavy stages stubbed, and stop inside the stage-1 loop.
 """
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import mlx.core as mx
 import pytest
+from mlx_arsenal.diffusion import TeaCacheController
 
 from ltx_pipelines_mlx import a2vid_two_stage as a2v_mod
 from ltx_pipelines_mlx.a2vid_two_stage import A2VidPipelineTwoStage
 
 
-class _LoopSpy:
-    """Stand-in for guided_denoise_loop that records the kwargs it was handed."""
+class _StopAtStage1Error(Exception):
+    """Raised by the stubbed stage-1 loop once it has recorded its kwargs."""
 
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
 
-    def __call__(self, **kwargs):
-        self.calls.append(kwargs)
-        return object()
+def _make_a2v(tmp_path, *, ltx25: bool) -> A2VidPipelineTwoStage:
+    transformer: dict = {"num_layers": 48}
+    if ltx25:
+        transformer["ff_bias"] = False
+    (tmp_path / "embedded_config.json").write_text(json.dumps({"transformer": transformer}))
+    return A2VidPipelineTwoStage(model_dir=str(tmp_path))
 
 
 @pytest.fixture
-def stage1(monkeypatch):
-    """A pipeline whose _denoise_stage1 can be called without loading any weights."""
-    pipe = A2VidPipelineTwoStage.__new__(A2VidPipelineTwoStage)
-    # _pre_denoise_flush only exists to release memory between stages; there is nothing
-    # allocated here to release.
-    pipe._pre_denoise_flush = lambda *a, **k: None  # type: ignore[method-assign]
+def stubbed_a2v(tmp_path, monkeypatch):
+    """A 2.3-pack a2v pipeline that reaches the stage-1 loop without loading weights."""
+    pipe = _make_a2v(tmp_path, ltx25=False)
+    calls: list[dict] = []
 
-    spy = _LoopSpy()
-    monkeypatch.setattr(a2v_mod, "guided_denoise_loop", spy)
+    def fake_loop(**kwargs):
+        calls.append(kwargs)
+        raise _StopAtStage1Error
 
-    def run(**overrides):
-        kwargs = dict(
-            x0_model=object(),
-            video_state=object(),
-            audio_state=object(),
-            video_embeds=mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
-            audio_embeds=mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
-            neg_video_embeds=mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
-            neg_audio_embeds=mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
-            sigmas=[1.0, 0.5, 0.0],
-        )
-        kwargs.update(overrides)
-        pipe._denoise_stage1(**kwargs)
-        return spy
-
-    return run
-
-
-def test_teacache_controller_reaches_the_denoise_loop(stage1):
-    """The regression: a controller passed in must arrive as `teacache=`."""
-    controller = object()
-
-    spy = stage1(teacache_controller=controller)
-
-    assert len(spy.calls) == 1
-    assert spy.calls[0]["teacache"] is controller, (
-        "identity, not truthiness: the controller carries calibrated per-model "
-        "coefficients, so the loop must receive the caller's object rather than "
-        "any controller"
+    monkeypatch.setattr(pipe, "_load_audio_encoder", lambda: None)
+    pipe.audio_encoder = object()
+    pipe.audio_processor = object()
+    monkeypatch.setattr(
+        a2v_mod, "load_audio", lambda *a, **k: SimpleNamespace(waveform=mx.zeros((1, 16000)), sample_rate=16000)
     )
+    monkeypatch.setattr(a2v_mod, "encode_audio", lambda *a, **k: mx.zeros((1, 8, 64, 16), dtype=mx.bfloat16))
+    embeds = (
+        mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
+        mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
+        mx.zeros((1, 8, 4096), dtype=mx.bfloat16),
+        mx.zeros((1, 8, 2048), dtype=mx.bfloat16),
+    )
+    monkeypatch.setattr(pipe, "_encode_text_with_negative", lambda *a, **k: embeds)
+    monkeypatch.setattr(pipe, "_load_dev_transformer", lambda: object())
+    monkeypatch.setattr(a2v_mod, "guided_denoise_loop", fake_loop)
+
+    def run(**kwargs):
+        with pytest.raises(_StopAtStage1Error):
+            pipe.generate_and_save(
+                prompt="a singer",
+                output_path=str(tmp_path / "out.mp4"),
+                audio_path="song.wav",
+                height=128,
+                width=128,
+                num_frames=9,
+                frame_rate=24.0,
+                stage1_steps=4,
+                **kwargs,
+            )
+        assert len(calls) == 1
+        return calls[0]
+
+    return pipe, run
 
 
-def test_teacache_defaults_to_none(stage1):
-    """Omitting it must disable TeaCache, not enable a default one."""
-    spy = stage1()
+def test_teacache_controller_reaches_the_stage1_loop(stubbed_a2v, monkeypatch):
+    pipe, run = stubbed_a2v
+    built: list[TeaCacheController | None] = []
+    original = pipe._make_stage1_teacache
 
-    assert spy.calls[0]["teacache"] is None
+    def spy(*args):
+        built.append(original(*args))
+        return built[-1]
+
+    monkeypatch.setattr(pipe, "_make_stage1_teacache", spy)
+
+    call = run(enable_teacache=True, teacache_thresh=0.7)
+
+    assert isinstance(built[0], TeaCacheController)
+    assert call["teacache"] is built[0]
 
 
-def test_on_step_hook_still_threads_through(stage1):
-    """The stepwise hook shares these call sites; neither may displace the other."""
-    hook = object()
+def test_teacache_off_by_default(stubbed_a2v):
+    _, run = stubbed_a2v
 
-    spy = stage1(on_step=hook, teacache_controller=object())
+    assert run()["teacache"] is None
 
-    assert spy.calls[0]["on_step"] is hook
-    assert spy.calls[0]["teacache"] is not None
+
+def test_teacache_rejected_on_25_pack_before_any_load(tmp_path, monkeypatch):
+    pipe = _make_a2v(tmp_path, ltx25=True)
+
+    def must_not_load():
+        raise AssertionError("the guard must fire before the audio encoder loads")
+
+    monkeypatch.setattr(pipe, "_load_audio_encoder", must_not_load)
+    with pytest.raises(ValueError, match="TeaCache"):
+        pipe.generate_and_save(
+            prompt="a singer",
+            output_path=str(tmp_path / "out.mp4"),
+            audio_path="song.wav",
+            num_frames=9,
+            frame_rate=24.0,
+            enable_teacache=True,
+        )
