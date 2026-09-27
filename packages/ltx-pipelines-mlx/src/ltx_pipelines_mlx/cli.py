@@ -177,6 +177,28 @@ def _add_negative_prompt_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_teacache_args(parser: argparse.ArgumentParser) -> None:
+    """Add the TeaCache stage-1 flags (``generate`` two-stage modes and ``a2v``)."""
+    parser.add_argument(
+        "--enable-teacache",
+        action="store_true",
+        help=(
+            "generate --two-stage / --two-stages-hq and a2v only (LTX-2.3 packs): enable "
+            "TeaCache stage-1 acceleration (opt-in, ~1.46x speedup on Euler at default "
+            "thresh; see CLAUDE.md)"
+        ),
+    )
+    parser.add_argument(
+        "--teacache-thresh",
+        type=float,
+        default=None,
+        help=(
+            "Override TeaCache rel_l1_thresh (default 0.5; higher = more skipping = "
+            "faster but lossier). Ignored unless --enable-teacache is set."
+        ),
+    )
+
+
 def _add_generation_args(parser: argparse.ArgumentParser, *, frames_default: int | None = 97) -> None:
     """Add generation-specific arguments (dimensions, steps) on top of base args.
 
@@ -634,24 +656,7 @@ examples:
     gen.add_argument(
         "--distilled-lora-strength", type=float, default=1.0, help="Distilled LoRA strength for stage 2 (default: 1.0)"
     )
-    gen.add_argument(
-        "--enable-teacache",
-        action="store_true",
-        help=(
-            "generate --two-stage / --two-stages-hq and a2v only (LTX-2.3 packs): enable "
-            "TeaCache stage-1 acceleration (opt-in, ~1.46x speedup on Euler at default "
-            "thresh; see CLAUDE.md)"
-        ),
-    )
-    gen.add_argument(
-        "--teacache-thresh",
-        type=float,
-        default=None,
-        help=(
-            "Override TeaCache rel_l1_thresh (default 0.5; higher = more skipping = "
-            "faster but lossier). Ignored unless --enable-teacache is set."
-        ),
-    )
+    _add_teacache_args(gen)
     gen.add_argument("--enhance-prompt", action="store_true", help="Enhance prompt using Gemma before generation")
     gen.add_argument(
         "--lora",
@@ -667,6 +672,7 @@ examples:
     # --- a2v (Audio-to-Video) ---
     a2v = sub.add_parser("a2v", help="[beta] Generate video from audio + text prompt")
     _add_generation_args(a2v)
+    _add_teacache_args(a2v)
     a2v.add_argument("--audio", "-a", required=True, help="Input audio file (WAV/MP3/etc.)")
     a2v.add_argument("--audio-start", type=float, default=0.0, help="Audio start time in seconds (default: 0)")
     a2v.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30)")

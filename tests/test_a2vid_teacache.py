@@ -116,3 +116,42 @@ def test_teacache_rejected_on_25_pack_before_any_load(tmp_path, monkeypatch):
             frame_rate=24.0,
             enable_teacache=True,
         )
+
+
+def test_cli_a2v_forwards_the_teacache_flags(monkeypatch, tmp_path):
+    """``a2v`` must accept both flags and hand them to ``generate_and_save``."""
+    from ltx_pipelines_mlx import cli
+
+    received: dict = {}
+
+    class _FakePipe:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def generate_and_save(self, **kwargs) -> str:
+            received.update(kwargs)
+            return kwargs["output_path"]
+
+    monkeypatch.setattr(a2v_mod, "A2VidPipelineTwoStage", _FakePipe)
+    monkeypatch.setattr(cli, "_print_result", lambda *a, **k: None)
+    args = cli._build_parser().parse_args(
+        [
+            "a2v",
+            "-p",
+            "a singer",
+            "--audio",
+            "song.wav",
+            "--frame-rate",
+            "24",
+            "-o",
+            str(tmp_path / "out.mp4"),
+            "--enable-teacache",
+            "--teacache-thresh",
+            "0.7",
+            "--quiet",
+        ]
+    )
+    cli._cmd_a2v(args)
+
+    assert received["enable_teacache"] is True
+    assert received["teacache_thresh"] == 0.7
