@@ -1,9 +1,7 @@
-"""A2VidPipelineTwoStage stage 1: TeaCache wiring and the LTX-2.5 guard.
+"""A2VidPipelineTwoStage: stage-1 TeaCache wiring, the LTX-2.5 guard and input validation.
 
-``--enable-teacache`` is added to every generation subcommand by ``_add_generation_args``,
-but the a2v pipeline used to accept it and never hand a controller to
-``guided_denoise_loop``. These drive ``generate_and_save`` over a synthetic pack, with
-the heavy stages stubbed, and stop inside the stage-1 loop.
+These drive ``generate_and_save`` (and the ``a2v`` CLI handler) over a synthetic pack,
+with the heavy stages stubbed, and stop inside the stage-1 loop or at the first error.
 """
 
 from __future__ import annotations
@@ -155,3 +153,25 @@ def test_cli_a2v_forwards_the_teacache_flags(monkeypatch, tmp_path):
 
     assert received["enable_teacache"] is True
     assert received["teacache_thresh"] == 0.7
+
+
+def test_short_audio_fails_before_any_model_work(stubbed_a2v, monkeypatch):
+    """#164: audio shorter than the clip must raise a clear error, not a RoPE broadcast error."""
+    pipe, _ = stubbed_a2v
+    # 9 frames at 24 fps need 9 audio latent frames; the stub encoder returns 64, so shrink it.
+    monkeypatch.setattr(a2v_mod, "encode_audio", lambda *a, **k: mx.zeros((1, 8, 5, 16), dtype=mx.bfloat16))
+
+    def must_not_encode_text(*a, **k):
+        raise AssertionError("the length check must fire before text encoding")
+
+    monkeypatch.setattr(pipe, "_encode_text_with_negative", must_not_encode_text)
+    with pytest.raises(ValueError, match="Audio is too short"):
+        pipe.generate_and_save(
+            prompt="a singer",
+            output_path="out.mp4",
+            audio_path="song.wav",
+            height=128,
+            width=128,
+            num_frames=9,
+            frame_rate=24.0,
+        )

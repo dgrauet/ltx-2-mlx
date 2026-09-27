@@ -187,6 +187,16 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
 
         # Patchify audio to tokens
         audio_T = compute_audio_token_count(num_frames, frame_rate)
+        # Upstream asserts the sliced latent matches the target shape in
+        # ``create_initial_state``; without this check a short clip leaves
+        # fewer tokens than positions and fails deep in RoPE.
+        if audio_latent.shape[2] < audio_T:
+            raise ValueError(
+                f"Audio is too short for the requested clip: {audio_latent.shape[2]} audio latent frames "
+                f"available, {audio_T} needed for {num_frames} frames at {frame_rate} fps "
+                f"({num_frames / frame_rate:.2f} s). Use a longer audio segment, fewer frames, "
+                "or pad the audio with silence."
+            )
         audio_latent = audio_latent[:, :, :audio_T, :]
         audio_tokens, _ = self.audio_patchifier.patchify(audio_latent)  # (1, audio_T, 128)
         mx.synchronize()
