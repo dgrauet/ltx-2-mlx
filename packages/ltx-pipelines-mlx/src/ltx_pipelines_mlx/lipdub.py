@@ -186,13 +186,14 @@ class LipDubPipeline(ICLoraPipeline):
         audio_positions = compute_audio_positions(audio_T)
 
         from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
-        from ltx_pipelines_mlx.utils.args import ImageConditioningInput
+        from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 
         stage_1_conditionings: list = []
         if images:
             normalized = [
                 img if isinstance(img, ImageConditioningInput) else ImageConditioningInput(*img) for img in images
             ]
+            normalized = resolve_frame_indices(normalized, num_frames)
             stage_1_conditionings.extend(
                 combined_image_conditionings(
                     normalized,
@@ -279,6 +280,7 @@ class LipDubPipeline(ICLoraPipeline):
             normalized = [
                 img if isinstance(img, ImageConditioningInput) else ImageConditioningInput(*img) for img in images
             ]
+            normalized = resolve_frame_indices(normalized, num_frames)
             stage_2_conditionings.extend(
                 combined_image_conditionings(
                     normalized,
