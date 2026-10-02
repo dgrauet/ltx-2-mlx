@@ -985,8 +985,8 @@ that path. 2.3 packs are byte-identical to before.
 ### Sampler
 
 - Stage 1: `euler_ancestral_denoising_loop` (`EulerAncestralDiffusionStep(eta=ANCESTRAL_ETA, s_noise=ANCESTRAL_S_NOISE)`, 8 steps) on `LTX_2_5_DISTILLED_SIGMAS`.
-- Stage 2: stays the deterministic Euler loop (`STAGE_2` renoise) on `LTX_2_5_STAGE_2_DISTILLED_SIGMAS`, matching upstream: *"Stage 2 is always deterministic — its 3-step refinement schedule is too short to remove freshly injected noise."*
-- Ancestral noise is seeded from `seed + ANCESTRAL_NOISE_SEED_OFFSET` (10000) to decorrelate from the initial-latent draw.
+- Stage 2: also `euler_ancestral_denoising_loop` (same eta / s_noise, `STAGE_2` renoise) on `LTX_2_5_STAGE_2_DISTILLED_SIGMAS`, as upstream since v1.4.0 (it used to keep stage 2 deterministic). This also covers DFR's stage 2, which reuses `_stage2`.
+- Ancestral noise is seeded from `seed + ANCESTRAL_NOISE_SEED_OFFSET` (10000) for stage 1 and `seed + ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET` (20000) for stage 2, to decorrelate both from the initial-latent draw and from each other. 2.3 packs stay deterministic on both stages.
 - Stage 2 upscaler resolves to `spatial_upscaler_x2_v1_0.safetensors` (vs `v1_1` on 2.3), falling back to the 2.3 stems; hard error only when none exists (#42 style).
 
 ### Auto-Duration (`DurationHead`, `-f` optional on 2.5)
@@ -1132,7 +1132,7 @@ is the identity, so nothing changes numerically; `--distilled` (outside DFR) is 
   ([Generated keyframe slots](#generated-keyframe-slots---num-generated-keyframes-n-25-packs)),
   driven internally rather than by the CLI flag (`--num-generated-keyframes` is refused on
   `--dfr`). Optional I2V anchors (`--image`) apply as usual.
-- **Stage 2** (`_stage2`, full resolution, deterministic): the stage-1 video latent and its
+- **Stage 2** (`_stage2`, full resolution, ancestral on 2.5 like `--distilled`): the stage-1 video latent and its
   extracted keyframe-slot latents are each upsampled once (2× spatial, matching upstream's
   single-call-per-tensor shape), then denoised with two extra conditionings appended:
   `VideoGeneratedKeyframeSlots` (the upsampled slots, at the same canvas pixel-frame positions)

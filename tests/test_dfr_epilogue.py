@@ -428,7 +428,7 @@ def test_spatial_upscalings_1_is_unchanged(tmp_path, monkeypatch):
     pipe, euler, noised, attached, _, rec = _make_epilogue(tmp_path, monkeypatch)
     pipe.spatial_upscalings = 1
     video, _ = _run(pipe, height=128, width=128, num_frames=49)
-    assert len(noised) == 4 and len(euler.calls) == 1 and len(attached) == 1
+    assert len(noised) == 4 and euler.calls == [] and len(attached) == 1
     assert noised[0]["spatial_dims"] == (7, 2, 2) and noised[2]["spatial_dims"] == (7, 4, 4)
     assert rec["decoded"] == [] and rec["tilers"] == [] and video.shape == (1, 128, 7, 4, 4)
 

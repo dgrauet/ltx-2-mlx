@@ -201,7 +201,7 @@ def test_round_1_on_121_frames(tmp_path, monkeypatch):
     video, audio = _run(pipe, num_frames=121)
     assert detached == [True]
     assert video.shape[2] == (241 - 1) // 8 + 1  # 31 latent frames
-    tiles = ancestral.calls[1:]  # call 0 is stage 1
+    tiles = ancestral.calls[2:]  # calls 0/1 are stages 1/2
     assert len(tiles) == 2
     assert [c["noise_seed"] for c in tiles] == [7 + 1000, 7 + 1001]
     assert all(c["stepper"].eta == 0.5 and c["sigmas"] == [0.975, 0.909375, 0.725, 0.421875, 0.0] for c in tiles)
@@ -221,7 +221,7 @@ def test_round_tiles_use_anchors_slots_and_frozen_audio(tmp_path, monkeypatch):
     assert [a.frame_idx for a in anchors] == [48, 96, 144] and all(a.strength == 0.95 for a in anchors)
     slots = [c for c in tile_calls[0]["conditionings"] if isinstance(c, VideoGeneratedKeyframeSlots)]
     assert list(slots[0].pixel_frame_indices) == [24, 72, 120]
-    for call in ancestral.calls[1:]:
+    for call in ancestral.calls[2:]:
         assert float(mx.abs(call["audio_state"].denoise_mask).max()) == 0.0  # frozen audio
         assert call["audio_state"].frozen is True  # model conditions its audio AdaLN / A->V gate on sigma 0
 
@@ -229,7 +229,7 @@ def test_round_tiles_use_anchors_slots_and_frozen_audio(tmp_path, monkeypatch):
 def test_round_2_runs_4_tiles_and_outputs_481_frames(tmp_path, monkeypatch):
     pipe, _, ancestral, _, _, _ = _make_rounds(tmp_path, monkeypatch, t=2)
     video, _ = _run(pipe, num_frames=121)
-    assert len(ancestral.calls) == 1 + 2 + 4
+    assert len(ancestral.calls) == 2 + 2 + 4
     assert video.shape[2] == (481 - 1) // 8 + 1
 
 
@@ -273,13 +273,13 @@ def test_rounds_run_with_frozen_audio_even_without_audio_output(tmp_path, monkey
     pipe, _, ancestral, _, _, _ = _make_rounds(tmp_path, monkeypatch, t=1)
     pipe.generate_audio = False
     _run(pipe, num_frames=49)
-    assert all(c["audio_state"] is not None for c in ancestral.calls[1:])
+    assert all(c["audio_state"] is not None for c in ancestral.calls[2:])
 
 
 def test_t0_path_is_unchanged(tmp_path, monkeypatch):
     pipe, _, ancestral, _, _, detached = _make_rounds(tmp_path, monkeypatch, t=0)
     video, _ = _run(pipe, num_frames=49)
-    assert detached == [] and len(ancestral.calls) == 1 and video.shape[2] == 7
+    assert detached == [] and len(ancestral.calls) == 2 and video.shape[2] == 7
 
 
 def test_decode_writes_at_the_upsampled_fps(tmp_path, monkeypatch):
@@ -311,7 +311,7 @@ def test_rounds_reload_the_vae_encoder_freed_by_low_memory_stage2(tmp_path, monk
 
     monkeypatch.setattr(pipe.image_conditioner, "load", load)
     video, _ = _run(pipe, num_frames=49)
-    assert reloads == [True] and len(ancestral.calls) == 3
+    assert reloads == [True] and len(ancestral.calls) == 4
     assert video.shape[2] == ((49 - 1) * 2) // 8 + 1
 
 
