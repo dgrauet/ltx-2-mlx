@@ -903,7 +903,7 @@ Upstream uses ``(B, num_axes, T, 2)`` interval positions per token; we use ``(B,
 
 Total tiles = ``N * M * M``. Default ``1*1*1`` = no tiling.
 
-Coverage: ``generate`` (one-stage / ``--two-stage`` / ``--two-stages-hq``), ``a2v``, ``keyframe`` via ``TI2VidTwoStagesPipeline.tile_count`` (inherited). ``ic-lora`` could be wired on the same model with the same primitive but isn't yet.
+Coverage: ``generate`` only (one-stage / ``--two-stage`` / ``--two-stages-hq`` / ``--distilled`` / ``--dfr``), via ``TI2VidTwoStagesPipeline.tile_count``. ``a2v``, ``keyframe``, ``ic-lora`` and ``hdr-ic-lora`` don't read ``tile_count``, so their CLIs don't register the ``--tile-*`` flags (they used to accept and silently ignore them).
 
 ### Tradeoff
 
@@ -922,7 +922,7 @@ Validation: with conservative config (``--tile-frames 2 --tile-overlap 4`` on 48
 
 ## HDR IC-LoRA Pipeline
 
-Two-stage IC-LoRA pipeline that produces **linear HDR video output** via LogC3 inverse compression. Subclasses `ICLoraPipeline` so it inherits low-RAM streaming, modality tiling, bind-time LoRA fusion, and the standard two-stage decode flow. Mirrors upstream `ltx_pipelines.hdr_ic_lora.HDRICLoraPipeline` 1:1 for clean PR diff tracking.
+Two-stage IC-LoRA pipeline that produces **linear HDR video output** via LogC3 inverse compression. Subclasses `ICLoraPipeline` so it inherits low-RAM streaming, bind-time LoRA fusion, and the standard two-stage decode flow. Mirrors upstream `ltx_pipelines.hdr_ic_lora.HDRICLoraPipeline` 1:1 for clean PR diff tracking.
 
 ### Mechanism
 

@@ -199,7 +199,9 @@ def _add_teacache_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_generation_args(parser: argparse.ArgumentParser, *, frames_default: int | None = 97) -> None:
+def _add_generation_args(
+    parser: argparse.ArgumentParser, *, frames_default: int | None = 97, modality_tiling: bool = True
+) -> None:
     """Add generation-specific arguments (dimensions, steps) on top of base args.
 
     ``frames_default=None`` (used by the ``generate`` subparser only) leaves
@@ -235,35 +237,36 @@ def _add_generation_args(parser: argparse.ArgumentParser, *, frames_default: int
             "LTX-2.3 was trained at 24; values far from that drift out of distribution."
         ),
     )
-    parser.add_argument(
-        "--tile-frames",
-        type=int,
-        default=1,
-        help=(
-            "Number of temporal tiles for modality tiling (default: 1 = no tiling). "
-            "Each tile is denoised independently and blended back. Trades wall-clock "
-            "for peak memory. Combine with --low-ram for max savings."
-        ),
-    )
-    parser.add_argument(
-        "--tile-spatial",
-        type=int,
-        default=1,
-        help=(
-            "Number of spatial tiles per axis (height and width). 2 = 2x2 = 4 spatial "
-            "tiles. Combined with --tile-frames N gives N*S*S tiles total. Default: 1."
-        ),
-    )
-    parser.add_argument(
-        "--tile-overlap",
-        type=int,
-        default=2,
-        help=(
-            "Token-grid overlap between adjacent tiles (default: 2). Higher overlap "
-            "= smoother blend but more redundant compute. Ignored when both "
-            "--tile-frames and --tile-spatial are 1."
-        ),
-    )
+    if modality_tiling:
+        parser.add_argument(
+            "--tile-frames",
+            type=int,
+            default=1,
+            help=(
+                "Number of temporal tiles for modality tiling (default: 1 = no tiling). "
+                "Each tile is denoised independently and blended back. Trades wall-clock "
+                "for peak memory. Combine with --low-ram for max savings."
+            ),
+        )
+        parser.add_argument(
+            "--tile-spatial",
+            type=int,
+            default=1,
+            help=(
+                "Number of spatial tiles per axis (height and width). 2 = 2x2 = 4 spatial "
+                "tiles. Combined with --tile-frames N gives N*S*S tiles total. Default: 1."
+            ),
+        )
+        parser.add_argument(
+            "--tile-overlap",
+            type=int,
+            default=2,
+            help=(
+                "Token-grid overlap between adjacent tiles (default: 2). Higher overlap "
+                "= smoother blend but more redundant compute. Ignored when both "
+                "--tile-frames and --tile-spatial are 1."
+            ),
+        )
     parser.add_argument(
         "--low-ram",
         action="store_true",
@@ -671,7 +674,7 @@ examples:
 
     # --- a2v (Audio-to-Video) ---
     a2v = sub.add_parser("a2v", help="[beta] Generate video from audio + text prompt")
-    _add_generation_args(a2v)
+    _add_generation_args(a2v, modality_tiling=False)
     _add_teacache_args(a2v)
     a2v.add_argument("--audio", "-a", required=True, help="Input audio file (WAV/MP3/etc.)")
     a2v.add_argument("--audio-start", type=float, default=0.0, help="Audio start time in seconds (default: 0)")
@@ -744,7 +747,7 @@ examples:
 
     # --- keyframe ---
     kf = sub.add_parser("keyframe", help="Interpolate between keyframe images")
-    _add_generation_args(kf)
+    _add_generation_args(kf, modality_tiling=False)
     kf.add_argument("--start", required=True, help="Start keyframe image path")
     kf.add_argument("--end", required=True, help="End keyframe image path")
     kf.add_argument(
@@ -778,7 +781,7 @@ examples:
 
     # --- ic-lora ---
     ic = sub.add_parser("ic-lora", help="Generate video with IC-LoRA control conditioning")
-    _add_generation_args(ic)
+    _add_generation_args(ic, modality_tiling=False)
     ic.add_argument(
         "--lora",
         action="append",
@@ -915,7 +918,7 @@ examples:
         "hdr-ic-lora",
         help="Generate HDR video via IC-LoRA with LogC3 inverse (saves SDR mp4 + .hdr.npz)",
     )
-    _add_generation_args(hdr)
+    _add_generation_args(hdr, modality_tiling=False)
     hdr.add_argument(
         "--lora",
         action="append",
