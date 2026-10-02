@@ -312,7 +312,8 @@ When conditioning (I2V, retake, extend), use per-token timesteps `sigma * denois
 - `attention_mask`: (B, N, N) optional self-attention mask [0,1]
 - `frozen`: `True` marks a stream that is conditioning only (upstream `LatentState.frozen`); it always carries an
   all-zero `denoise_mask`. `create_noised_state(..., frozen=True)` builds one. Set where upstream sets
-  `frozen=True`: a2v audio (both stages), lipdub stage-2 audio, retake audio with `--no-regen-audio`.
+  `frozen=True`: a2v audio (both stages), lipdub stage-2 audio, `--two-stage` stage-2 audio (upstream v1.4.0
+  `freeze_audio=True`), retake audio with `--no-regen-audio`.
 
 ### Frozen streams and per-modality sigma
 Upstream gives each modality its own `Modality.sigma` and forces it to 0 for a frozen stream
