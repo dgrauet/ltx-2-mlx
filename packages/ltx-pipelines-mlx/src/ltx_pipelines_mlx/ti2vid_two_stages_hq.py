@@ -29,7 +29,7 @@ from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_
 from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule, shorten_schedule
 from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TI2VidTwoStagesPipeline
 from ltx_pipelines_mlx.utils.helpers import create_noised_state, generated_keyframe_conditionings
-from ltx_pipelines_mlx.utils.samplers import denoise_loop, res2s_denoise_loop
+from ltx_pipelines_mlx.utils.samplers import res2s_denoise_loop
 from ltx_pipelines_mlx.utils.types import DEFAULT_AUTO_DURATION, AutoDuration
 
 # TeaCache calibration constants for the HQ res_2s path (LTX-2 stage 1, 30
@@ -344,9 +344,10 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
             initial_latent=audio_tokens_1,
         )
 
-        # Stage 2: simple denoising (no CFG)
+        # Stage 2: res_2s without guidance, as upstream (``SimpleDenoiser`` +
+        # ``res2s_audio_video_denoising_loop`` on the stage-2 distilled sigmas).
         self._pre_denoise_flush(video_state_2, audio_state_2)
-        output_2 = denoise_loop(
+        output_2 = res2s_denoise_loop(
             model=x0_model,
             video_state=video_state_2,
             audio_state=audio_state_2,
