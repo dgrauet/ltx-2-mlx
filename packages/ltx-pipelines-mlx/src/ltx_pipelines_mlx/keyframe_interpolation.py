@@ -31,6 +31,7 @@ from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS, ltx2_schedule, shorten_schedule
 from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
+from ltx_pipelines_mlx.utils.blocks import snap_num_frames
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, guided_denoise_loop
 
@@ -155,6 +156,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         """
         if negative_prompt is not None and negative_prompt_embeds is not None:
             raise ValueError("Pass either negative_prompt or negative_prompt_embeds, not both")
+        num_frames = snap_num_frames(num_frames)
         if keyframe_strengths is None:
             keyframe_strengths = [1.0] * len(keyframe_images)
         elif len(keyframe_strengths) != len(keyframe_images):

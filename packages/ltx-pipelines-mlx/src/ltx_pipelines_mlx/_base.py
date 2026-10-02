@@ -35,6 +35,7 @@ from ltx_pipelines_mlx.utils.blocks import (
     DurationPredictor,
     require_num_frames_source,
     resolve_num_frames,
+    snap_num_frames,
 )
 from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
 from ltx_pipelines_mlx.utils.helpers import has_generated_keyframes
@@ -342,14 +343,17 @@ class BasePipeline:
         actually ran, for observability.
 
         Returns:
-            Concrete frame count, either passed through or predicted.
+            Concrete frame count on the causal grid: an explicit count is floored to it
+            (with a warning), a predicted one already lands on it.
         """
-        resolved = resolve_num_frames(
-            num_frames,
-            self._duration_predictor,
-            video_encoding=video_encoding,
-            audio_encoding=audio_encoding,
-            frame_rate=frame_rate,
+        resolved = snap_num_frames(
+            resolve_num_frames(
+                num_frames,
+                self._duration_predictor,
+                video_encoding=video_encoding,
+                audio_encoding=audio_encoding,
+                frame_rate=frame_rate,
+            )
         )
         if isinstance(num_frames, AutoDuration) and self.verbose:
             print(

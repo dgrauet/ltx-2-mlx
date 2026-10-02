@@ -34,6 +34,7 @@ from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule, shorten_schedule
 from ltx_pipelines_mlx.ti2vid_two_stages import DEFAULT_CFG_SCALE, TI2VidTwoStagesPipeline
+from ltx_pipelines_mlx.utils.blocks import snap_num_frames
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.samplers import OnStepFn, denoise_loop, guided_denoise_loop
 
@@ -160,6 +161,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         if audio_path is None:
             raise ValueError("audio_path is required for A2VidPipelineTwoStage")
         self._check_teacache_supported(enable_teacache)
+        num_frames = snap_num_frames(num_frames)
 
         if audio_max_duration is None:
             audio_max_duration = num_frames / frame_rate
