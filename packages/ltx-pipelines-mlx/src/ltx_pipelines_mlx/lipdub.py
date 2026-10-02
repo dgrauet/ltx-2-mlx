@@ -26,7 +26,14 @@ from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.utils.audio import load_audio
 from ltx_core_mlx.utils.ffmpeg import probe_video_info
 from ltx_core_mlx.utils.memory import aggressive_cleanup
-from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
+from ltx_core_mlx.utils.positions import (
+    AUDIO_DOWNSAMPLE_FACTOR,
+    AUDIO_HOP_LENGTH,
+    AUDIO_SAMPLE_RATE,
+    compute_audio_positions,
+    compute_audio_token_count,
+    compute_video_positions,
+)
 
 from .ic_lora import ICLoraPipeline
 from .iclora_utils import append_ic_lora_reference_video_conditionings
@@ -71,13 +78,34 @@ def patchify_lipdub_audio_reference_latent(
         Tuple of (patchified tokens ``(1, T, 128)``, positions ``(1, T, 1)``).
     """
     tokens, T = audio_patchifier.patchify(vae_latents)
-    positions = compute_audio_positions(T)  # (1, T, 1)
+    positions = compute_audio_positions(T)  # (1, T, 1) interval midpoints
 
     if negative_positions:
-        aud_dur = float(mx.max(positions).item())
+        # Upstream subtracts the *end* of the last token's interval
+        # (``positions[:, :, -1, 1].max()``), so the reference ends 0.04 s
+        # before the target. Our positions are midpoints: recover that end
+        # from the causal audio timing (token i spans to (4(i+1) - 3) hops).
+        aud_dur = max((T * AUDIO_DOWNSAMPLE_FACTOR + 1 - AUDIO_DOWNSAMPLE_FACTOR), 0) * (
+            AUDIO_HOP_LENGTH / AUDIO_SAMPLE_RATE
+        )
         positions = positions - (aud_dur + 0.04)
 
     return tokens, positions.astype(mx.float32)
+
+
+def fit_audio_latent_to_clip(latent: mx.array, num_tokens: int) -> mx.array:
+    """Slice or right zero-pad an audio VAE latent ``(B, C, T, F)`` to ``num_tokens`` frames.
+
+    Mirrors upstream ``chunks.layout.audio_latent_for_layout`` for a window starting at
+    frame 0: the reference audio covers exactly the generated clip, and a source shorter
+    than the clip is zero-padded on the right.
+    """
+    available = latent[:, :, :num_tokens, :]
+    pad = num_tokens - available.shape[2]
+    if pad <= 0:
+        return available
+    zeros = mx.zeros((*available.shape[:2], pad, available.shape[3]), dtype=available.dtype)
+    return mx.concatenate([available, zeros], axis=2)
 
 
 class LipDubPipeline(ICLoraPipeline):
@@ -157,7 +185,11 @@ class LipDubPipeline(ICLoraPipeline):
             self.prompt_encoder.free()
             aggressive_cleanup()
 
-        ref_audio_latent = self._encode_reference_audio_vae_latent(reference_video_path)
+        # Upstream fits the source audio to the clip window before patchifying it.
+        ref_audio_latent = fit_audio_latent_to_clip(
+            self._encode_reference_audio_vae_latent(reference_video_path),
+            compute_audio_token_count(num_frames, frame_rate=frame_rate),
+        )
         ref_audio_tokens, ref_audio_positions = patchify_lipdub_audio_reference_latent(
             ref_audio_latent,
             self.audio_patchifier,
@@ -338,10 +370,22 @@ class LipDubPipeline(ICLoraPipeline):
             initial_latent=s1_audio_latent_tokens,
             frozen=True,
         )
+        # Stage 2's audio reference is the stage-1 generated audio, not the source clip's
+        # (upstream ``_audio_conditionings(latent=None)``: the chunk's own audio).
+        s1_ref_tokens, s1_ref_positions = patchify_lipdub_audio_reference_latent(
+            self.audio_patchifier.unpatchify(s1_audio_latent_tokens),
+            self.audio_patchifier,
+            negative_positions=True,
+        )
+        ref_cond_2 = AudioConditionByReferenceLatent(
+            patchified=s1_ref_tokens,
+            positions=s1_ref_positions,
+            strength=1.0,
+        )
         # Upstream applies conditionings first and zeroes the mask after (``blocks.py:235-240``); applying the
         # audio reference after the freeze is equivalent only because its strength is 1.0 (reference mask 0),
         # which keeps the frozen state's mask all zero. Revisit the order if that strength ever changes.
-        audio_state_2 = ref_cond.apply(audio_state_2, num_noisy_tokens=audio_T)
+        audio_state_2 = ref_cond_2.apply(audio_state_2, num_noisy_tokens=audio_T)
 
         self._pre_denoise_flush(video_state_2, audio_state_2)
         output_2 = denoise_loop(
