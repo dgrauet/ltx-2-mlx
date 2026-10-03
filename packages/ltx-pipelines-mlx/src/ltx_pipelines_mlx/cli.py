@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import enum
 import sys
 import time
 from pathlib import Path
@@ -26,12 +27,34 @@ from typing import TYPE_CHECKING
 
 from ltx_pipelines_mlx.dfr import DEFAULT_DETAILING_LORA
 from ltx_pipelines_mlx.utils.blocks import VIDEO_DECODER_CHOICES
+from ltx_pipelines_mlx.utils.hdr_media import EXRColorSpace
 from ltx_pipelines_mlx.utils.stepwise import DEFAULT_PREVIEW_FRAMES
 
 if TYPE_CHECKING:
     from ltx_pipelines_mlx.utils.types import AutoDuration
 
 DEFAULT_MODEL = "dgrauet/ltx-2.3-mlx-q8"
+DEFAULT_MODEL_25 = "dgrauet/ltx-2.5-mlx-q8"
+
+
+class HDRInputColorSpace(enum.StrEnum):
+    """``hdr-ic-lora --input-colorspace`` values (upstream ``HDRICLoraInputColorSpace``)."""
+
+    SRGB_GAMMA = "srgb_gamma"
+    SRGB = "srgb"
+    ACESCG = "acescg"
+    ACESCCT = "acescct"
+
+
+def _parse_exr_colorspace(value: str) -> EXRColorSpace:
+    try:
+        return EXRColorSpace(value.lower())
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid --exr-colorspace {value!r}; choose from {', '.join(cs.value for cs in EXRColorSpace)}"
+        ) from None
+
+
 DEFAULT_GEMMA = "mlx-community/gemma-3-12b-it-4bit"
 
 
@@ -923,51 +946,93 @@ examples:
     # --- hdr-ic-lora ---
     hdr = sub.add_parser(
         "hdr-ic-lora",
-        help="SDR-to-HDR IC-LoRA (being rewired to the single-stage ACEScct pipeline)",
+        help="SDR-to-HDR IC-LoRA, single-stage ACEScct (LTX-2.5 packs only; HLG mp4 + EXR frames)",
     )
-    _add_generation_args(hdr, modality_tiling=False)
     hdr.add_argument(
-        "--lora",
-        action="append",
-        nargs=2,
-        metavar=("PATH", "STRENGTH"),
+        "--input",
         required=True,
         help=(
-            "HDR IC-LoRA weights and strength (repeatable). PATH can be local .safetensors "
-            "or a HuggingFace repo ID (e.g. Lightricks/LTX-2.3-22b-IC-LoRA-HDR). "
-            "Auto-detects HDR transform from safetensors metadata."
+            "One input: MP4/MOV when --input-colorspace is srgb_gamma or srgb, or a directory of "
+            "*.exr frames when srgb, acescg, or acescct. "
+            "Output length matches the source (frame count must be 8k+1)."
         ),
     )
     hdr.add_argument(
-        "--video-conditioning",
-        action="append",
-        nargs=2,
-        metavar=("PATH", "STRENGTH"),
-        default=None,
-        help="Optional reference control video(s) and strength (repeatable). Pure T2V HDR if omitted.",
+        "--output-path",
+        "--output",
+        "-o",
+        dest="output_path",
+        required=True,
+        help="Path to the HLG master MP4 (EXR frames go beside it as <stem>_<exr-colorspace>_exr/).",
     )
     hdr.add_argument(
-        "--image",
-        "-i",
-        action=_ImageAction,
-        nargs="+",
-        dest="images",
-        default=None,
-        metavar="ARG",
+        "--model", "-m", default=DEFAULT_MODEL_25, help=f"LTX-2.5 pack (HF repo or path, default: {DEFAULT_MODEL_25})"
+    )
+    hdr.add_argument(
+        "--hdr-lora",
+        required=True,
         help=(
-            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. Repeatable to anchor multiple frames. "
-            "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4."
+            "SDR-to-HDR IC-LoRA .safetensors (Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR, gated). Pass the local file: "
+            "the repo also holds the scene embeddings, so a bare repo id is ambiguous."
         ),
     )
-    hdr.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
-    hdr.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
     hdr.add_argument(
-        "--conditioning-strength",
-        type=float,
-        default=1.0,
-        help="IC-LoRA conditioning attention strength 0.0-1.0 (default: 1.0)",
+        "--text-embeddings",
+        required=True,
+        help=".safetensors with video_context (the scene embeddings shipped in the HDR LoRA repo).",
     )
-    hdr.add_argument("--skip-stage-2", action="store_true", help="Skip stage 2 upsampling (half resolution output)")
+    hdr.add_argument(
+        "--input-colorspace",
+        default="srgb_gamma",
+        choices=[m.value for m in HDRInputColorSpace],
+        help=(
+            "Source encoding: srgb_gamma=display MP4/MOV (EOTF to ACEScct); "
+            "srgb=linear Rec.709 MP4/MOV or EXR directory; acescg/acescct=EXR directory. Default: srgb_gamma."
+        ),
+    )
+    hdr.add_argument(
+        "--exr-colorspace",
+        type=_parse_exr_colorspace,
+        default=EXRColorSpace.ACESCG,
+        choices=list(EXRColorSpace),
+        metavar="{srgb_linear,acescg,acescct}",
+        help=(
+            "Colour space of the EXR sidecar beside --output-path. acescg / srgb_linear write scene-linear; "
+            "acescct writes VAE log codes. HLG master is always BT.2020/HLG. Default: acescg."
+        ),
+    )
+    hdr.add_argument(
+        "--frame-rate",
+        type=float,
+        default=None,
+        help="Required for EXR-frame directories; must not be set for MP4/MOV (container fps).",
+    )
+    hdr.add_argument("--seed", "-s", type=int, default=-1, help="Random seed (-1 = random)")
+    hdr.add_argument(
+        "--high-quality",
+        action="store_true",
+        help="High-quality HDR mode: generate at 2x frame count internally and keep every other frame (~2x slower).",
+    )
+    hdr.add_argument(
+        "--no-keyframes",
+        action="store_true",
+        help=(
+            "Disable DFR-style seam keyframes (on by default: a generated HDR slot and a 1-frame SDR guide "
+            "on every canvas seam)."
+        ),
+    )
+    hdr.add_argument(
+        "--keyframe-strength",
+        type=float,
+        default=0.95,
+        help="Seam keyframe strength (ignored with --no-keyframes). Default: 0.95.",
+    )
+    hdr.add_argument("--quiet", "-q", action="store_true", help="Suppress progress output")
+    hdr.add_argument(
+        "--low-ram",
+        action="store_true",
+        help="Stream transformer blocks from mmap'd safetensors (see `generate --help`).",
+    )
 
     # --- enhance ---
     enh = sub.add_parser("enhance", help="Enhance a prompt using Gemma (no video generation)")
@@ -1698,9 +1763,73 @@ def _cmd_lipdub(args: argparse.Namespace) -> None:
     _print_result(args.output, t0, args.quiet)
 
 
+def _is_exr_dir(path: Path) -> bool:
+    """A directory that directly contains ``*.exr`` frames."""
+    return path.is_dir() and any(path.glob("*.exr"))
+
+
+def _resolve_hdr_input(args: argparse.Namespace) -> None:
+    """Map ``--input`` / ``--input-colorspace`` / ``--frame-rate`` to a VideoInput or EXRVideoInput.
+
+    Mirrors upstream ``_resolve_hdr_ic_lora_input`` (messages verbatim) and replaces ``args.input``.
+    """
+    from ltx_pipelines_mlx.utils.hdr_media import EXRVideoInput, VideoInput
+
+    path = Path(args.input).expanduser()
+    if not path.exists():
+        raise SystemExit(f"--input path does not exist: {path}")
+    cs = HDRInputColorSpace(args.input_colorspace)
+    fps = args.frame_rate
+
+    if not _is_exr_dir(path):
+        if path.suffix.lower() not in (".mp4", ".mov"):
+            raise SystemExit(f"expected an MP4/MOV file or a directory of *.exr frames; got {path}")
+        if cs not in (HDRInputColorSpace.SRGB_GAMMA, HDRInputColorSpace.SRGB):
+            raise SystemExit(f"--input-colorspace {cs.value} expects a directory of *.exr frames; got {path}")
+        if fps is not None:
+            raise SystemExit("--frame-rate is only valid for an EXR-frame folder")
+        args.input = VideoInput(path, gamma_encoded=cs is HDRInputColorSpace.SRGB_GAMMA)
+        return
+
+    exr_spaces = {
+        HDRInputColorSpace.SRGB: EXRColorSpace.SRGB_LINEAR,
+        HDRInputColorSpace.ACESCG: EXRColorSpace.ACESCG,
+        HDRInputColorSpace.ACESCCT: EXRColorSpace.ACESCCT,
+    }
+    if cs not in exr_spaces:
+        raise SystemExit(f"--input-colorspace {cs.value} expects an MP4/MOV file; got EXR frames at {path}")
+    if fps is None:
+        raise SystemExit("EXR-frame folder requires --frame-rate")
+    args.input = EXRVideoInput(path, color_space=exr_spaces[cs], frame_rate=fps)
+
+
 def _cmd_hdr_ic_lora(args: argparse.Namespace) -> None:
-    """HDR IC-LoRA entry point -- being rewired to the single-stage ACEScct pipeline."""
-    raise NotImplementedError("rewired in the next commit")
+    """Single-stage ACEScct SDR-to-HDR IC-LoRA (LTX-2.5 packs only)."""
+    t0 = time.time()
+    from ltx_pipelines_mlx.hdr_ic_lora import HDRICLoraPipeline
+
+    _resolve_hdr_input(args)
+
+    pipe = HDRICLoraPipeline(
+        model_dir=args.model,
+        hdr_lora=args.hdr_lora,
+        text_embeddings=args.text_embeddings,
+        low_ram_streaming=args.low_ram,
+    )
+    pipe.verbose = not args.quiet
+    # The decoder block captured ``verbose`` at construction time.
+    pipe.video_decoder_block.verbose = pipe.verbose
+    exr_dir = pipe.generate_and_save(
+        args.input,
+        args.output_path,
+        exr_color_space=args.exr_colorspace,
+        seed=args.seed,
+        high_quality_hdr=args.high_quality,
+        keyframe_strength=None if args.no_keyframes else args.keyframe_strength,
+    )
+    _print_result(args.output_path, t0, args.quiet)
+    if not args.quiet:
+        print(f"EXR frames: {exr_dir}")
 
 
 # =============================================================================

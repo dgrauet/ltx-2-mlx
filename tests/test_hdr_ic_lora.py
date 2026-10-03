@@ -329,3 +329,96 @@ def test_generate_and_save_feeds_the_hdr_encoder(tmp_path, monkeypatch):
     result = pipe.generate_and_save(VideoInput(src, gamma_encoded=True), str(tmp_path / "o.mp4"), seed=0)
     assert result == tmp_path / "x_exr"
     assert seen == {"frames": 9, "out": str(tmp_path / "o.mp4"), "fps": 24, "cs": EXRColorSpace.ACESCG}
+
+
+# --- CLI -------------------------------------------------------------------
+
+
+def _hdr_argv(tmp_path, extra):
+    mp4 = tmp_path / "a.mp4"
+    mp4.write_bytes(b"")
+    exr = tmp_path / "frames"
+    exr.mkdir(exist_ok=True)
+    (exr / "f0.exr").write_bytes(b"")
+    base = ["hdr-ic-lora", "-o", str(tmp_path / "o.mp4"), "--hdr-lora", str(mp4), "--text-embeddings", str(mp4)]
+    return base + [a.format(mp4=mp4, exr=exr) for a in extra]
+
+
+@pytest.mark.parametrize(
+    ("extra", "ok"),
+    [
+        (["--input", "{mp4}"], True),
+        (["--input", "{mp4}", "--input-colorspace", "srgb"], True),
+        (["--input", "{mp4}", "--frame-rate", "24"], False),
+        (["--input", "{exr}", "--input-colorspace", "acescg"], False),  # EXR needs --frame-rate
+        (["--input", "{exr}", "--input-colorspace", "acescg", "--frame-rate", "24"], True),
+        (["--input", "{exr}", "--input-colorspace", "srgb_gamma", "--frame-rate", "24"], False),
+        (["--input", "{mp4}", "--input-colorspace", "acescct"], False),
+    ],
+)
+def test_cli_input_validation_matrix(tmp_path, extra, ok):
+    from ltx_pipelines_mlx.cli import _build_parser, _resolve_hdr_input
+
+    argv = _hdr_argv(tmp_path, extra)
+    if ok:
+        _resolve_hdr_input(_build_parser().parse_args(argv))
+    else:
+        with pytest.raises(SystemExit):
+            _resolve_hdr_input(_build_parser().parse_args(argv))
+
+
+def test_cli_resolves_input_objects_and_defaults(tmp_path):
+    from ltx_pipelines_mlx.cli import _build_parser, _resolve_hdr_input
+    from ltx_pipelines_mlx.utils.hdr_media import EXRColorSpace, EXRVideoInput
+
+    args = _build_parser().parse_args(_hdr_argv(tmp_path, ["--input", "{mp4}"]))
+
+    assert (args.exr_colorspace, args.keyframe_strength, args.no_keyframes) == (EXRColorSpace.ACESCG, 0.95, False)
+    _resolve_hdr_input(args)
+    assert args.input == VideoInput(tmp_path / "a.mp4", gamma_encoded=True)
+    args = _build_parser().parse_args(
+        _hdr_argv(tmp_path, ["--input", "{exr}", "--input-colorspace", "acescct", "--frame-rate", "24"])
+    )
+    _resolve_hdr_input(args)
+    assert args.input == EXRVideoInput(tmp_path / "frames", EXRColorSpace.ACESCCT, 24.0)
+
+
+@pytest.mark.parametrize("removed", ["--prompt", "--lora", "--video-conditioning", "--skip-stage-2", "--stage1-steps"])
+def test_cli_old_flags_are_gone(tmp_path, removed):
+    from ltx_pipelines_mlx.cli import _build_parser
+
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(_hdr_argv(tmp_path, ["--input", "{mp4}", removed, "x"]))
+
+
+def test_cmd_wires_the_pipeline(tmp_path, monkeypatch):
+    from ltx_pipelines_mlx import cli
+    from ltx_pipelines_mlx.utils.hdr_media import EXRColorSpace
+
+    calls: dict = {}
+
+    class _Block:
+        verbose = True
+
+    class _Pipe:
+        verbose = True
+        video_decoder_block = _Block()
+
+        def __init__(self, model_dir, hdr_lora, text_embeddings, *, low_ram_streaming=False):
+            calls["init"] = (model_dir, hdr_lora, text_embeddings, low_ram_streaming)
+
+        def generate_and_save(self, video, output_path, **kw):
+            calls["gen"] = (video, output_path, kw)
+            return tmp_path / "x_exr"
+
+    monkeypatch.setattr(hdr_mod, "HDRICLoraPipeline", _Pipe)
+    argv = _hdr_argv(
+        tmp_path,
+        ["--input", "{mp4}", "--quiet", "--low-ram", "--no-keyframes", "--high-quality", "--seed", "3"],
+    )
+    cli._cmd_hdr_ic_lora(cli._build_parser().parse_args(argv))
+    assert calls["init"][3] is True
+    video, out, kw = calls["gen"]
+    assert video == VideoInput(tmp_path / "a.mp4", gamma_encoded=True)
+    assert kw["keyframe_strength"] is None and kw["high_quality_hdr"] is True and kw["seed"] == 3
+    assert kw["exr_color_space"] == EXRColorSpace.ACESCG

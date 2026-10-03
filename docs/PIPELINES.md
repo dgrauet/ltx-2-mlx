@@ -14,7 +14,7 @@ Start from what you have:
 - **Text only** → `generate --distilled` (fastest, 2.5 packs recommended) · `generate --two-stage` (dev + CFG, best default quality) · `generate --two-stages-hq` (res_2s sampler, slower) · `generate --one-stage` (native resolution ≤ 704 × 480, no upsampler).
 - **Text + one or more images** → the same four `generate` modes with `--image PATH FRAME STRENGTH` (repeatable).
 - **Two images to interpolate between** → `keyframe`.
-- **A control video** (depth / canny / pose / motion tracks) → `ic-lora`; **HDR output** → `hdr-ic-lora`.
+- **A control video** (depth / canny / pose / motion tracks) → `ic-lora`; **an SDR clip to upgrade to HDR (2.5 packs)** → `hdr-ic-lora`.
 - **An audio track to drive the video** → `a2v`.
 - **An existing video to change** → `retake` (a time range) · `extend` (add frames) · `lipdub` (re-sync lips to audio, experimental).
 - **A prompt to improve first** → the `enhance` subcommand.
@@ -106,19 +106,18 @@ Everything else is in [Common flags](#common-flags).
 
 ### `hdr-ic-lora`
 
-- **Produces:** two files. An SDR mp4 preview at `--output`, and a `.hdr.npz` float32 linear-HDR tensor next to it.
-- **Packs:** 2.3 only. **Tier:** Stable.
-- **Required:** `--prompt`, `--output`, `--frame-rate`, `--lora PATH STRENGTH` (an HDR IC-LoRA).
-- **Own flags:** same as `ic-lora`, except `--video-conditioning` is optional. Omit it for pure text-to-HDR. `--frames` (97), `--conditioning-strength`, `--skip-stage-2`, `--stage1-steps`, `--stage2-steps`, `--image`.
+- **Produces:** `<output>.mp4`, a BT.2020/HLG 10-bit HEVC master, plus `<stem>_<exr-colorspace>_exr/frame_*.exr` beside it (ACEScg by default).
+- **Packs:** 2.5 only (2.3 packs are refused). **Tier:** Experimental.
+- **Required:** `--input` (MP4/MOV or a folder of `*.exr`), `--output-path` / `-o`, `--hdr-lora` (the gated `Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR`, as a local file), `--text-embeddings` (the scene-emb file from the same repo).
+- **Own flags:** `--input-colorspace {srgb_gamma,srgb,acescg,acescct}` (default `srgb_gamma`), `--exr-colorspace {srgb_linear,acescg,acescct}` (default `acescg`), `--frame-rate` (EXR folders only, forbidden for MP4/MOV), `--high-quality` (2x frames internally, ~2x slower), `--no-keyframes`, `--keyframe-strength` (0.95). There is no prompt, size, frame-count or stage flag: the output follows the source (frame count must be 8k+1).
 - **Example:**
   ```
-  ltx-2-mlx hdr-ic-lora -p "cinematic golden hour" \
-    --lora Lightricks/LTX-2.3-22b-IC-LoRA-HDR 1.0 \
-    --video-conditioning source_sdr.mp4 1.0 \
-    -f 97 --frame-rate 24 --low-ram -o out.mp4
+  ltx-2-mlx hdr-ic-lora --model dgrauet/ltx-2.5-mlx-q8 --input source_sdr.mp4 \
+    --hdr-lora ltx-2.5-22b-ic-lora-sdr-to-hdr-1.0.safetensors \
+    --text-embeddings ltx-2.5-22b-ic-lora-sdr-to-hdr-scene-emb.safetensors \
+    --low-ram -o out.mp4
   ```
-- **Cost (M2 Pro 32 GB, `--low-ram`):** 1280 × 704, 97 frames ≈ 15 min 28 s.
-- **Notes:** the HDR transform and the reference downscale factor are read from the LoRA's safetensors metadata. Converting the npz to EXR or TIFF is left to your own tooling. [Details](../CLAUDE.md#hdr-ic-lora-pipeline).
+- **Notes:** single stage on the distilled transformer with the LoRA fused at strength 1.0; both VAEs run in fp32 and the keyframe-aware diffusion decoder produces the pixels. Replaces the old LogC3 / `.hdr.npz` command. [Details](../CLAUDE.md#hdr-ic-lora-pipeline).
 
 ### `a2v`
 
@@ -174,23 +173,23 @@ Run `ltx-2-mlx <subcommand> --help` for the exact spelling of these options.
 
 | Flag | Default | Effect | Applies to |
 |---|---|---|---|
-| `--prompt`, `-p` | required | Text prompt. | all |
-| `--output`, `-o` | required | Output video path (`.mp4`). | all |
+| `--prompt`, `-p` | required | Text prompt. | all except `hdr-ic-lora` (`--input` / `-o`) |
+| `--output`, `-o` | required | Output video path (`.mp4`). | all except `hdr-ic-lora` (`--input` / `-o`) |
 | `--model`, `-m` | `dgrauet/ltx-2.3-mlx-q8` | Weights, as a HuggingFace repo id or a local pack directory. 2.5 support is auto-detected from the pack. | all |
-| `--gemma` | `mlx-community/gemma-3-12b-it-4bit` | Text encoder for 2.3 packs. 2.5 packs carry their own Gemma 4 tower and ignore it. | all |
+| `--gemma` | `mlx-community/gemma-3-12b-it-4bit` | Text encoder for 2.3 packs. 2.5 packs carry their own Gemma 4 tower and ignore it. | all except `hdr-ic-lora` (`--input` / `-o`) |
 | `--seed`, `-s` | -1 (random) | Random seed. Pass a fixed value for reproducible runs. | all |
 | `--quiet`, `-q` | off | Suppress the progress output described below. | all |
-| `--height`, `-H` | 480 | Output height in pixels. Non-multiples of 64 round down on two-stage paths. | all except `retake` / `extend` |
-| `--width`, `-W` | 704 | Output width in pixels. Same rounding rule. | all except `retake` / `extend` |
+| `--height`, `-H` | 480 | Output height in pixels. Non-multiples of 64 round down on two-stage paths. | all except `retake` / `extend` / `hdr-ic-lora` |
+| `--width`, `-W` | 704 | Output width in pixels. Same rounding rule. | all except `retake` / `extend` / `hdr-ic-lora` |
 | `--frame-rate` | required | Output frame rate. LTX-2.3 was trained at 24; values far from that drift out of distribution. | all except `retake` / `extend` / `lipdub` |
 | `--frames`, `-f` | 97, or auto on `generate` with a 2.5 pack | Frame count. Must satisfy `(frames - 1) % 8 == 0`. On `generate` with a 2.3 pack, omitting it fails immediately. | all except `retake` / `extend` / `lipdub` |
 | `--auto-duration MIN:MAX` | 1:20 | Clamp, in seconds, for the duration predicted by the 2.5 DurationHead. Ignored with a warning when `--frames` is given. [Details](../CLAUDE.md#auto-duration-durationhead--f-optional-on-25). | `generate` on 2.5 packs |
-| `--image`, `-i` | — | Reference image: `PATH [FRAME_IDX STRENGTH [CRF]]`. Repeatable, so you can anchor several pixel frames. Frame 0 replaces the first latent frame; later indices act as soft keyframes. `FRAME_IDX` may be `last` or negative (counted from the end), which keeps an end anchor on the final frame under `--auto-duration`. On 2.5 packs, a frame-0 anchor now also carries the learned keyframe marker through, which shifts 2.5 I2V output slightly (2.3 unaffected). `CRF` (H.264 re-compression of the image, `0` = none) defaults to the model generation's value, as upstream: 33 on 2.3 packs, 18 on 2.5 packs (LTX-2.4 and later). [Details](../CLAUDE.md#multi-anchor-i2v---image-repeatable). | `generate` modes, `ic-lora`, `hdr-ic-lora`, `a2v` |
+| `--image`, `-i` | — | Reference image: `PATH [FRAME_IDX STRENGTH [CRF]]`. Repeatable, so you can anchor several pixel frames. Frame 0 replaces the first latent frame; later indices act as soft keyframes. `FRAME_IDX` may be `last` or negative (counted from the end), which keeps an end anchor on the final frame under `--auto-duration`. On 2.5 packs, a frame-0 anchor now also carries the learned keyframe marker through, which shifts 2.5 I2V output slightly (2.3 unaffected). `CRF` (H.264 re-compression of the image, `0` = none) defaults to the model generation's value, as upstream: 33 on 2.3 packs, 18 on 2.5 packs (LTX-2.4 and later). [Details](../CLAUDE.md#multi-anchor-i2v---image-repeatable). | `generate` modes, `ic-lora`, `a2v` |
 | `--num-generated-keyframes N` | 0 | Add N generated keyframe slots at evenly spaced interior frames in stage 1, which relaxes the temporal compression where motion is fast. Each slot costs a latent frame of tokens. Refused up front on 2.3 packs. [Details](../CLAUDE.md#generated-keyframe-slots---num-generated-keyframes-n-25-packs) | `generate` modes on 2.5 packs |
 | `--no-audio` | off | Skip the audio decode and mux. Video is unchanged; the DiT still produces audio latents jointly. | `generate` modes |
 | `--video-decoder {conv,diffusion}` | `conv` | Video VAE decoder. `diffusion` is sharper and slower and needs a 2.5 pack. [Details](../CLAUDE.md#diffusion-video-decoder---video-decoder-diffusion-25-packs-experimental). | `generate` modes |
 | `--diffvae-tile FRAMES HEIGHT WIDTH` | auto | Diffusion-decoder tile size, in pixel frames and pixels (multiples of 2 and 8; `0` leaves an axis untiled, `0 0 0` forces a single tile). | with `--video-decoder diffusion` |
-| `--lora PATH STRENGTH` | — | Extra LoRA weights, repeatable. A local `.safetensors` file or a HuggingFace repo id. Required on the IC-LoRA family. | `generate` modes, `ic-lora`, `hdr-ic-lora`, `lipdub` |
+| `--lora PATH STRENGTH` | — | Extra LoRA weights, repeatable. A local `.safetensors` file or a HuggingFace repo id. Required on the IC-LoRA family. | `generate` modes, `ic-lora`, `lipdub` |
 | `--enhance-prompt` | off | Rewrite the prompt with Gemma before generating. Gemma 3 only, so it raises on 2.5 packs. | `generate` modes |
 | `--negative-prompt` | upstream `DEFAULT_NEGATIVE_PROMPT` | Negative prompt for CFG: what the video should avoid. One global prompt, even with `--segment`. `""` is encoded as an empty prompt, not replaced by the default. Rejected by `--distilled` and `--dfr` (no CFG). | CFG modes: `generate --one-stage` / `--two-stage` / `--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend` |
 | `--dev-transformer` | `transformer-dev.safetensors` on `generate`, unset elsewhere | Filename of the dev (non-distilled) transformer inside the pack. On `keyframe` and `ic-lora` there is no default, and on `ic-lora` passing it switches dev mode on. | `generate` modes, `keyframe`, `ic-lora` |
@@ -244,23 +243,23 @@ are utilities and have no column.
 
 | Flag | distilled | two-stage | hq | one-stage | dfr | keyframe | ic-lora | hdr-ic-lora | a2v | retake | extend | lipdub |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `--prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--output` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--output` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `--model` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--gemma` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--gemma` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `--seed` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `--quiet` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--height` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `--width` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| `--height` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| `--width` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ |
 | `--frame-rate` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `--frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `--frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | `--auto-duration` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--image` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `--image` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | `--num-generated-keyframes` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--no-audio` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--video-decoder` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--diffvae-tile` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--lora` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| `--lora` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | `--enhance-prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--negative-prompt` | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | `--dev-transformer` | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -276,13 +275,22 @@ are utilities and have no column.
 | `--tile-overlap` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--enable-teacache` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | `--teacache-thresh` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
-| `--stepwise-image-output-dir` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--stepwise-interval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--stepwise-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--stepwise-frame` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--stepwise-image-output-dir` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--stepwise-interval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--stepwise-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--stepwise-frame` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `--segment` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--relay-epsilon` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--relay-strength` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--input` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--output-path` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--hdr-lora` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--text-embeddings` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--input-colorspace` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--exr-colorspace` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--high-quality` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--no-keyframes` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--keyframe-strength` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 A ❌ means the flag is either rejected by the parser or accepted and inert for that
 mode. The four `generate` modes share one parser, so a flag marked ❌ on `distilled`
@@ -306,7 +314,6 @@ All CLI progress goes to **stderr** so stdout stays clean for callers that pipe 
 - `generate --lora <path>` (one-stage) is **incompatible with `--low-ram`** (LoRA pre-fuse happens before streaming setup). Use `ic-lora` or pre-fuse via mlx-forge.
 - `--low-ram` + custom `--distilled-lora-strength` (≠1.0) on two-stage uses bind-time LoRA fusion (slower per step but supports any strength). At strength=1.0, swaps to pre-fused `transformer-distilled.safetensors`.
 - TeaCache calibration is sampler-specific (Euler vs res_2s). Don't reuse coefficients across `--two-stage` and `--two-stages-hq`.
-- HDR LoRA can be combined with regular IC-LoRA control LoRAs in theory but untested — single HDR LoRA per pipeline is the validated path.
 - Modality tiling overhead dominates over memory benefit at default Nv (1650-3168). Use only when targeting 1080p / 8s+ on Mac Studio 64-128 GB; on 32 GB Mac, prefer `--low-ram` alone.
 - `generate` requires a mode flag (`--one-stage`, `--two-stage`, `--two-stages-hq`, or `--distilled`). There is **no implicit default** — every pipeline maps 1:1 to an upstream Lightricks/LTX-2 class.
 - `generate --one-stage` vs `generate --two-stage`: same dev model + CFG, but `--one-stage` runs **once at the target resolution** (no upscaler dependency, simpler latents for downstream). `--two-stage` runs at half-res then upscales 2× and refines (typically faster overall and better at large targets). Pick `--one-stage` for native res ≤ 704 × 480 or if you don't trust the upsampler; pick `--two-stage` for everything else.
