@@ -18,8 +18,7 @@ from ltx_pipelines_mlx.dfr import (
     DFRPipeline,
     audio_latent_for_tile,
     conditioning_fps,
-    dedupe_slots,
-    merge_carry_forward_keyframes,
+    lead_in_latent,
     rebase_image_conditionings,
     resample_audio_time,
     slot_initials_from_video,
@@ -64,21 +63,19 @@ def test_slot_initials_pick_the_nearest_latent_frame():
     assert np.array(out).reshape(-1).tolist() == [0.0, 2.0, 2.0, 4.0]
 
 
-def test_dedupe_slots_keeps_the_earlier_tile():
-    lat = mx.array([1.0, 2.0, 3.0, 4.0]).reshape(1, 1, 4, 1, 1)
-    pos, out = dedupe_slots([24, 72, 72, 120], lat)
-    assert pos == [24, 72, 120] and np.array(out).reshape(-1).tolist() == [1.0, 2.0, 4.0]
+def test_lead_in_latent_is_the_plane_then_the_previous_tiles_cells():
+    from ltx_pipelines_mlx.dfr_layout import TilePrefix
 
-
-def test_merge_carry_forward_sorts_and_lets_slots_override():
-    a = mx.array([10.0, 20.0]).reshape(1, 1, 2, 1, 1)
-    s = mx.array([15.0, 25.0]).reshape(1, 1, 2, 1, 1)
-    pos, lat = merge_carry_forward_keyframes([48, 96], a, [24, 72], s)
-    assert pos == [24, 48, 72, 96] and np.array(lat).reshape(-1).tolist() == [15.0, 10.0, 25.0, 20.0]
-    with pytest.raises(ValueError, match="positions"):
-        merge_carry_forward_keyframes([48], a, [], None)
-    with pytest.raises(RuntimeError, match="empty"):
-        merge_carry_forward_keyframes([], None, [], None)
+    previous = mx.arange(19, dtype=mx.float32).reshape(1, 1, 19, 1, 1)  # tile 0 output, cell k = canvas cell k
+    plane = mx.full((1, 1, 1, 1, 1), -1.0)
+    prefix = TilePrefix(keyframe_position=120, video_start_cell=16, cells=4, resume_pixel=145)
+    out = lead_in_latent((0, previous), prefix, plane)
+    assert np.array(out).reshape(-1).tolist() == [-1.0, 16.0, 17.0, 18.0]
+    # a prefixed previous tile: its cell 0 is the plane at canvas cell 15, so canvas cell 16 is its cell 1
+    out = lead_in_latent((15, previous), prefix, plane)
+    assert np.array(out).reshape(-1).tolist() == [-1.0, 1.0, 2.0, 3.0]
+    with pytest.raises(RuntimeError, match="outside the previous tile"):
+        lead_in_latent((17, previous), prefix, plane)
 
 
 def test_rebase_image_conditionings_scales_filters_and_rebases():
@@ -226,6 +223,31 @@ def test_round_tiles_use_anchors_slots_and_frozen_audio(tmp_path, monkeypatch):
         assert call["audio_state"].frozen is True  # model conditions its audio AdaLN / A->V gate on sigma 0
 
 
+def test_round_tile_1_starts_on_a_plane_with_a_pinned_prefix(tmp_path, monkeypatch):
+    """Upstream v1.4.0: a non-first tile starts on the plane at the last keyframe before its seam
+    (tile 0's fresh slot at 120), pins the 4 cells up to the seam (144) to tile 0's output, keeps
+    only the anchors after the seam, and stitches only what it denoised."""
+    from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
+    from ltx_core_mlx.conditioning.types.latent_cond import VideoConditionByLatentIndex
+
+    pipe, _, ancestral, noised, _, _ = _make_rounds(tmp_path, monkeypatch, t=1)
+    video, _ = _run(pipe, num_frames=121)
+    tile_calls = [kw for kw in noised if kw["sigma"] == 0.975]
+    t1 = tile_calls[1]
+    assert t1["spatial_dims"][0] == 1 + (31 - 16)  # the plane, then canvas cells 16..30
+    anchors = [c for c in t1["conditionings"] if isinstance(c, VideoConditionByKeyframeIndex)]
+    assert [a.frame_idx for a in anchors] == [192 - 120, 240 - 120]
+    slots = [c for c in t1["conditionings"] if isinstance(c, VideoGeneratedKeyframeSlots)]
+    assert list(slots[0].pixel_frame_indices) == [168 - 120, 216 - 120]
+    (lead,) = [c for c in t1["conditionings"] if isinstance(c, VideoConditionByLatentIndex)]
+    assert lead.frame_indices == [0, 1, 2, 3] and lead.strength == 1.0
+    # tile 0 had no prefix
+    assert not [c for c in tile_calls[0]["conditionings"] if isinstance(c, VideoConditionByLatentIndex)]
+    # the tile's audio window starts at the plane and covers the prefix too
+    assert ancestral.calls[3]["audio_state"].latent.shape[1] == compute_audio_token_count(121, frame_rate=60.0)
+    assert video.shape[2] == 31  # 19 + (16 - 4): kept runs are disjoint
+
+
 def test_round_2_runs_4_tiles_and_outputs_481_frames(tmp_path, monkeypatch):
     pipe, _, ancestral, _, _, _ = _make_rounds(tmp_path, monkeypatch, t=2)
     video, _ = _run(pipe, num_frames=121)
@@ -256,8 +278,9 @@ def test_rounds_rebase_images_into_their_tiles(tmp_path, monkeypatch):
     monkeypatch.setattr(orch, "combined_image_conditionings", lambda imgs, **kw: [])
     monkeypatch.setattr(dfr_mod, "combined_image_conditionings", lambda imgs, **kw: seen.append(list(imgs)) or [])
     _run(pipe, num_frames=121, images=[ImageConditioningInput("a.png", 60, 1.0)])
-    # 60 * 2 = 120: inside tile 0 [0, 144] and tile 1 [96, 240] -> local 120 and 24
-    assert [[i.frame_idx for i in s] for s in seen] == [[120], [24]]
+    # 60 * 2 = 120: inside tile 0 [0, 144] and tile 1, which starts on the plane at 120 and spans
+    # [120, 240] -> local 120 and 0. Upstream rebases on the whole tile window, prefix included.
+    assert [[i.frame_idx for i in s] for s in seen] == [[120], [0]]
 
 
 def test_rounds_refuse_modality_tiling_and_prompt_relay(tmp_path, monkeypatch):

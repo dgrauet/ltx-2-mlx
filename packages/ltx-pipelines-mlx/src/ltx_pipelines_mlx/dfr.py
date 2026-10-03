@@ -39,6 +39,7 @@ from ltx_core_mlx.components.diffusion_steps import EulerAncestralDiffusionStep
 from ltx_core_mlx.components.modality_tiling import TiledLTXModel, VideoModalityTiler
 from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
 from ltx_core_mlx.conditioning.types.keyframe_slots import VideoGeneratedKeyframeSlots, extract_generated_keyframes
+from ltx_core_mlx.conditioning.types.latent_cond import VideoConditionByLatentIndex
 from ltx_core_mlx.loader import (
     LTXV_LORA_BLOCK_PREFIX,
     LTXV_LORA_COMFY_RENAMING_MAP,
@@ -55,7 +56,13 @@ from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization
 from ltx_pipelines_mlx._base import reject_negative_prompt
-from ltx_pipelines_mlx.dfr_layout import TemporalTilePlan, pixel_to_latent_index, resolve_canvas
+from ltx_pipelines_mlx.dfr_layout import (
+    TemporalTilePlan,
+    TilePrefix,
+    pixel_to_latent_index,
+    resolve_canvas,
+    tile_prefix,
+)
 from ltx_pipelines_mlx.distilled import DistilledPipeline, Stage1Result
 from ltx_pipelines_mlx.iclora_utils import (
     read_lora_reference_downscale_factor,
@@ -252,46 +259,41 @@ def slot_initials_from_video(video_latent: mx.array, positions: Sequence[int]) -
     return mx.concatenate([video_latent[:, :, i : i + 1] for i in frames], axis=2)
 
 
-def dedupe_slots(positions: Sequence[int], latents: mx.array) -> tuple[list[int], mx.array]:
-    """Sorted unique slot positions; lead-in duplicates keep the earlier tile's latent."""
-    first: dict[int, int] = {}
-    for index, position in enumerate(positions):
-        first.setdefault(int(position), index)
-    ordered = sorted(first)
-    return ordered, mx.concatenate([latents[:, :, first[p] : first[p] + 1] for p in ordered], axis=2)
+def lead_in_latent(previous: tuple[int, mx.array], prefix: TilePrefix, plane: mx.array) -> mx.array:
+    """A tile's pinned prefix: its cell-0 plane, then the previous tile's cells up to the seam.
 
+    Mirrors upstream ``dfr_helpers.ops.lead_in_carryover`` (which wraps this latent in a strength-1
+    ``VideoConditionByLatentIndex`` at index 0, so those cells *are* the previous tile's finished
+    output at every step). ``previous`` is ``(canvas cell the previous tile's cell 0 stands for, its
+    output)``: a prefixed tile's cell 0 is its plane, so its cell ``k`` is canvas cell ``base + k``,
+    while the first tile of a round starts on the canvas itself.
 
-def merge_carry_forward_keyframes(
-    anchor_positions: Sequence[int],
-    anchor_latents: mx.array | None,
-    slot_positions: Sequence[int],
-    slot_latents: mx.array | None,
-) -> tuple[list[int], mx.array]:
-    """Next round's keyframe bag: carried anchors plus this round's slots, sorted by position.
+    Args:
+        previous: ``(base canvas cell, (1, C, T, H, W) previous tile output)``.
+        prefix: This tile's :class:`TilePrefix`.
+        plane: ``(1, C, 1, H, W)`` keyframe plane at ``prefix.keyframe_position``.
 
-    Mirrors upstream ``_merge_carry_forward_keyframes`` (a slot at an anchor's position replaces it).
+    Returns:
+        ``(1, C, prefix.cells, H, W)`` pinned latent.
 
     Raises:
-        RuntimeError: missing latents for non-empty positions, or an empty bag.
-        ValueError: latent count != position count.
+        RuntimeError: the pinned canvas cells fall outside the previous tile.
     """
-    by_position: dict[int, mx.array] = {}
-    for positions, latents, label in (
-        (anchor_positions, anchor_latents, "anchor"),
-        (slot_positions, slot_latents, "slot"),
-    ):
-        if not positions:
-            continue
-        if latents is None:
-            raise RuntimeError(f"Missing {label} keyframe latents for carry-forward merge")
-        if latents.shape[2] != len(positions):
-            raise ValueError(f"{label} latents K={latents.shape[2]} != {len(positions)} positions")
-        for index, position in enumerate(positions):
-            by_position[int(position)] = latents[:, :, index : index + 1]
-    if not by_position:
-        raise RuntimeError("Carry-forward keyframe bag is empty")
-    ordered = sorted(by_position)
-    return ordered, mx.concatenate([by_position[p] for p in ordered], axis=2)
+    base_cell, previous_latent = previous
+    video_cells = prefix.cells - 1
+    offset = prefix.video_start_cell - base_cell
+    if offset < 0 or offset + video_cells > previous_latent.shape[2]:
+        raise RuntimeError(
+            f"pinned canvas cells [{prefix.video_start_cell}, {prefix.video_start_cell + video_cells}) fall "
+            f"outside the previous tile, whose cell 0 is canvas cell {base_cell} and which is "
+            f"{previous_latent.shape[2]} cells long"
+        )
+    carried = mx.concatenate(
+        [plane.astype(previous_latent.dtype), previous_latent[:, :, offset : offset + video_cells]], axis=2
+    )
+    if carried.shape[2] != prefix.cells:
+        raise RuntimeError(f"pinned prefix is {carried.shape[2]} cells, expected {prefix.cells}")
+    return carried
 
 
 def rebase_image_conditionings(
@@ -699,19 +701,26 @@ class DFRPipeline(DistilledPipeline):
         audio_tokens: mx.array,
         noise_seed: int,
         init_seed: int,
+        lead_in: mx.array | None = None,
     ) -> tuple[mx.array, mx.array | None]:
-        """Re-denoise one temporal tile (upstream round body): anchors, fresh slots, frozen audio, ancestral Euler.
+        """Re-denoise one temporal tile (upstream ``_denoise_temporal_tile``): anchors, fresh slots,
+        pinned prefix, frozen audio, ancestral Euler.
 
         Args:
             stage1: The stage-1 result (text embeddings).
-            tile_video: ``(1, 128, F, H, W)`` slice of the temporally upsampled latent.
+            tile_video: ``(1, 128, F, H, W)`` tile latent: a canvas slice for the first tile, else the
+                keyframe plane followed by the canvas cells from the pinned run on.
             cond_fps: Transformer fps (:func:`conditioning_fps`).
-            anchors: ``(local pixel index, (1, 128, 1, H, W) latent)`` carried keyframes.
+            anchors: ``(local pixel index, (1, 128, 1, H, W) latent)`` carried keyframes after the
+                resume point.
             slots_local: Local pixel positions of this tile's new slots.
             images: Tile-local ``ImageConditioningInput`` anchors.
             audio_tokens: ``(1, T, 128)`` frozen audio tokens for this tile.
             noise_seed: Ancestral loop seed (``seed + 1000 * round + tile``).
             init_seed: Seed of the initial partial re-noise.
+            lead_in: ``(1, 128, cells, H, W)`` pinned prefix (:func:`lead_in_latent`), conditioned at
+                strength 1 from cell 0 so those cells stay the previous tile's output; ``None`` for the
+                first tile.
 
         Returns:
             ``(tile latent (1, 128, F, H, W), slot latents (1, 128, K, H, W) or None)``.
@@ -728,7 +737,6 @@ class DFRPipeline(DistilledPipeline):
                 video_encoder=self.vae_encoder,
                 frame_rate=cond_fps,
             )
-        # Every seam in the window is a hard keyframe, including the one at local frame 0.
         for local_index, latent in anchors:
             kf_tokens, _ = self.video_patchifier.patchify(latent)
             conditionings.append(
@@ -746,6 +754,13 @@ class DFRPipeline(DistilledPipeline):
                     pixel_frame_indices=slots_local,
                     frame_rate=cond_fps,
                     initial_keyframes=slot_initials_from_video(tile_video, slots_local),
+                )
+            )
+        if lead_in is not None:
+            lead_tokens, _ = self.video_patchifier.patchify(lead_in)
+            conditionings.append(
+                VideoConditionByLatentIndex(
+                    frame_indices=list(range(lead_in.shape[2])), clean_latent=lead_tokens, strength=1.0
                 )
             )
         video_state = distilled_mod.create_noised_state(
@@ -830,24 +845,36 @@ class DFRPipeline(DistilledPipeline):
             cond_fps = conditioning_fps(current_fps)
             # Carried keyframes are single-frame latents, so only their positions scale with the round.
             seams = [2 * p for p in carry_positions]
-            seam_index = {p: i for i, p in enumerate(seams)}
+            # Every carried plane, at its position on this round's grid; tiles add their fresh slots as
+            # they finish, so a later tile's prefix usually starts on the previous tile's new slot.
+            plane_at = {p: carry_keyframes[:, :, i : i + 1] for i, p in enumerate(seams)}
             plan = TemporalTilePlan(seams, num_frames, 2**round_idx)
             pieces: list[mx.array] = []
-            slot_positions: list[int] = []
-            slot_latents: list[mx.array] = []
+            previous_tile: tuple[int, mx.array] | None = None
             with phase(
                 f"Temporal round {round_idx}/{self.temporal_upscalings} ({len(plan)} tiles)", verbose=self.verbose
             ):
-                for tile_index, (interval, pixel_start, pixel_end, anchor_global, slot_global) in enumerate(plan):
-                    local_frames = (interval.end - interval.start - 1) * _TEMPORAL_SCALE + 1
-                    tile_video = video_latent[:, :, interval.start : interval.end]
-                    missing = [p for p in anchor_global if p not in seam_index]
+                for tile_index, (interval, _pixel_start, _pixel_end, anchor_global, slot_global) in enumerate(plan):
+                    if tile_index == 0:
+                        prefix = None
+                        tile_video = video_latent[:, :, interval.start : interval.end]
+                        pixel_start, resume_pixel, pinned_cells = 0, 0, 0
+                    else:
+                        prefix = tile_prefix((interval.start - 1) * _TEMPORAL_SCALE, plane_at)
+                        plane = plane_at[prefix.keyframe_position].astype(video_latent.dtype)
+                        tile_video = mx.concatenate(
+                            [plane, video_latent[:, :, prefix.video_start_cell : interval.end]], axis=2
+                        )
+                        pixel_start, resume_pixel = prefix.keyframe_position, prefix.resume_pixel
+                        pinned_cells = prefix.cells
+                    local_frames = (tile_video.shape[2] - 1) * _TEMPORAL_SCALE + 1
+                    pixel_end = pixel_start + local_frames - 1
+                    # Keyframes inside the pinned prefix are dropped: those cells hold this round's content,
+                    # the planes an earlier stage's. The seam keyframe is absorbed by the last pinned cell.
+                    kept = [p for p in anchor_global if p >= resume_pixel]
+                    missing = [p for p in kept if p not in plane_at]
                     if missing:
                         raise RuntimeError(f"Anchor seams {missing} missing from the carry-forward bag")
-                    anchors = [
-                        (p - pixel_start, carry_keyframes[:, :, seam_index[p] : seam_index[p] + 1])
-                        for p in anchor_global
-                    ]
                     tile_audio = audio_latent_for_tile(
                         audio_full,
                         pixel_start=pixel_start,
@@ -861,7 +888,7 @@ class DFRPipeline(DistilledPipeline):
                         stage1,
                         tile_video,
                         cond_fps=cond_fps,
-                        anchors=anchors,
+                        anchors=[(p - pixel_start, plane_at[p]) for p in kept],
                         slots_local=[p - pixel_start for p in slot_global],
                         images=rebase_image_conditionings(
                             stage1.resolved_images,
@@ -876,26 +903,24 @@ class DFRPipeline(DistilledPipeline):
                         # Upstream shares one GaussianNoiser for the initial re-noise; MLX noise is not
                         # torch-comparable anyway, so a per-tile seed (+500) is an MLX-side choice.
                         init_seed=seed + 1000 * round_idx + tile_index + 500,
+                        lead_in=None
+                        if prefix is None or previous_tile is None
+                        else lead_in_latent(previous_tile, prefix, tile_video[:, :, :1]),
                     )
-                    pieces.append(latent[:, :, interval.left_ramp :])
+                    previous_tile = (interval.start if prefix is None else prefix.video_start_cell - 1, latent)
+                    pieces.append(latent[:, :, pinned_cells:])
                     if slot_global:
                         if slots is None:
                             raise RuntimeError(f"Temporal round {round_idx}: tile {tile_index} produced no slots")
-                        slot_positions.extend(slot_global)
-                        slot_latents.append(slots)
+                        for slot_index, position in enumerate(slot_global):
+                            plane_at.setdefault(position, slots[:, :, slot_index : slot_index + 1])
                     aggressive_cleanup()
             video_latent = mx.concatenate(pieces, axis=2)
             expected = (num_frames - 1) // _TEMPORAL_SCALE + 1
             if video_latent.shape[2] != expected:
                 raise RuntimeError(f"Stitched latent T={video_latent.shape[2]} != expected {expected}")
-            new_positions: list[int] = []
-            new_latents = None
-            if slot_positions:
-                # Lead-in segments repeat the previous tile's slots; the earlier tile's version wins.
-                new_positions, new_latents = dedupe_slots(slot_positions, mx.concatenate(slot_latents, axis=2))
-            carry_positions, carry_keyframes = merge_carry_forward_keyframes(
-                seams, carry_keyframes, new_positions, new_latents
-            )
+            carry_positions = sorted(plane_at)
+            carry_keyframes = mx.concatenate([plane_at[p] for p in carry_positions], axis=2)
             _materialize(video_latent, carry_keyframes)
         self.generated_keyframes = carry_keyframes
         self.generated_keyframe_positions = carry_positions
@@ -1202,10 +1227,9 @@ __all__ = [
     "clamp_tile_counts",
     "conditioning_fps",
     "decode_keyframes_from_slots",
-    "dedupe_slots",
     "floor_to_multiple",
     "lanczos_x2",
-    "merge_carry_forward_keyframes",
+    "lead_in_latent",
     "rebase_image_conditionings",
     "resample_audio_time",
     "slot_initials_from_video",
