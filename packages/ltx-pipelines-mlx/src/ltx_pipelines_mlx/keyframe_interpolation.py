@@ -230,7 +230,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         # --- Stage 1: Half resolution with keyframe conditioning ---
         F = F_half  # already computed above
         video_shape_1 = (1, F * H_half * W_half, 128)
-        audio_T = compute_audio_token_count(num_frames)
+        audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
         audio_shape = (1, audio_T, 128)
 
         video_positions_1 = compute_video_positions(F, H_half, W_half, frame_rate=frame_rate)
