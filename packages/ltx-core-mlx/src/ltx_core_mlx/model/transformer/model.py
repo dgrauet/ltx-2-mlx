@@ -18,6 +18,7 @@ Top-level weight keys (after stripping ``transformer.`` prefix):
 from __future__ import annotations
 
 import os as _os
+import sys
 from dataclasses import dataclass
 from enum import Enum
 
@@ -40,6 +41,44 @@ from ltx_core_mlx.model.transformer.transformer import BasicAVTransformerBlock
 # Set to 0 to disable (full lazy graph, original behaviour).
 _DIT_EVAL_EVERY = int(_os.environ.get("LTX2_DIT_EVAL_EVERY", "8"))
 _mx_eval = getattr(mx, "eval")  # noqa: B009
+
+# LTX2_COMPUTE_DTYPE: dtype for the inside of every DiT attention / feed-forward
+# module (projections, q/k norms, RoPE, the attention kernel). Unset or
+# "float32" keeps the default path, which runs the blocks in float32: the F32
+# AdaLN tables promote the modulated activations. "float16" runs those
+# internals in float16 while the residual stream and the AdaLN modulation stay
+# float32 -- on an M1 GPU, which has no native bfloat16, float16 is the fast type.
+# "bfloat16" is the precision upstream PyTorch computes in. Pipelines apply it
+# when they load a DiT; LTXModel.set_compute_dtype is the Python API.
+_COMPUTE_DTYPES: dict[str, mx.Dtype | None] = {
+    "": None,
+    "float32": None,
+    "fp32": None,
+    "float16": mx.float16,
+    "fp16": mx.float16,
+    "bfloat16": mx.bfloat16,
+    "bf16": mx.bfloat16,
+}
+
+
+def compute_dtype_from_env() -> mx.Dtype | None:
+    """Parse ``LTX2_COMPUTE_DTYPE``.
+
+    Returns:
+        The requested dtype, or ``None`` (unset / ``float32``) to leave the DiT as loaded.
+
+    Raises:
+        ValueError: On a value other than float32, float16 or bfloat16 (or their short forms).
+    """
+    value = _os.environ.get("LTX2_COMPUTE_DTYPE", "").strip().lower()
+    if value not in _COMPUTE_DTYPES:
+        raise ValueError(f"LTX2_COMPUTE_DTYPE={value!r}: expected float32, float16 or bfloat16")
+    return _COMPUTE_DTYPES[value]
+
+
+def _all_finite(*arrays: mx.array) -> bool:
+    return all(bool(mx.all(mx.isfinite(a)).item()) for a in arrays)
+
 
 # ---------------------------------------------------------------------------
 # AdaLN per-token dedupe + deferred per-block gather
@@ -547,6 +586,34 @@ class LTXModel(nn.Module):
         # so backprop through the dev model fits on 64 GB. No effect on inference.
         self.gradient_checkpointing = False
 
+        # Inner dtype of the attention / feed-forward modules; None = input dtype.
+        self._compute_dtype: mx.Dtype | None = None
+
+    @property
+    def compute_dtype(self) -> mx.Dtype | None:
+        """Dtype the attention / feed-forward internals run in (``None``: input dtype)."""
+        return self._compute_dtype
+
+    def set_compute_dtype(self, dtype: mx.Dtype | None) -> None:
+        """Run the attention and feed-forward internals of every block in ``dtype``.
+
+        The residual stream and the AdaLN modulation are untouched (float32 with the
+        shipped F32 tables); see ``BasicAVTransformerBlock.set_compute_dtype``. The
+        affected parameters are cast here, one block at a time, so the bfloat16
+        originals are released as each block is done.
+
+        Overflow guard: a forward whose output is not finite is recomputed without
+        the setting, which is then dropped for the rest of the run. ``None`` stops
+        casting activations; parameters already cast keep their new dtype, so on a
+        resident model the recompute uses float16-rounded parameters with
+        full-precision activations (not the float32 path). A streamed model rebinds
+        its stored weights instead.
+        """
+        for block in self.transformer_blocks:
+            block.set_compute_dtype(dtype)
+            _mx_eval(block.parameters())
+        self._compute_dtype = dtype
+
     def _embed_timestep_scalar(
         self,
         timestep: mx.array,
@@ -755,6 +822,8 @@ class LTXModel(nn.Module):
         Returns:
             Tuple of (video_velocity, audio_velocity), same shapes as inputs.
         """
+        # Arguments kept for the overflow guard's recompute (compute dtype only).
+        call_args = {k: v for k, v in locals().items() if k != "self"} if self._compute_dtype is not None else None
         # Cast inputs to bfloat16 to match weight dtype and avoid mixed-precision
         # accumulation errors over 48 transformer blocks
         video_latent = video_latent.astype(mx.bfloat16)
@@ -958,6 +1027,21 @@ class LTXModel(nn.Module):
         audio_out = self._output_block(
             audio_hidden, audio_embedded_ts, self.audio_scale_shift_table, self.audio_proj_out
         )
+
+        if call_args is not None and not _all_finite(video_out, audio_out):
+            print(
+                f"warning: DiT output is not finite with compute dtype {self._compute_dtype}; "
+                "recomputing this step and running the rest of the generation without it. "
+                "A resident model keeps the parameters already cast, so this is not the full-precision "
+                "path; a streamed model rebinds its stored weights.",
+                file=sys.stderr,
+            )
+            # A StreamingLTXModel owns the setting (it casts each block as it binds it): drop it
+            # there so later binds stop casting and the compiled block is retraced.
+            owner_ref = getattr(self, "_compute_dtype_owner", None)
+            owner = owner_ref() if owner_ref is not None else None
+            (owner if owner is not None else self).set_compute_dtype(None)
+            return self(**call_args)
 
         return video_out, audio_out
 

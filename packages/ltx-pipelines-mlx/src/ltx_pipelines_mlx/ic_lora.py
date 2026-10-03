@@ -235,6 +235,7 @@ class ICLoraPipeline(BasePipeline):
 
         apply_quantization(self.dit, fused_sd.sd)
         self.dit.load_weights(list(fused_sd.sd.items()))
+        self._recast_after_inplace_fusion()
         aggressive_cleanup()
 
         logger.info(f"Fused {len(lora_paths)} LoRA(s) into transformer")

@@ -430,6 +430,7 @@ class DFRPipeline(DistilledPipeline):
             # forward: materialize the fused weights here, then drop the pre-fuse state dicts.
             _materialize(self.dit.parameters())
             del model_sd, lora_sd, fused
+            self._recast_after_inplace_fusion()
             aggressive_cleanup()
             logger.info("Fused detailing LoRA: %s (strength=%s)", path, DETAILING_LORA_STRENGTH)
 

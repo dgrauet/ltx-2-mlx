@@ -26,6 +26,34 @@ from ltx_core_mlx.model.transformer.adaln import PerTokenAdaLNParams
 from ltx_core_mlx.model.transformer.attention import Attention
 from ltx_core_mlx.model.transformer.feed_forward import FeedForward
 
+_FLOAT_DTYPES = (mx.float16, mx.bfloat16, mx.float32)
+
+
+def cast_float_params(params: dict, dtype: mx.Dtype) -> dict:
+    """Cast every float array of a nested parameter dict to ``dtype``.
+
+    Packed quantized weights (uint32) are left alone; only their scales/biases,
+    Linear biases and norm weights change type.
+
+    Args:
+        params: Nested parameter dict, as returned by ``nn.Module.parameters()``.
+        dtype: Target float dtype.
+
+    Returns:
+        A dict of the same structure, ready for ``nn.Module.update``.
+    """
+
+    def _cast(value: object) -> object:
+        if isinstance(value, dict):
+            return {k: _cast(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_cast(v) for v in value]
+        if isinstance(value, mx.array) and value.dtype in _FLOAT_DTYPES and value.dtype != dtype:
+            return value.astype(dtype)
+        return value
+
+    return _cast(params)
+
 
 class BasicAVTransformerBlock(nn.Module):
     """Joint audio+video transformer block with adaptive layer norm.
@@ -156,6 +184,28 @@ class BasicAVTransformerBlock(nn.Module):
         self.scale_shift_table_a2v_ca_audio = mx.zeros((5, audio_dim))
 
         self._norm_eps = norm_eps
+
+    def compute_modules(self) -> list[tuple[str, Attention | FeedForward]]:
+        """The attention and feed-forward children, by attribute name."""
+        return [(name, mod) for name, mod in self.children().items() if isinstance(mod, (Attention, FeedForward))]
+
+    def set_compute_dtype(self, dtype: mx.Dtype | None) -> None:
+        """Run attention and feed-forward internals in ``dtype`` (``None``: input dtype).
+
+        Only the inside of those modules changes: the residual stream and the
+        AdaLN modulation keep whatever dtype the block receives (float32 with the
+        shipped F32 ``scale_shift_table`` s), and every module output is promoted
+        back by the float32 gate multiply before it reaches the residual.
+
+        The modules' float parameters are cast to ``dtype`` as well, so quantized
+        matmuls take the matching kernel -- float16 activations against bfloat16
+        quantization scales would promote to float32 and gain nothing.
+        ``None`` stops casting activations; parameters already cast stay cast.
+        """
+        for _, module in self.compute_modules():
+            module.compute_dtype = dtype
+            if dtype is not None:
+                module.update(cast_float_params(module.parameters(), dtype))
 
     @staticmethod
     def _unpack_adaln(
