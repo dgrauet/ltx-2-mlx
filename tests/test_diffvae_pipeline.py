@@ -311,6 +311,19 @@ def test_video_decoder_block_forwards_tile_override(monkeypatch, tmp_path):
     block.diffvae_tile = (0, 0, 0)
     dec = block.load()
     assert isinstance(dec, B._DiffusionVideoDecoder) and dec.tile_override == (0, 0, 0) and dec.weight_bytes == 10
+    assert dec.itemsize == 2
+
+
+def test_fp32_video_decoder_block_budgets_fp32(monkeypatch, tmp_path):
+    (tmp_path / "vae_decoder_av.safetensors").write_bytes(b"x" * 10)
+    monkeypatch.setattr(B, "load_diffusion_decoder", lambda path: _TinyDec())
+    dec = B.VideoDecoder(tmp_path, verbose=False, video_decoder="diffusion", dtype=mx.float32).load()
+    # bf16 file held in fp32: weights and activations are charged at 4 bytes per element.
+    assert dec.weight_bytes == 20 and dec.itemsize == 4
+    seen = {}
+    monkeypatch.setattr(B, "auto_tile_config", lambda *a, **k: seen.update(k))
+    dec.resolve_tiling((1, 8, 5, 3, 3))
+    assert seen["itemsize"] == 4
 
 
 def test_base_pipeline_forwards_diffvae_tile(monkeypatch):

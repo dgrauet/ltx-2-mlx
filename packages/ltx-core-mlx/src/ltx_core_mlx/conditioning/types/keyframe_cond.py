@@ -114,6 +114,7 @@ class VideoConditionByKeyframeIndex:
         self.frame_idx = frame_idx
         self.keyframe_latent = keyframe_latent
         self.strength = strength
+        self.num_pixel_frames = num_pixel_frames
 
         # Compute positions matching reference: single-frame positions with
         # frame_idx offset, NOT extracted from the full video grid.

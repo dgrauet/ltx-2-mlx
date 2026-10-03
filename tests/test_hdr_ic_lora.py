@@ -177,13 +177,14 @@ class _FakeDecoderBlock:
         self.chunk_sizes = chunk_sizes
         self.hw = (height, width)
         self.calls: list[dict] = []
+        self.freed = 0
         self._decoder = type("D", (), {"type_emb": mx.full((128,), type_emb)})()
 
     def load(self):
         return self
 
     def free(self):
-        pass
+        self.freed += 1
 
     def iter_frames(self, video_latent, *, seed, keyframes=None):
         self.calls.append({"shape": tuple(video_latent.shape), "seed": seed, "keyframes": keyframes})
@@ -249,7 +250,7 @@ def test_generate_wiring_matches_upstream(tmp_path, monkeypatch):
     guides = conds[1:4]
     assert all(isinstance(g, VideoConditionByKeyframeIndex) for g in guides)
     assert [g.frame_idx for g in guides] == [24, 48, 72]
-    assert all(g.strength == 0.95 for g in guides)
+    assert all(g.strength == 0.95 and g.num_pixel_frames == 1 for g in guides)
     assert all(g.keyframe_latent.shape == (1, 4, 128) and g.keyframe_latent.dtype == mx.bfloat16 for g in guides)
     assert isinstance(conds[4], VideoGeneratedKeyframeSlots) and len(conds) == 5
     assert list(conds[4].pixel_frame_indices) == [24, 48, 72]
@@ -265,6 +266,7 @@ def test_generate_wiring_matches_upstream(tmp_path, monkeypatch):
     assert dec["shape"] == (1, 128, 10, 2, 2) and dec["seed"] == 3
     assert dec["keyframes"] is not None and dec["keyframes"].pixel_frame_indices == (24, 48, 72)
     assert [c.shape for c in out] == [(40, 40, 48, 3), (33, 40, 48, 3)]
+    assert pipe.video_decoder_block.freed == 1
 
 
 def test_high_quality_keeps_every_other_frame_across_chunks(tmp_path, monkeypatch):
@@ -293,6 +295,24 @@ def test_zero_type_emb_refuses_keyframe_decode(tmp_path, monkeypatch):
     chunks, _ = pipe.generate(VideoInput(src, gamma_encoded=True), seed=0)
     with pytest.raises(RuntimeError, match="type_emb"):
         list(chunks)
+    assert pipe.video_decoder_block.freed == 1
+
+
+def test_lora_is_pending_at_fixed_strength(tmp_path):
+    emb = _embeddings(tmp_path)
+    lora = tmp_path / "hdr.safetensors"
+    lora.write_bytes(b"")
+    pipe = HDRICLoraPipeline(str(_pack25(tmp_path)), hdr_lora=str(lora), text_embeddings=str(emb))
+    assert pipe._pending_loras == [(str(lora), 1.0)]
+
+
+def test_abandoned_decode_frees_the_decoder(tmp_path, monkeypatch):
+    pipe, src, _, _ = _wire(tmp_path, monkeypatch, frames=9, size="64x64", rate=24, chunk_sizes=[4, 5])
+    chunks, _ = pipe.generate(VideoInput(src, gamma_encoded=True), seed=0)
+    next(chunks)
+    assert pipe.video_decoder_block.freed == 0
+    chunks.close()
+    assert pipe.video_decoder_block.freed == 1
 
 
 def test_generate_and_save_feeds_the_hdr_encoder(tmp_path, monkeypatch):

@@ -461,15 +461,15 @@ MIN_MODEL_BYTES = 1 << 30
 BUDGET_ENV = "LTX2_VAE_DECODE_BUDGET_GB"
 
 
-def _stage4_feature_bytes(geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel) -> int:
-    """bf16 bytes of the resident stage-4 feature including the ghost frames."""
+def _stage4_feature_bytes(geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel, itemsize: int = 2) -> int:
+    """Bytes of the resident stage-4 feature including the ghost frames (``itemsize``: decoder dtype, 2 = bf16)."""
     t4, h4, w4 = geometry.stage4_content_thw(*latent_fhw_padded)
-    return (t4 + geometry.ghost_frames_s4) * h4 * w4 * geometry.stage4_channels * 2
+    return (t4 + geometry.ghost_frames_s4) * h4 * w4 * geometry.stage4_channels * itemsize
 
 
-def _stage5_bytes_per_token(geometry: DiffusionTileGeometry) -> float:
-    """Activation bytes per stage-5 token: channels x 2 x STAGE5_MEM_COEF."""
-    return geometry.stage5_channels * 2 * STAGE5_MEM_COEF
+def _stage5_bytes_per_token(geometry: DiffusionTileGeometry, itemsize: int = 2) -> float:
+    """Activation bytes per stage-5 token: channels x itemsize x STAGE5_MEM_COEF (calibrated in bf16, itemsize 2)."""
+    return geometry.stage5_channels * itemsize * STAGE5_MEM_COEF
 
 
 def _plane_tokens(geometry: DiffusionTileGeometry, h_px: int, w_px: int, keyframe_planes: int) -> int:
@@ -479,14 +479,17 @@ def _plane_tokens(geometry: DiffusionTileGeometry, h_px: int, w_px: int, keyfram
 
 
 def estimate_untiled_bytes(
-    geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel, *, keyframe_planes: int = 0
+    geometry: DiffusionTileGeometry, latent_fhw_padded: Kernel, *, keyframe_planes: int = 0, itemsize: int = 2
 ) -> int:
-    """Activation bytes of a one-tile decode: (video + plane) stage-5 tokens x bytes/token + the fp16
-    output accumulator."""
+    """Activation bytes of a one-tile decode: (video + plane) stage-5 tokens x bytes/token + the output.
+
+    ``itemsize`` is the decoder's dtype size: 2 for bf16 (fp16 output accumulator), 4 for an fp32 decoder,
+    whose activations and accumulator are fp32 (``NADiffusionDecoder.tiled_decode``'s ``acc_dtype``).
+    """
     f_px, h_px, w_px = output_fhw(geometry, latent_fhw_padded)
     p = geometry.patch_size
     tokens = f_px * (h_px // p) * (w_px // p) + _plane_tokens(geometry, h_px, w_px, keyframe_planes)
-    return int(tokens * _stage5_bytes_per_token(geometry)) + f_px * h_px * w_px * 3 * 2
+    return int(tokens * _stage5_bytes_per_token(geometry, itemsize)) + f_px * h_px * w_px * 3 * itemsize
 
 
 def _candidates(
@@ -509,6 +512,7 @@ def auto_tile_config(
     budget_bytes: int,
     weight_bytes: int,
     keyframe_planes: int = 0,
+    itemsize: int = 2,
 ) -> DiffusionTileConfig | None:
     """Pick tile sizes that keep the decode under ``budget_bytes`` (upstream ``dt:261-418``, simplified).
 
@@ -521,6 +525,9 @@ def auto_tile_config(
     planes, which is an upper bound (a tile keeps only the planes inside it plus the nearest
     one on each side).
 
+    ``itemsize`` is the decoder's dtype size (2 = bf16, the calibration; 4 = fp32): activations,
+    the stage-4 feature and the output accumulator scale with it. ``weight_bytes`` is the caller's.
+
     Raises:
         ValueError: No tile fits (names ``LTX2_VAE_DECODE_BUDGET_GB``).
     """
@@ -528,9 +535,12 @@ def auto_tile_config(
         budget_bytes
         - max(weight_bytes, MIN_MODEL_BYTES)
         - RESERVE_BYTES
-        - _stage4_feature_bytes(geometry, latent_fhw_padded)
+        - _stage4_feature_bytes(geometry, latent_fhw_padded, itemsize)
     )
-    if estimate_untiled_bytes(geometry, latent_fhw_padded, keyframe_planes=keyframe_planes) <= usable:
+    if (
+        estimate_untiled_bytes(geometry, latent_fhw_padded, keyframe_planes=keyframe_planes, itemsize=itemsize)
+        <= usable
+    ):
         return None
     t4, h4, w4 = geometry.stage4_content_thw(*latent_fhw_padded)
     f_px, h_px, w_px = output_fhw(geometry, latent_fhw_padded)
@@ -539,10 +549,10 @@ def auto_tile_config(
     cand_h = _candidates(geometry, 1, h4, h_px, geometry.min_tile_px, geometry.step_px, ov_hw)
     cand_w = _candidates(geometry, 2, w4, w_px, geometry.min_tile_px, geometry.step_px, ov_hw)
     p = geometry.patch_size
-    per_token = _stage5_bytes_per_token(geometry)
+    per_token = _stage5_bytes_per_token(geometry, itemsize)
     best: tuple[float, int, int, int, int, int] | None = None
     for tile_t, n_t in cand_t:
-        acc = 2 * tile_t * h_px * w_px * 6
+        acc = tile_t * h_px * w_px * 6 * itemsize
         if acc >= usable:
             continue
         max_tokens = (usable - acc) // per_token
