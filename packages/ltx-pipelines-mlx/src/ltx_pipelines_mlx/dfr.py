@@ -2,23 +2,25 @@
 
 Stage 1 (half resolution, distilled, ancestral on 2.5) runs on a canvas padded to whole keyframe
 segments with one generated keyframe slot per segment boundary. Stage 2 (full resolution,
-deterministic) runs with the detailing IC-LoRA attached at strength 0.5, conditioned on the
+ancestral on 2.5) runs with the detailing IC-LoRA attached at strength 0.5, conditioned on the
 stage-1 latent as an IC-LoRA reference and on the spatially upsampled stage-1 slots. This port
 covers ``spatial_upscalings`` 1 or 2 with ``temporal_upscalings`` 0, 1 or 2. Each temporal round
 upsamples the latent x2 in time with the temporal upsampler, then re-denoises it in keyframe-seam
 tiles (carried keyframes as anchors, fresh slots between them, frozen stage-1 audio, 4-step
-ancestral Euler) with the distilled transformer without the detailing LoRA; the output plays at
+ancestral Euler) with the distilled transformer without the detailing LoRA; a non-first tile
+starts on a keyframe plane and pins its lead-in to the previous tile's output. The output plays at
 ``frame_rate * 2**temporal_upscalings``. The final keyframe bag (stage-2 slots, or the carry bag
 after the rounds) is handed to the decoder as decoder keyframes (keyframe-aware decode on
 ``--video-decoder diffusion``; the conv decoder ignores them with a warning).
 
 With ``spatial_upscalings=2`` the output is floored to multiples of 128 px, stage 1 runs at H/4 and
 stage 2 plus the rounds at H/2, then a spatial epilogue details the full resolution: the carry
-keyframes are decoded one plane at a time with the render's decoder, Lanczos-upsampled x2 and
-re-encoded as strength-1.0 keyframes; the H/2 latent is spatially upsampled and re-denoised
-(3-step deterministic Euler, detailing LoRA, H/2 latent as the IC-LoRA reference, frozen stage-1
-audio) with every model call tiled 2x2 spatially and in ``2**T`` frame tiles cut on the last
-round's seams. The re-encoded planes become the decoder keyframes.
+keyframes (plus an opening frame when no image anchors frame 0) are decoded one plane at a time with
+the render's decoder, Lanczos-upsampled x2 and re-encoded as strength-1.0 keyframes; the H/2 latent
+is spatially upsampled and re-denoised window by window (one window per last-round temporal tile,
+each pinned to the previous one) with the detailing LoRA, the H/2 latent as the IC-LoRA reference
+and frozen stage-1 audio: one ancestral step on a 2x2 spatial grid, the remaining steps on 4x4. The
+re-encoded planes become the decoder keyframes.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import NamedTuple
 
 import mlx.core as mx
 import numpy as np
@@ -59,7 +62,6 @@ from ltx_pipelines_mlx._base import reject_negative_prompt
 from ltx_pipelines_mlx.dfr_layout import (
     TemporalTilePlan,
     TilePrefix,
-    pixel_to_latent_index,
     resolve_canvas,
     tile_prefix,
 )
@@ -99,17 +101,25 @@ TEMPORAL_SIGMAS: list[float] = list(LTX_2_5_DISTILLED_SIGMAS[4:])
 _MAX_CONDITIONING_FPS = 60.0
 _SNAP_CONDITIONING_FPS_ABOVE = 30.0
 
-#: Upstream ``_EPILOGUE_SPATIAL_OVERLAP``: 2x2 spatial tiles inside the epilogue overlap by this
+#: Upstream ``EPILOGUE_SPATIAL_OVERLAP``: spatial tiles inside an epilogue window overlap by this
 #: many token-grid cells (clamped per-axis by :func:`clamp_tile_counts` on a small latent).
-EPILOGUE_SPATIAL_OVERLAP = 12
+EPILOGUE_SPATIAL_OVERLAP = 10
+#: Upstream ``EPILOGUE_SPATIAL_COARSE_TILES`` / ``EPILOGUE_SPATIAL_TILES``: the first detailing step
+#: of each window runs on a 2x2 grid, the remaining steps retile to 4x4.
+EPILOGUE_SPATIAL_COARSE_TILES = 2
+EPILOGUE_SPATIAL_TILES = 4
+#: Upstream ``_EPILOGUE_ANCESTRAL_NOISE_SEED_OFFSET``: the epilogue's ancestral loop seeds from
+#: ``seed + 30000 + call``, ``call`` counting every pass (window i: coarse 2i, fine 2i + 1).
+EPILOGUE_ANCESTRAL_NOISE_SEED_OFFSET = 30000
 #: Upstream ``_EPILOGUE_KEYFRAME_STRENGTH``: the epilogue's re-encoded keyframe planes are a hard
 #: anchor, not a soft one like the temporal rounds' carried keyframes.
 EPILOGUE_KEYFRAME_STRENGTH = 1.0
 #: Seed offset for decoding each carry plane before Lanczos-upsampling it into the epilogue's
 #: keyframe conditionings (mirrors ``KEYFRAME_PLANE_DECODE_SEED_OFFSET = seed + 4000 + i``).
 KEYFRAME_PLANE_DECODE_SEED_OFFSET = 4000
-#: Seed offset for the epilogue's own noise draw (``seed + 2000``), decorrelated from stage 1/2
-#: and the temporal rounds' per-tile noise (``seed + 1000 * round + tile``).
+#: Seed offset for the epilogue's initial noise draw (``seed + 2000 + 100 * window``, upstream's
+#: per-window ``GaussianNoiser``), decorrelated from stage 1/2 and the temporal rounds' per-tile
+#: noise (``seed + 1000 * round + tile``).
 EPILOGUE_NOISE_SEED_OFFSET = 2000
 
 
@@ -294,6 +304,55 @@ def lead_in_latent(previous: tuple[int, mx.array], prefix: TilePrefix, plane: mx
     if carried.shape[2] != prefix.cells:
         raise RuntimeError(f"pinned prefix is {carried.shape[2]} cells, expected {prefix.cells}")
     return carried
+
+
+def epilogue_sigma_phases(sigmas: Sequence[float]) -> tuple[list[float], list[float] | None]:
+    """Split a detailing schedule into one coarse step and the remaining fine steps (upstream ``_epilogue_sigma_phases``).
+
+    A two-value schedule (one step) stays coarse only.
+
+    Raises:
+        ValueError: fewer than two sigma values.
+    """
+    if len(sigmas) < 2:
+        raise ValueError(f"Epilogue schedule needs at least one step (2 sigma values), got {len(sigmas)}")
+    if len(sigmas) == 2:
+        return list(sigmas), None
+    return list(sigmas[:2]), list(sigmas[1:])
+
+
+class EpilogueWindow(NamedTuple):
+    """One sequential epilogue window (upstream ``_plan_epilogue_windows``): latent interval, pixel span, prefix."""
+
+    start: int
+    end: int
+    pixel_start: int
+    pixel_end: int
+    prefix: TilePrefix | None
+
+
+def plan_epilogue_windows(
+    num_latent_frames: int, seams: Sequence[int], plane_positions: Sequence[int], temporal_upscalings: int
+) -> list[EpilogueWindow]:
+    """Cut the epilogue canvas into ``2**T`` temporal windows on the last round's seams, each non-first
+    one pinned on the last carry plane before its seam (upstream ``_plan_epilogue_windows``).
+
+    Without temporal rounds there are no seams and the canvas is one window. (Upstream builds
+    ``TemporalTilePlan([], ...)`` there, whose seam split refuses an empty boundary list.)
+    """
+    if not seams:
+        return [EpilogueWindow(0, num_latent_frames, 0, (num_latent_frames - 1) * _TEMPORAL_SCALE, None)]
+    plan = TemporalTilePlan(seams, (num_latent_frames - 1) * _TEMPORAL_SCALE + 1, max(1, 2**temporal_upscalings))
+    return [
+        EpilogueWindow(
+            tile.interval.start,
+            tile.interval.end,
+            tile.pixel_start,
+            tile.pixel_end,
+            None if index == 0 else tile_prefix((tile.interval.start - 1) * _TEMPORAL_SCALE, plane_positions),
+        )
+        for index, tile in enumerate(plan)
+    ]
 
 
 def rebase_image_conditionings(
@@ -668,7 +727,6 @@ class DFRPipeline(DistilledPipeline):
             video_latent = self._run_spatial_epilogue(
                 stage1,
                 video_latent,
-                canvas_frames=num_frames,
                 frame_rate=frame_rate,
                 seed=seed,
                 epilogue_seams=epilogue_seams,
@@ -974,30 +1032,120 @@ class DFRPipeline(DistilledPipeline):
             block.free()
         return planes
 
+    def _epilogue_pass(
+        self,
+        stage1: Stage1Result,
+        latent: mx.array,
+        conditionings: list,
+        *,
+        sigmas: list[float],
+        tiles: int,
+        noise_scale: float,
+        audio_tokens: mx.array,
+        cond_fps: float,
+        init_seed: int,
+        seed: int,
+        noise_seed_offset: int,
+    ) -> mx.array:
+        """One spatially tiled epilogue pass over a window (upstream ``_execute_tiled_spatial_denoise``).
+
+        Args:
+            stage1: The stage-1 result (text embeddings).
+            latent: ``(1, 128, F, H, W)`` window latent the pass starts from.
+            conditionings: The window's conditioning items, applied to a fresh state.
+            sigmas: This pass's schedule (coarse ``sigmas[:2]`` or fine ``sigmas[1:]``).
+            tiles: Spatial tiles per axis (2 coarse, 4 fine), clamped to the latent.
+            noise_scale: Initial noise blend (``sigmas[0]`` for the coarse pass, 0 for the fine one).
+            audio_tokens: ``(1, T, 128)`` frozen audio tokens for the window.
+            cond_fps: Transformer fps.
+            init_seed: Seed of the initial noise draw.
+            seed: Pipeline seed (the ancestral loop adds ``noise_seed_offset``).
+            noise_seed_offset: Ancestral loop seed offset.
+
+        Returns:
+            The denoised ``(1, 128, F, H, W)`` window latent.
+        """
+        F, H, W = latent.shape[2], latent.shape[3], latent.shape[4]
+        tiling = clamp_tile_counts(
+            TileCountConfig(
+                frames=DimensionTilingConfig(1, 0),
+                height=DimensionTilingConfig(tiles, EPILOGUE_SPATIAL_OVERLAP),
+                width=DimensionTilingConfig(tiles, EPILOGUE_SPATIAL_OVERLAP),
+            ),
+            (F, H, W),
+        )
+        tiler = VideoModalityTiler(tiling, latent_shape=(F, H, W))
+        model = distilled_mod.X0Model(TiledLTXModel(self.dit, tiler, normalize_positions=True))
+        tokens, _ = self.video_patchifier.patchify(latent)
+        video_state = distilled_mod.create_noised_state(
+            base_shape=tokens.shape,
+            conditionings=conditionings,
+            spatial_dims=(F, H, W),
+            positions=compute_video_positions(F, H, W, frame_rate=cond_fps),
+            seed=init_seed,
+            sigma=noise_scale,
+            initial_latent=tokens,
+        )
+        # Frozen audio (upstream ``ModalitySpec(frozen=True, noise_scale=0.0)``), as in the temporal rounds.
+        audio_state = distilled_mod.create_noised_state(
+            base_shape=audio_tokens.shape,
+            conditionings=[],
+            spatial_dims=(F, H, W),  # unused
+            positions=compute_audio_positions(audio_tokens.shape[1]),
+            seed=init_seed + 1,
+            sigma=0.0,
+            initial_latent=audio_tokens,
+            frozen=True,
+        )
+        with phase(
+            f"Spatial epilogue pass ({len(sigmas) - 1} step(s) over {len(tiler.tiles)} tiles, "
+            f"height={tiling.height} width={tiling.width})",
+            verbose=self.verbose,
+        ):
+            self._pre_denoise_flush(video_state, audio_state)
+            output = self._run_denoise_loop(
+                model=model,
+                video_state=video_state,
+                audio_state=audio_state,
+                video_text_embeds=stage1.video_embeds,
+                audio_text_embeds=stage1.audio_embeds,
+                sigmas=sigmas,
+                video_cross_attention_mask=None,
+                on_step=self._stepwise_hook(F, H, W, stage=3),
+                seed=seed,
+                ancestral=self._is_25,
+                noise_seed_offset=noise_seed_offset,
+            )
+        out = self.video_patchifier.unpatchify(output.video_latent[:, : F * H * W, :], (F, H, W))
+        _materialize(out)
+        return out
+
     def _run_spatial_epilogue(
         self,
         stage1: Stage1Result,
         guide_latent: mx.array,
         *,
-        canvas_frames: int,
         frame_rate: float,
         seed: int,
         epilogue_seams: list[int],
         stage2_steps: int | None = None,
     ) -> mx.array:
-        """Full-resolution spatial detailing (upstream ``spatial_upscalings == 2`` epilogue).
+        """Full-resolution spatial detailing (upstream ``run_spatial_epilogue``, v1.4.0).
 
-        One deterministic Euler loop over the whole canvas; each model call is tiled 2x2 spatially
-        (overlap 12) and in ``2**T`` frame tiles cut on the last round's seams, and the tile
-        predictions are blended. Conditioned on the user images (full resolution, frame indices on
-        the final grid), the carry keyframes re-decoded, Lanczos x2 upsampled and re-encoded
-        (strength 1.0), and the H/2 latent as the detailing IC-LoRA reference; the stage-1 audio is
-        frozen over the whole canvas (its output is discarded).
+        The canvas is cut into ``2**T`` temporal windows on the last round's seams (one window without
+        rounds), detailed one after the other. A non-first window starts on the last carry plane before
+        its seam and pins its lead-in cells to the previous window's finished output, as the temporal
+        rounds do. Each window runs one ancestral step on a 2x2 spatial grid, then re-prepares the same
+        conditionings on that output (no new noise) and runs the remaining steps on a 4x4 grid; spatial
+        tiles blend after every step, windows are never blended. Per window: user images on the final
+        grid, the carry keyframes re-decoded, Lanczos x2 upsampled and re-encoded (strength 1.0) that
+        sit after the resume point, an opening frame at frame 0 of the first window when no image
+        anchors it, the H/2 latent cropped to the window as the detailing IC-LoRA reference, and the
+        stage-1 audio windowed and frozen (its output is discarded).
 
         Args:
             stage1: The stage-1 result (text embeddings, stage-1 audio, I2V inputs).
             guide_latent: ``(1, 128, F, H/2 cells, W/2 cells)`` latent after stage 2 / the rounds.
-            canvas_frames: Pixel frames of ``guide_latent``'s canvas.
             frame_rate: Stage-1/2 playback frame rate (the canvas plays at ``frame_rate * 2**T``).
             seed: Pipeline seed.
             epilogue_seams: The last temporal round's seams in pixel frames (``[]`` without rounds).
@@ -1005,10 +1153,11 @@ class DFRPipeline(DistilledPipeline):
 
         Returns:
             The full-resolution latent ``(1, 128, F, 2H, 2W)``. ``self.generated_keyframes`` becomes the
-            re-encoded planes (positions unchanged) for the final keyframe-aware decode.
+            re-encoded carry planes (positions unchanged; the opening frame is not shipped) for the
+            final keyframe-aware decode.
 
         Raises:
-            RuntimeError: missing carry keyframes.
+            RuntimeError: missing carry keyframes, or a stitched length mismatch.
             ValueError: the re-encoded plane count differs from the carry positions.
         """
         carry_positions = list(self.generated_keyframe_positions)
@@ -1021,7 +1170,17 @@ class DFRPipeline(DistilledPipeline):
         playback_fps = frame_rate * scale
         cond_fps = conditioning_fps(playback_fps)
 
-        pixel_planes = self._decode_lanczos_carry_keyframes(carry_keyframes, seed)
+        # Opening plane (upstream ``_rebuild_epilogue_keyframes``): without an image at frame 0 of the
+        # final grid, the H/2 latent's first frame is decoded with the carry planes (appended last, so it
+        # takes the next decode seed), stretched and re-encoded, and anchors frame 0 of the first window.
+        final_images = rebase_image_conditionings(stage1.resolved_images, pixel_scale=scale)
+        opening = not any(image.frame_idx == 0 for image in final_images)
+        to_decode = (
+            mx.concatenate([carry_keyframes, guide_latent[:, :, :1].astype(carry_keyframes.dtype)], axis=2)
+            if opening
+            else carry_keyframes
+        )
+        pixel_planes = self._decode_lanczos_carry_keyframes(to_decode, seed)
         # low_memory stage 2 frees the VAE encoder and the spatial upsampler; the epilogue needs both.
         self.image_conditioner.load()
         if self.upsampler is None:
@@ -1029,118 +1188,172 @@ class DFRPipeline(DistilledPipeline):
         video_latent = self._upsample_latent(guide_latent)
         F, H, W = video_latent.shape[2], video_latent.shape[3], video_latent.shape[4]
 
-        conditionings: list = []
-        images = rebase_image_conditionings(stage1.resolved_images, pixel_scale=scale)
-        if images:
-            conditionings = combined_image_conditionings(
-                images,
-                enc_h=H * 32,
-                enc_w=W * 32,
-                spatial_dims=(F, H, W),
-                video_encoder=self.vae_encoder,
-                frame_rate=cond_fps,
-            )
         encoded: list[mx.array] = []
         for rgb in pixel_planes:
             # (1, H, W, 3) in [0, 1] -> (1, 3, 1, H, W) in [-1, 1] (``to_vae_range``), bf16 as upstream.
             sample = mx.array(rgb * 2.0 - 1.0).transpose(3, 0, 1, 2)[None].astype(mx.bfloat16)
             encoded.append(self.vae_encoder.encode(sample))
+        opening_plane = encoded.pop() if opening else None
         encoded_kfs = mx.concatenate(encoded, axis=2)
-        # Materialise everything the encoder produced so the low_memory free below takes effect at once.
-        image_tokens = [
-            tokens
-            for c in conditionings
-            for tokens in (getattr(c, "clean_latent", None), getattr(c, "keyframe_latent", None))
-            if tokens is not None
-        ]
-        _materialize(encoded_kfs, *image_tokens)
-        del pixel_planes, encoded, image_tokens
         if encoded_kfs.shape[2] != len(carry_positions):
             # Upstream ``_keyframe_conditionings_from_latents``; MLX slicing would silently clamp instead.
             raise ValueError(f"Expected {len(carry_positions)} keyframe latents, got K={encoded_kfs.shape[2]}")
-        for index, position in enumerate(carry_positions):
-            kf_tokens, _ = self.video_patchifier.patchify(encoded_kfs[:, :, index : index + 1])
-            conditionings.append(
-                VideoConditionByKeyframeIndex(
-                    frame_idx=position,
-                    keyframe_latent=kf_tokens,
-                    spatial_dims=(F, H, W),
-                    frame_rate=cond_fps,
-                    strength=EPILOGUE_KEYFRAME_STRENGTH,
+        plane_at = {position: encoded_kfs[:, :, index : index + 1] for index, position in enumerate(carry_positions)}
+
+        windows = plan_epilogue_windows(F, epilogue_seams, carry_positions, self.temporal_upscalings)
+        # Window spans first: images are encoded for every window before the encoder is freed.
+        spans = []
+        window_images: list[list] = []
+        for window in windows:
+            prefix = window.prefix
+            origin = window.pixel_start if prefix is None else prefix.keyframe_position
+            resume = 0 if prefix is None else prefix.resume_pixel
+            pinned = 0 if prefix is None else prefix.cells
+            # A prefixed window is its plane, then the canvas cells from the pinned run on.
+            frames = window.end - window.start if prefix is None else 1 + window.end - prefix.video_start_cell
+            spans.append((origin, resume, pinned, frames))
+            inside = [
+                image
+                for image in rebase_image_conditionings(
+                    stage1.resolved_images, pixel_scale=scale, pixel_start=origin, pixel_end=window.pixel_end
                 )
+                if image.frame_idx + origin >= resume
+            ]
+            window_images.append(
+                combined_image_conditionings(
+                    inside,
+                    enc_h=H * 32,
+                    enc_w=W * 32,
+                    spatial_dims=(frames, H, W),
+                    video_encoder=self.vae_encoder,
+                    frame_rate=cond_fps,
+                )
+                if inside
+                else []
             )
-        assert self._detailing_downscale is not None
-        conditionings.append(
-            reference_conditioning_from_latent(
-                guide_latent, frame_rate=cond_fps, downscale_factor=self._detailing_downscale, strength=1.0
-            )
-        )
+        image_tokens = [
+            tokens
+            for conds in window_images
+            for c in conds
+            for tokens in (getattr(c, "clean_latent", None), getattr(c, "keyframe_latent", None))
+            if tokens is not None
+        ]
+        # Materialise everything the encoder produced so the low_memory free below takes effect at once.
+        _materialize(encoded_kfs, *([] if opening_plane is None else [opening_plane]), *image_tokens)
+        del pixel_planes, encoded, image_tokens
         if self.low_memory:
             self.image_conditioner.free()
             self.upsampler = None
             aggressive_cleanup()
 
-        seams_latent = [pixel_to_latent_index(p) for p in epilogue_seams]
-        time_tiles = max(1, scale)
-        temporal_overlap = seams_latent[0] + 1 if time_tiles > 1 and seams_latent else 0
-        tiling = clamp_tile_counts(
-            TileCountConfig(
-                frames=DimensionTilingConfig(time_tiles, temporal_overlap),
-                height=DimensionTilingConfig(2, EPILOGUE_SPATIAL_OVERLAP),
-                width=DimensionTilingConfig(2, EPILOGUE_SPATIAL_OVERLAP),
-            ),
-            (F, H, W),
-        )
-        tiler = VideoModalityTiler(tiling, latent_shape=(F, H, W), seams=seams_latent)
-        model = distilled_mod.X0Model(TiledLTXModel(self.dit, tiler, normalize_positions=True))
-
-        tokens, _ = self.video_patchifier.patchify(video_latent)
+        assert self._detailing_downscale is not None
+        audio_full = self.audio_patchifier.unpatchify(stage1.audio_tokens)
         sigmas = shorten_schedule(LTX_2_5_STAGE_2_DISTILLED_SIGMAS, stage2_steps, keep="tail")
-        video_state = distilled_mod.create_noised_state(
-            base_shape=tokens.shape,
-            conditionings=conditionings,
-            spatial_dims=(F, H, W),
-            positions=compute_video_positions(F, H, W, frame_rate=cond_fps),
-            seed=seed + EPILOGUE_NOISE_SEED_OFFSET,
-            sigma=sigmas[0],
-            initial_latent=tokens,
-        )
-        audio_tile = audio_latent_for_tile(
-            self.audio_patchifier.unpatchify(stage1.audio_tokens),
-            pixel_start=0,
-            local_frames=canvas_frames,
-            playback_fps=playback_fps,
-            source_duration=self.canvas_frames / frame_rate,
-            cond_fps=cond_fps,
-        )
-        audio_tokens, _ = self.audio_patchifier.patchify(audio_tile)
-        # Frozen audio (upstream ``ModalitySpec(frozen=True, noise_scale=0.0)``), as in the temporal rounds.
-        audio_state = distilled_mod.create_noised_state(
-            base_shape=audio_tokens.shape,
-            conditionings=[],
-            spatial_dims=(F, H, W),  # unused
-            positions=compute_audio_positions(audio_tokens.shape[1]),
-            seed=seed + EPILOGUE_NOISE_SEED_OFFSET + 1,
-            sigma=0.0,
-            initial_latent=audio_tokens,
-            frozen=True,
-        )
-        with phase(
-            f"Spatial epilogue ({len(sigmas) - 1} steps over {len(tiler.tiles)} tiles, "
-            f"frames={tiling.frames} height={tiling.height} width={tiling.width}, seams={seams_latent})",
-            verbose=self.verbose,
-        ):
-            self._pre_denoise_flush(video_state, audio_state)
-            output = distilled_mod.denoise_loop(
-                model=model,
-                video_state=video_state,
-                audio_state=audio_state,
-                video_text_embeds=stage1.video_embeds,
-                audio_text_embeds=stage1.audio_embeds,
-                sigmas=sigmas,
-                on_step=self._stepwise_hook(F, H, W, stage=3),
-            )
-        latent = self.video_patchifier.unpatchify(output.video_latent[:, : F * H * W, :], (F, H, W))
+        coarse_sigmas, fine_sigmas = epilogue_sigma_phases(sigmas)
+        pieces: list[mx.array] = []
+        previous: tuple[int, mx.array] | None = None
+        call_index = 0
+        with phase(f"Spatial epilogue ({len(windows)} window(s), {len(sigmas) - 1} steps)", verbose=self.verbose):
+            for index, window in enumerate(windows):
+                prefix = window.prefix
+                origin, resume, pinned, _frames = spans[index]
+                if prefix is None:
+                    window_latent = video_latent[:, :, window.start : window.end]
+                    reference = guide_latent[:, :, window.start : window.end]
+                else:
+                    window_latent = mx.concatenate(
+                        [
+                            plane_at[prefix.keyframe_position].astype(video_latent.dtype),
+                            video_latent[:, :, prefix.video_start_cell : window.end],
+                        ],
+                        axis=2,
+                    )
+                    reference = guide_latent[:, :, prefix.video_start_cell - 1 : window.end]
+                Fw = window_latent.shape[2]
+                local_frames = (Fw - 1) * _TEMPORAL_SCALE + 1
+                conditionings: list = list(window_images[index])
+                for position in carry_positions:
+                    if origin <= position <= window.pixel_end and position >= resume:
+                        kf_tokens, _ = self.video_patchifier.patchify(plane_at[position])
+                        conditionings.append(
+                            VideoConditionByKeyframeIndex(
+                                frame_idx=position - origin,
+                                keyframe_latent=kf_tokens,
+                                spatial_dims=(Fw, H, W),
+                                frame_rate=cond_fps,
+                                strength=EPILOGUE_KEYFRAME_STRENGTH,
+                            )
+                        )
+                if opening_plane is not None and prefix is None:
+                    opening_tokens, _ = self.video_patchifier.patchify(opening_plane)
+                    conditionings.append(
+                        VideoConditionByKeyframeIndex(
+                            frame_idx=0,
+                            keyframe_latent=opening_tokens,
+                            spatial_dims=(Fw, H, W),
+                            frame_rate=cond_fps,
+                            strength=EPILOGUE_KEYFRAME_STRENGTH,
+                        )
+                    )
+                conditionings.append(
+                    reference_conditioning_from_latent(
+                        reference, frame_rate=cond_fps, downscale_factor=self._detailing_downscale, strength=1.0
+                    )
+                )
+                if prefix is not None and previous is not None:
+                    lead_tokens, _ = self.video_patchifier.patchify(
+                        lead_in_latent(previous, prefix, window_latent[:, :, :1])
+                    )
+                    conditionings.append(
+                        VideoConditionByLatentIndex(
+                            frame_indices=list(range(prefix.cells)), clean_latent=lead_tokens, strength=1.0
+                        )
+                    )
+                tile_audio = audio_latent_for_tile(
+                    audio_full,
+                    pixel_start=origin,
+                    local_frames=local_frames,
+                    playback_fps=playback_fps,
+                    source_duration=self.canvas_frames / frame_rate,
+                    cond_fps=cond_fps,
+                )
+                audio_tokens, _ = self.audio_patchifier.patchify(tile_audio)
+                init_seed = seed + EPILOGUE_NOISE_SEED_OFFSET + 100 * index
+                window_latent = self._epilogue_pass(
+                    stage1,
+                    window_latent,
+                    conditionings,
+                    sigmas=coarse_sigmas,
+                    tiles=EPILOGUE_SPATIAL_COARSE_TILES,
+                    noise_scale=coarse_sigmas[0],
+                    audio_tokens=audio_tokens,
+                    cond_fps=cond_fps,
+                    init_seed=init_seed,
+                    seed=seed,
+                    noise_seed_offset=EPILOGUE_ANCESTRAL_NOISE_SEED_OFFSET + call_index,
+                )
+                call_index += 1
+                if fine_sigmas is not None:
+                    window_latent = self._epilogue_pass(
+                        stage1,
+                        window_latent,
+                        conditionings,
+                        sigmas=fine_sigmas,
+                        tiles=EPILOGUE_SPATIAL_TILES,
+                        noise_scale=0.0,
+                        audio_tokens=audio_tokens,
+                        cond_fps=cond_fps,
+                        init_seed=init_seed,
+                        seed=seed,
+                        noise_seed_offset=EPILOGUE_ANCESTRAL_NOISE_SEED_OFFSET + call_index,
+                    )
+                    call_index += 1
+                previous = (window.start if prefix is None else prefix.video_start_cell - 1, window_latent)
+                pieces.append(window_latent[:, :, pinned:])
+                aggressive_cleanup()
+        latent = mx.concatenate(pieces, axis=2)
+        if latent.shape[2] != F:
+            raise RuntimeError(f"Epilogue stitched T={latent.shape[2]} != expected {F}")
         _materialize(latent)
         self.generated_keyframes = encoded_kfs
         aggressive_cleanup()

@@ -1223,16 +1223,26 @@ The first diffusion-decoder and T=2 attempts were killed by the macOS GPU watchd
 warning when this changes the requested size), stage 1 runs at H/4 and stage 2 plus every temporal
 round run at H/2 instead of the default H/2 / full res split — one extra spatial halving deferred
 to a final epilogue. After stage 2 (and any temporal rounds) finish, `_run_spatial_epilogue`
-details the H/2 latent up to full resolution: the carry keyframe bag is decoded one plane at a
-time with the render's own decoder (conv or diffusion, seeded `seed + 4000 + i`), Lanczos-upsampled
-×2 in RGB, and re-encoded as strength-1.0 keyframe conditionings at full resolution; the H/2 video
-latent is spatially upsampled once more (same latent upsampler as stage 2) and re-denoised with the
-distilled transformer + detailing LoRA (0.5), conditioned on the re-encoded keyframes plus an
-IC-LoRA reference built from the pre-upsample H/2 latent, on the stage-2 sigma table (3-step
-deterministic Euler) with stage 1's audio carried through frozen. Every model call in the epilogue
-goes through `X0Model(TiledLTXModel(..., normalize_positions=True))`: 2×2 spatial tiles (overlap
-12) and `2**temporal_upscalings` temporal tiles cut on the last round's seams, since the full-res
-token count would otherwise be too large for one forward. The re-encoded keyframes (not the
+details the H/2 latent up to full resolution (upstream v1.4.0 `run_spatial_epilogue`): the carry
+keyframe bag is decoded one plane at a time with the render's own decoder (conv or diffusion, seeded
+`seed + 4000 + i`), Lanczos-upsampled ×2 in RGB, and re-encoded as strength-1.0 keyframe
+conditionings at full resolution. When no user image sits at frame 0 of the final grid, the H/2
+latent's first frame is decoded the same way (next seed) as an **opening plane** that anchors frame
+0 of the first window and is not shipped. The H/2 video latent is spatially upsampled once more and
+re-denoised **window by window** (`plan_epilogue_windows`): one window per last-round temporal tile
+(the whole canvas without rounds), run sequentially, each non-first window starting on the last carry
+plane before its seam with its lead-in pinned to the previous window's finished output, exactly as in
+the temporal rounds. Per window: the carry planes after its resume point, the opening plane (first
+window), user images on the final grid, an IC-LoRA reference built from the pre-upsample H/2 latent
+cropped to the window, and stage 1's audio windowed and frozen. Each window runs the stage-2 sigma
+table with the distilled transformer + detailing LoRA (0.5) in two phases (`epilogue_sigma_phases`):
+one ancestral step on a **2×2** spatial grid, then the same conditionings re-applied to that output
+(no new noise) and the remaining steps on a **4×4** grid (a one-step table stays 2×2); spatial
+tiles overlap 10 cells and blend after every step through
+`X0Model(TiledLTXModel(..., normalize_positions=True))`, windows are never blended. Seeds: initial
+noise `seed + 2000 + 100 * window`, ancestral `seed + 30000 + pass` (window i: coarse 2i, fine
+2i + 1). Upstream's own T=0 path builds `TemporalTilePlan([])`, whose seam split refuses an empty
+boundary list; we treat it as one window. The re-encoded keyframes (not the
 pre-epilogue slots) become the decoder keyframes for the final keyframe-aware decode. `--dfr
 --spatial-upscalings 2` refuses `--tile-frames` / `--tile-spatial` (modality tiling collides with
 the epilogue's own tiling) and `--segment` (Prompt Relay), both up front in the CLI before any
