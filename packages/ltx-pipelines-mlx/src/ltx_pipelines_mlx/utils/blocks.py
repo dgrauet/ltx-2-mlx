@@ -42,11 +42,12 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
+import numpy as np
 
 from ltx_core_mlx.duration_head import DurationHead, load_duration_head
 from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
@@ -270,8 +271,9 @@ class ImageConditioner:
     so that the encoder is built, passed to user code, then freed.
     """
 
-    def __init__(self, model_dir: str | Path) -> None:
+    def __init__(self, model_dir: str | Path, dtype: mx.Dtype | None = None) -> None:
         self.model_dir = _resolve_model_dir(model_dir)
+        self.dtype = dtype
         self._encoder: _VideoVAEEncoder | None = None
 
     def load(self) -> _VideoVAEEncoder:
@@ -286,6 +288,8 @@ class ImageConditioner:
             for k, v in weights.items()
         }
         self._encoder.load_weights(list(weights.items()))
+        if self.dtype is not None:
+            self._encoder.set_dtype(self.dtype)
         aggressive_cleanup()
         return self._encoder
 
@@ -312,11 +316,13 @@ class _DiffusionVideoDecoder:
 
     Args:
         decoder: The loaded ``NADiffusionDecoder``.
-        weight_bytes: Size of its weights (charged against the decode budget).
+        weight_bytes: Size of its weights in memory (charged against the decode budget).
         tile_override: ``--diffvae-tile`` value: ``None`` = automatic sizing from the budget,
             ``(0, 0, 0)`` = force one tile (the ``LTX2_DIFFVAE_MAX_TOKENS`` guard applies),
             otherwise explicit tile sizes in frames / pixels with the recommended overlaps.
         verbose: Print the tile schedule and the measured peak Metal memory to stderr.
+        itemsize: Bytes per element of the decoder's run dtype (2 = bf16, 4 = fp32); the activation
+            estimate is calibrated in bf16 and scaled by this.
     """
 
     def __init__(
@@ -326,9 +332,11 @@ class _DiffusionVideoDecoder:
         weight_bytes: int,
         tile_override: tuple[int, int, int] | None = None,
         verbose: bool = False,
+        itemsize: int = 2,
     ) -> None:
         self._decoder = decoder
         self.weight_bytes = weight_bytes
+        self.itemsize = itemsize
         self.tile_override = tile_override
         self.verbose = verbose
 
@@ -383,6 +391,7 @@ class _DiffusionVideoDecoder:
                 budget_bytes=diffusion_decode_budget_bytes(),
                 weight_bytes=self.weight_bytes,
                 keyframe_planes=keyframe_planes,
+                itemsize=self.itemsize,
             )
         if self.tile_override == (0, 0, 0):
             tokens = self._stage5_tokens_for_config(self._decoder.config, latent_shape, keyframe_planes)
@@ -450,12 +459,19 @@ class VideoDecoder:
             (``None`` = automatic sizing from the decode budget).
     """
 
-    def __init__(self, model_dir: str | Path, verbose: bool = True, video_decoder: str = "conv") -> None:
+    def __init__(
+        self,
+        model_dir: str | Path,
+        verbose: bool = True,
+        video_decoder: str = "conv",
+        dtype: mx.Dtype = mx.bfloat16,
+    ) -> None:
         if video_decoder not in VIDEO_DECODER_CHOICES:
             raise ValueError(f"video_decoder must be one of {VIDEO_DECODER_CHOICES}, got {video_decoder!r}")
         self.model_dir = _resolve_model_dir(model_dir)
         self.verbose = verbose
         self.video_decoder = video_decoder
+        self.dtype = dtype
         self.diffvae_tile: tuple[int, int, int] | None = None
         self._decoder: _VideoVAEDecoder | _DiffusionVideoDecoder | None = None
 
@@ -467,9 +483,15 @@ class VideoDecoder:
             if not path.exists():
                 raise FileNotFoundError(f"{path} — the diffusion video decoder ships with LTX 2.5 packs only")
             decoder = load_diffusion_decoder(path)
-            decoder.set_dtype(mx.bfloat16)
+            decoder.set_dtype(self.dtype)
+            itemsize = self.dtype.size
+            # The pack stores the decoder in bf16; an fp32 run (HDR) holds twice the file size.
             self._decoder = _DiffusionVideoDecoder(
-                decoder, weight_bytes=path.stat().st_size, tile_override=self.diffvae_tile, verbose=self.verbose
+                decoder,
+                weight_bytes=path.stat().st_size * itemsize // 2,
+                tile_override=self.diffvae_tile,
+                verbose=self.verbose,
+                itemsize=itemsize,
             )
             aggressive_cleanup()
             return self._decoder
@@ -533,6 +555,33 @@ class VideoDecoder:
                 flush=True,
             )
         return output_path
+
+    def iter_frames(
+        self,
+        video_latent: mx.array,
+        *,
+        seed: int,
+        keyframes: DecodeKeyframes | None = None,
+    ) -> Iterator[np.ndarray]:
+        """Yield decoded chunks as ``(F, H, W, 3)`` float32 arrays in ``[0, 1]`` (diffusion decoder only).
+
+        Raises:
+            ValueError: the conv decoder is selected (no chunk iterator).
+        """
+        if self.video_decoder != "diffusion":
+            raise ValueError("iter_frames requires video_decoder='diffusion'")
+        decoder = self.load()
+        planes = keyframes.num_planes if keyframes is not None else 0
+        tiling = decoder.resolve_tiling(tuple(video_latent.shape), keyframe_planes=planes)
+        with decode_cache_limit():
+            for chunk in decoder._decoder.tiled_decode(video_latent, tiling, seed=seed, keyframes=keyframes):
+                pixels = mx.clip((chunk.astype(mx.float32) + 1.0) / 2.0, 0.0, 1.0)
+                pixels = mx.transpose(pixels[0], (1, 2, 3, 0))
+                mx.eval(pixels)
+                frames = np.array(pixels)
+                del pixels, chunk
+                aggressive_cleanup()
+                yield frames
 
     def decode_single_frame(self, latent: mx.array, *, seed: int = 0) -> mx.array:
         """Decode a single-frame latent as its own one-frame clip (upstream ``iter_decoded_single_frames``).

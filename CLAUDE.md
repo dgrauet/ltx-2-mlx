@@ -382,7 +382,7 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 | `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. `-f/--frames` defaults to auto-predicted duration on 2.5 packs (via `DurationHead`) and is **required** on 2.3 packs (immediate `ValueError` before any Gemma load if omitted). `--auto-duration MIN:MAX` overrides the predictor's clamp range on 2.5 packs. `--no-audio` skips audio decode + mux (mp4 with no audio track; video unchanged, audio latents still generated jointly). `--num-generated-keyframes N` (2.5 packs) adds N generated keyframe slots to stage 1 for fast motion. `--dfr` (2.5 packs) adds `--temporal-upscalings {0,1,2}` for post-hoc temporal x2 refine rounds (default 0) and `--spatial-upscalings {1,2}` for a full-res spatial detailing epilogue (default 1). |
 | `keyframe` | Keyframe interpolation | Stable | Two-stage interpolation between start/end frames |
 | `ic-lora` | IC-LoRA | Stable | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
-| `hdr-ic-lora` | HDR IC-LoRA | Stable | Two-stage HDR generation via IC-LoRA + LogC3 inverse (saves SDR mp4 + linear-HDR `.npz`) |
+| `hdr-ic-lora` | HDR IC-LoRA | Experimental | Single-stage ACEScct SDR-to-HDR IC-LoRA (LTX-2.5 packs only): HLG BT.2020 10-bit mp4 + ACEScg EXR frames. Takes `--input`, `--hdr-lora`, `--text-embeddings` (no prompt) |
 | `a2v` | Audio-to-video | Beta | Two-stage audio-conditioned generation (Euler + CFG). Sync quality depends on prompt-audio alignment. |
 | `retake` | Retake | Beta | Regenerate a time segment of an existing video (dev model + CFG) |
 | `extend` | Extend | Beta | Add frames before or after an existing video (dev model + CFG) |
@@ -392,7 +392,7 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 | `train` | Training | Stable | Train a LoRA or full model from YAML config (requires ltx-trainer-mlx) |
 | `preprocess` | Data preprocessing | Stable | Encode raw videos into latents + conditions for training |
 
-All pipelines except one-stage T2V/I2V use the dev model with CFG guidance. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet`. CFG modes (`generate --one-stage/--two-stage/--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend`) take `--negative-prompt TEXT` (default: upstream `DEFAULT_NEGATIVE_PROMPT`; `""` is encoded verbatim; always one global prompt, even with `--segment`); `--distilled` / `--dfr` reject it (no CFG), and the distilled-sampler IC-LoRA family (`ic-lora`, `hdr-ic-lora`, `lipdub`) does not expose it. Every denoising stage prints an `[estimate]` work line (steps × passes × tokens = forwards) on stderr before step 1 and a time projection after the first computed step, refined once after the second (`utils/estimate.py`; retake/extend note that cost follows total clip length). Tier semantics + promotion criteria live in [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md).
+All pipelines except one-stage T2V/I2V use the dev model with CFG guidance. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet` (`hdr-ic-lora` has its own set: no `--prompt`). CFG modes (`generate --one-stage/--two-stage/--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend`) take `--negative-prompt TEXT` (default: upstream `DEFAULT_NEGATIVE_PROMPT`; `""` is encoded verbatim; always one global prompt, even with `--segment`); `--distilled` / `--dfr` reject it (no CFG), and the distilled-sampler IC-LoRA family (`ic-lora`, `hdr-ic-lora`, `lipdub`) does not expose it. Every denoising stage prints an `[estimate]` work line (steps × passes × tokens = forwards) on stderr before step 1 and a time projection after the first computed step, refined once after the second (`utils/estimate.py`; retake/extend note that cost follows total clip length). Tier semantics + promotion criteria live in [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md).
 
 ### Low-RAM Example
 
@@ -467,21 +467,21 @@ Alternatives via Union Control LoRA: depth maps (need external depth model like 
 ### HDR IC-LoRA Example
 
 ```bash
-# V2V HDR — upgrade an existing SDR video to linear HDR
+# SDR mp4 -> HLG master + ACEScg EXR frames (LTX-2.5 pack required; LoRA repo is gated)
+huggingface-cli download Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR --local-dir hdr-lora
 ltx-2-mlx hdr-ic-lora \
-  --prompt "cinematic golden hour" \
-  --lora Lightricks/LTX-2.3-22b-IC-LoRA-HDR 1.0 \
-  --video-conditioning source_sdr.mp4 1.0 \
+  --model dgrauet/ltx-2.5-mlx-q8 \
+  --input source_sdr.mp4 \
+  --hdr-lora hdr-lora/ltx-2.5-22b-ic-lora-sdr-to-hdr-1.0.safetensors \
+  --text-embeddings hdr-lora/ltx-2.5-22b-ic-lora-sdr-to-hdr-scene-emb.safetensors \
   --low-ram -o out.mp4
 
-# T2V HDR — pure text-to-video with HDR output (no conditioning)
-ltx-2-mlx hdr-ic-lora \
-  --prompt "a sunset over the ocean, vivid HDR" \
-  --lora Lightricks/LTX-2.3-22b-IC-LoRA-HDR 1.0 \
-  --low-ram -o out.mp4
+# EXR-frame input (needs --frame-rate), ACEScct EXR sidecar
+ltx-2-mlx hdr-ic-lora --input frames_acescg/ --input-colorspace acescg --frame-rate 24 \
+  --exr-colorspace acescct --hdr-lora ... --text-embeddings ... --low-ram -o out.mp4
 ```
 
-Outputs both `out.mp4` (SDR preview, tonemapped) and `out.hdr.npz` (float32 `(F, H, W, 3)` linear HDR tensor for EXR/TIFF conversion). Auto-detects the LoRA's HDR transform (`logc3`) and `reference_downscale_factor` from safetensors metadata. Flags identical to `ic-lora`, with `--video-conditioning` made optional (matches upstream's empty-list path → pure T2V HDR mode).
+Flags: `--input PATH` (MP4/MOV, or a directory of `*.exr` frames), `--output-path/-o`, `--hdr-lora PATH`, `--text-embeddings PATH` (all required), `--input-colorspace {srgb_gamma,srgb,acescg,acescct}` (default `srgb_gamma`; MP4/MOV take `srgb_gamma`/`srgb`, EXR folders take `srgb`/`acescg`/`acescct`), `--exr-colorspace {srgb_linear,acescg,acescct}` (default `acescg`), `--frame-rate` (EXR folders only, forbidden for MP4/MOV), `--seed`, `--high-quality` (2x frames internally, ~2x slower), `--no-keyframes`, `--keyframe-strength` (0.95), plus `--model` (default `dgrauet/ltx-2.5-mlx-q8`), `--low-ram`, `--quiet`. Output length matches the source (frame count must be 8k+1). Removed vs the old LogC3 command: `--prompt`, `-H/-W/-f`, `--lora`, `--video-conditioning`, `--image`, `--stage1-steps`, `--stage2-steps`, `--skip-stage-2`, `--conditioning-strength`, `--tile-*`.
 
 ### Two-Stage Example
 
@@ -922,51 +922,37 @@ Validation: with conservative config (``--tile-frames 2 --tile-overlap 4`` on 48
 
 ## HDR IC-LoRA Pipeline
 
-Two-stage IC-LoRA pipeline that produces **linear HDR video output** via LogC3 inverse compression. Subclasses `ICLoraPipeline` so it inherits low-RAM streaming, modality tiling, bind-time LoRA fusion, and the standard two-stage decode flow. Mirrors upstream `ltx_pipelines.hdr_ic_lora.HDRICLoraPipeline` 1:1 for clean PR diff tracking.
+Port of upstream v1.4 `ltx_pipelines.hdr_ic_lora.HDRICLoraPipeline`: a **single-stage ACEScct SDR-to-HDR** IC-LoRA on **LTX-2.5 packs only** (2.3 packs are refused at construction; there is no 2.3 HDR LoRA path any more). Subclasses `BasePipeline`; no Gemma, no audio, no upsampler, no prompt.
 
-### Mechanism
+**Breaking (release notes):** `hdr-ic-lora` is now upstream's single-stage ACEScct SDR-to-HDR pipeline on LTX-2.5 packs; LogC3 / LTX-2.3 HDR and the `.hdr.npz` output are gone.
 
-The HDR LoRA is trained so the VAE decoder output (mapped to `[0, 1]`) holds a LogC3-compressed signal. `LogC3.decompress` recovers the linear HDR signal in `[0, ∞)`. Conditioning input is treated as standard SDR (clamp `[0, 1]` then `to_vae_range`).
+### Install and early refusals
 
-| Mode | Support | Notes |
-|---|---|---|
-| **V2V** (SDR ref → HDR) | ✅ primary | `--video-conditioning source.mp4 1.0` |
-| **T2V** (pure text → HDR) | ✅ | `--video-conditioning` omitted (matches upstream's empty-list path); LoRA runs out-of-distribution but functional |
-| **I2V + V2V** | ✅ | Add `--image photo.jpg` on top |
-| **One-stage HDR** | ❌ | Upstream is two-stage by design (stage 1 half-res + stage 2 upscale) — not provided |
-| `high_quality_hdr` mode | ⏳ deferred | Upstream's 2× frame oversample + drop-alternate; not yet ported |
-| EXR sequence output | ⏳ deferred | We save `.hdr.npz` (`(F, H, W, 3)` fp32); user tooling converts to EXR/TIFF |
+The EXR writer needs the optional `hdr` extra: `pip install 'ltx-pipelines-mlx[hdr]'` (or `uv sync --extra hdr` in this repo); the HLG master needs an ffmpeg with the `libx265` encoder (Homebrew's has it). `HDRICLoraPipeline.__init__` checks, in order and **before the pack snapshot download**: OpenEXR importable + `libx265` listed by `ffmpeg -encoders` (`require_hdr_export_tools`), the `--text-embeddings` file loads, the LoRA resolves (a `.safetensors` path must exist locally, no HF call), and the pack is 2.5 (local dir checked in place; for a repo id only `embedded_config.json` is fetched). `generate` then refuses odd source width/height (4:2:0 master; upstream fails later in the encoder) and a short read (loaded frames != probed count; the count is decoded with `-count_frames` when the container has no `nb_frames`) before the DiT load.
 
-### Auto-detection
+### Flow
 
-`HdrLoraConfig` is read from the LoRA's safetensors metadata via `read_hdr_lora_config()`:
-
-| Metadata key | Effect |
-|---|---|
-| `hdr_transform` | Names the transform (only `"logc3"` supported); presence triggers HDR mode |
-| `use_hdr_transform` | Legacy boolean fallback |
-| `reference_downscale_factor` | Spatial downscale for V2V conditioning (matches LoRA training recipe) |
-
-`HDRICLoraPipeline.__init__` raises `ValueError` if no HDR LoRA is detected. Pass `hdr_lora_config=HdrLoraConfig(...)` explicitly to override.
+1. **Inputs**: `--hdr-lora` (the gated `Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR`; accept its licence once, a missing acceptance raises `PermissionError` before any model load) and `--text-embeddings` (the scene-emb `.safetensors` shipped in the same repo, key `video_context`). Pass the LoRA as a local file: the repo holds two `.safetensors` so a bare repo id is ambiguous.
+2. **Source**: MP4/MOV (`srgb_gamma` = display sRGB, EOTF applied; `srgb` = linear Rec.709) or an EXR-frame folder (`srgb` / `acescg` / `acescct`, `--frame-rate` mandatory). Converted to ACEScct by the input transform (`utils/hdr_media.py`). Frame count must be 8k+1; the output length matches the source.
+3. **Conditioning order**: the VAE-encoded SDR clip at full resolution is the IC-LoRA reference (downscale 1, strength 1.0 by default). With seam keyframes on (default, `--keyframe-strength` 0.95) every DFR `resolve_canvas` x8 border gets a generated HDR slot plus a 1-frame SDR guide; `--no-keyframes` gives plain IC-LoRA.
+4. **Denoise**: one stage, the 8-step distilled schedule, distilled transformer with the LoRA at fixed strength 1.0 (fused, or a `BlockLoraSource` under `--low-ram`). `--high-quality` duplicates each conditioning frame, generates 2N-1 frames and keeps every other one.
+5. **Precision**: both VAE ends (image encoder, diffusion video decoder) run in **fp32**, the DiT in bf16 (upstream `vae_dtype = float32`); the denoised latent is cast to fp32 explicitly before the decode.
+6. **Decode**: the keyframe-aware **diffusion** decoder streams chunks (`iter_frames`); the DiT is freed first.
 
 ### Outputs
 
-- `<output>` (e.g. `out.mp4`): SDR preview, tonemapped via standard streaming VAE decode (clips highlights at 1.0).
-- `<output>.hdr.npz`: float32 `(F, H, W, 3)` linear HDR tensor. User tooling converts to EXR / TIFF / OpenEXR sequences.
+- `<output>.mp4`: BT.2020 / HLG 10-bit HEVC master (always, whatever `--exr-colorspace`).
+- `<stem>_<exr-colorspace>_exr/frame_*.exr`: EXR sidecar beside it (scene-linear ACEScg by default, `srgb_linear`, or `acescct` log codes).
 
-### Validated
+### Status
 
-End-to-end run on M2 Pro 32 GB, dev model + HDR LoRA fused, q8:
-- 480×704×9 short test: 83 s — `pixels > 1.0`: 0.65%, range `[-0.017, 7.85]`.
-- 704×448×89 cosmic with `--low-ram`: 6:43 — 12.84% highlights, range `[-0.017, 55.08]`.
-- 1280×704×97 Lisbon T2V with `--low-ram`: 15:28 — 14.74% highlights, range `[-0.017, 55.08]`.
+Experimental until validated on real weights (see docs/PIPELINE_MATURITY.md). Unit tests run without weights (`tests/test_hdr_ic_lora.py`, `tests/test_hdr_media.py`).
 
 ### Key Files
 
-- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/hdr_ic_lora.py` — `HDRICLoraPipeline` subclass with `_decode_to_hdr` + `generate_and_save` saving HDR npz.
-- `packages/ltx-core-mlx/src/ltx_core_mlx/hdr.py` — `LogC3` compress/decompress + `apply_hdr_decode_postprocess`.
-- `packages/ltx-core-mlx/src/ltx_core_mlx/loader/hdr_metadata.py` — `HdrLoraConfig` + `read_hdr_lora_config`.
-- `tests/test_hdr.py`, `tests/test_hdr_metadata.py` — 16 unit tests.
+- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/hdr_ic_lora.py` — `HDRICLoraPipeline`, `dfr_seam_roles`, `load_video_context`.
+- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/utils/hdr_media.py` — input/EXR/HLG media IO (`VideoInput`, `EXRVideoInput`, `EXRColorSpace`, `encode_hdr_outputs`).
+- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/cli.py` — `hdr-ic-lora` parser, `_resolve_hdr_input` (upstream messages verbatim), `_cmd_hdr_ic_lora`.
 
 ---
 
@@ -1275,7 +1261,8 @@ dtype on entry (like the conv decoder) and the same decode peaks at ~12 GB (5.8 
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
 | `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB) |
 | `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames). `--low-ram` wired (mirrors upstream `offload_mode`): 49-frame retake that OOM'd now peaks at 13.8 GB |
-| `ic-lora`, `hdr-ic-lora`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
+| `ic-lora`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
+| `hdr-ic-lora` | supported, **2.5 only** (upstream v1.4 SDR-to-HDR IC-LoRA, ACEScct); Experimental until validated on real weights |
 | `enhance` / `--enhance-prompt` | raises `NotImplementedError` (`_guard_enhance_not_gemma4`) — Gemma 3 only |
 | `--enable-teacache` | raises `ValueError` — 2.3 polynomial isn't calibrated for 2.5 |
 | Modality tiling, Prompt Relay | validated on 2.3 only |
@@ -1283,7 +1270,7 @@ dtype on entry (like the conv decoder) and the same decode peaks at ~12 GB (5.8 
 | DFR (`DFRPipeline`) | complete — shipped as `generate --dfr`: base path (spatial detailing with the official 2.5 detailing IC-LoRA), keyframe-aware decode on `--video-decoder diffusion`, temporal rounds (`--temporal-upscalings {1,2}`), and the spatial epilogue (`--spatial-upscalings {1,2}`) |
 | Diffusion video decoder | opt-in `--video-decoder diffusion` (experimental; tiled automatically above the decode budget, `--diffvae-tile` override); conv remains default |
 
-The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once
+The IC-LoRA family (`ic-lora` / `lipdub`) lands once
 Lightricks publishes the official 2.5 task IC-LoRAs.
 
 ### Conv VAE decode budget and auto tiling

@@ -294,3 +294,16 @@ def test_estimate_adds_plane_tokens_and_defaults_are_unchanged():
     budget = base + weight + RESERVE_BYTES + _stage4_feature_bytes(geometry, fhw) + 1
     assert auto_tile_config(geometry, fhw, budget_bytes=budget, weight_bytes=weight) is None
     assert auto_tile_config(geometry, fhw, budget_bytes=budget, weight_bytes=weight, keyframe_planes=2) is not None
+
+
+def test_fp32_decoder_doubles_the_estimate_and_tiles_where_bf16_does_not():
+    # HDR runs the diffusion decoder in fp32: activations, stage-4 feature and accumulator double.
+    assert estimate_untiled_bytes(TINY_G, (5, 3, 3), itemsize=4) == 2 * _UNTILED
+    assert _stage4_feature_bytes(TINY_G, (5, 3, 3), 4) == 2 * _S4_BYTES
+    # fp32 usable = budget - weights - reserve - 2 * stage-4 = 2 * _UNTILED - 1: one byte short of the
+    # untiled fp32 decode, which must tile, while bf16 (half the activations) stays untiled.
+    budget = _budget(2 * _UNTILED - 1 + _S4_BYTES)
+    assert auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=budget, weight_bytes=0) is None
+    assert auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=budget, weight_bytes=0, itemsize=2) is None
+    assert auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=budget, weight_bytes=0, itemsize=4) is not None
+    assert auto_tile_config(TINY_G, (5, 3, 3), budget_bytes=budget + 1, weight_bytes=0, itemsize=4) is None
