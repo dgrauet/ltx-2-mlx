@@ -69,6 +69,9 @@ ANCESTRAL_S_NOISE = 1.0
 # pull mx.random.normal at the same shape/dtype from a freshly seeded
 # generator, so reusing the raw seed would correlate the two draws.
 ANCESTRAL_NOISE_SEED_OFFSET = 10000
+# Stage 2 draws from its own offset so it never reuses stage 1's noise
+# (upstream ``ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET``).
+ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET = 20000
 
 
 @dataclass
@@ -114,9 +117,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
 
     On an LTX-2.5 pack (detected once at construction via
     :func:`~ltx_pipelines_mlx.utils.generation.is_ltx25_pack`) both stages run
-    on the ``LTX_2_5_*`` sigma tables, stage 1 switches to the ancestral (SDE)
-    Euler loop (stage 2 stays deterministic, as upstream), and stage 2 resolves
-    the ``spatial_upscaler_x2_v1_0`` upscaler.
+    on the ``LTX_2_5_*`` sigma tables, both stages switch to the ancestral (SDE)
+    Euler loop (as upstream v1.4.0, each on its own noise seed), and stage 2
+    resolves the ``spatial_upscaler_x2_v1_0`` upscaler.
 
     Args:
         model_dir: Path to model weights or HuggingFace repo ID. Must
@@ -183,22 +186,20 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         on_step,
         seed: int,
         ancestral: bool,
+        noise_seed_offset: int,
     ):
         """Dispatch one stage onto the deterministic or ancestral (SDE) loop.
 
         LTX-2.5 distilled checkpoints are trained for the ancestral (SDE) Euler
         sampler; 2.3 checkpoints keep the deterministic loop they were shipped
         with. Upstream makes the same choice through ``DiffusionStage``'s
-        ``stepper`` / ``loop`` overrides, and scopes them to stage 1 only
-        (``_stage_1_sampler_kwargs``) — quoting upstream ``distilled.py``:
+        ``loop`` override (``_sampler_kwargs(seed, noise_seed_offset)``) and,
+        since v1.4.0, applies it to both stages, each with its own noise-seed
+        offset (``ANCESTRAL_NOISE_SEED_OFFSET`` / ``ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET``)
+        so no two passes inject the same noise.
 
-            Stage 1 samples with the ancestral (SDE) Euler sampler or the
-            deterministic one according to ``self.use_ancestral_sampler``.
-            Stage 2 is always deterministic -- its 3-step refinement schedule
-            is too short to remove freshly injected noise.
-
-        Hence ``ancestral`` is passed per stage rather than read off
-        ``self._is_25``: only stage 1 of a 2.5 pack sets it.
+        ``ancestral`` and ``noise_seed_offset`` are passed per call so the DFR
+        stages can reuse this dispatcher with their own offsets.
 
         The two loops differ only in the model keyword (``model=`` vs upstream's
         ``transformer=``) and in the ancestral extras (``stepper`` /
@@ -226,7 +227,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             audio_text_embeds=audio_text_embeds,
             sigmas=sigmas,
             stepper=EulerAncestralDiffusionStep(eta=ANCESTRAL_ETA, s_noise=ANCESTRAL_S_NOISE),
-            noise_seed=seed + ANCESTRAL_NOISE_SEED_OFFSET,
+            noise_seed=seed + noise_seed_offset,
             video_cross_attention_mask=video_cross_attention_mask,
             on_step=on_step,
         )
@@ -482,6 +483,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
             seed=seed,
             ancestral=self._is_25,
+            noise_seed_offset=ANCESTRAL_NOISE_SEED_OFFSET,
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -648,8 +650,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
             on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
             seed=seed,
-            # Deterministic on every pack, 2.5 included (see _run_denoise_loop).
-            ancestral=False,
+            ancestral=self._is_25,
+            noise_seed_offset=ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET,
         )
         if self.low_memory:
             aggressive_cleanup()
