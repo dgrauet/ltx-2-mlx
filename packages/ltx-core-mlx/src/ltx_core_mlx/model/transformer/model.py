@@ -685,7 +685,7 @@ class LTXModel(nn.Module):
     def __call__(
         self,
         video_latent: mx.array,
-        audio_latent: mx.array,
+        audio_latent: mx.array | None,
         timestep: mx.array,
         video_text_embeds: mx.array | None = None,
         audio_text_embeds: mx.array | None = None,
@@ -758,7 +758,8 @@ class LTXModel(nn.Module):
         # Cast inputs to bfloat16 to match weight dtype and avoid mixed-precision
         # accumulation errors over 48 transformer blocks
         video_latent = video_latent.astype(mx.bfloat16)
-        audio_latent = audio_latent.astype(mx.bfloat16)
+        if audio_latent is not None:
+            audio_latent = audio_latent.astype(mx.bfloat16)
         if video_text_embeds is not None:
             video_text_embeds = video_text_embeds.astype(mx.bfloat16)
         if audio_text_embeds is not None:
@@ -769,7 +770,7 @@ class LTXModel(nn.Module):
         video_hidden = apply_keyframes_absolute_embedding(
             video_hidden, video_keyframes_mask, getattr(self, "keyframes_abs_pos_embedding", None)
         )
-        audio_hidden = self.audio_patchify_proj(audio_latent)
+        audio_hidden = self.audio_patchify_proj(audio_latent) if audio_latent is not None else None
 
         # --- Timestep embeddings ---
         timestep = timestep.astype(mx.bfloat16)
@@ -791,7 +792,9 @@ class LTXModel(nn.Module):
         if video_sigma is not None:
             video_t_emb, video_t_emb_av_gate = self._embed_modality_sigma(video_sigma, av_ca_factor)
         audio_t_emb, audio_t_emb_av_gate = t_emb, t_emb_av_gate
-        if audio_sigma is not None:
+        if audio_latent is None:
+            audio_t_emb, audio_t_emb_av_gate = None, None
+        elif audio_sigma is not None:
             audio_t_emb, audio_t_emb_av_gate = self._embed_modality_sigma(audio_sigma, av_ca_factor)
 
         # Video AdaLN: per-token or scalar
@@ -801,29 +804,38 @@ class LTXModel(nn.Module):
         if video_timesteps is not None:
             vt_emb = self._embed_timestep_per_token(video_timesteps)
             video_adaln_emb, video_embedded_ts = self._adaln_per_token(self.adaln_single, vt_emb)
-            av_ca_video_emb, _ = self._adaln_per_token(self.av_ca_video_scale_shift_adaln_single, vt_emb)
+            av_ca_video_emb = None
+            if audio_latent is not None:
+                av_ca_video_emb, _ = self._adaln_per_token(self.av_ca_video_scale_shift_adaln_single, vt_emb)
         else:
             video_adaln_emb, video_embedded_ts = self.adaln_single(t_emb)
-            av_ca_video_emb, _ = self.av_ca_video_scale_shift_adaln_single(t_emb)
+            av_ca_video_emb = None
+            if audio_latent is not None:
+                av_ca_video_emb, _ = self.av_ca_video_scale_shift_adaln_single(t_emb)
         # AV cross-attention gate always uses scalar timestep at av_ca scale,
         # even in per-token mode. Reference: gate_adaln receives the cross
         # modality's sigma * av_ca_factor (scalar) -- here the audio sigma.
-        av_ca_a2v_gate_emb, _ = self.av_ca_a2v_gate_adaln_single(audio_t_emb_av_gate)
+        av_ca_a2v_gate_emb = None
+        if audio_latent is not None:
+            av_ca_a2v_gate_emb, _ = self.av_ca_a2v_gate_adaln_single(audio_t_emb_av_gate)
         # Prompt AdaLN: always scalar (from the video sigma)
         video_prompt_emb, _ = self.prompt_adaln_single(video_t_emb)
 
-        # Audio AdaLN: per-token or scalar
-        if audio_timesteps is not None:
-            at_emb = self._embed_timestep_per_token(audio_timesteps)
-            audio_adaln_emb, audio_embedded_ts = self._adaln_per_token(self.audio_adaln_single, at_emb)
-            av_ca_audio_emb, _ = self._adaln_per_token(self.av_ca_audio_scale_shift_adaln_single, at_emb)
-        else:
-            audio_adaln_emb, audio_embedded_ts = self.audio_adaln_single(t_emb)
-            av_ca_audio_emb, _ = self.av_ca_audio_scale_shift_adaln_single(t_emb)
-        # AV cross-attention gate always uses scalar timestep at av_ca scale (video sigma)
-        av_ca_v2a_gate_emb, _ = self.av_ca_v2a_gate_adaln_single(video_t_emb_av_gate)
-        # Audio prompt AdaLN: always scalar (from the audio sigma)
-        audio_prompt_emb, _ = self.audio_prompt_adaln_single(audio_t_emb)
+        # Audio AdaLN: per-token or scalar (skipped entirely for a video-only pass)
+        audio_adaln_emb = audio_embedded_ts = av_ca_audio_emb = None
+        av_ca_v2a_gate_emb = audio_prompt_emb = None
+        if audio_latent is not None:
+            if audio_timesteps is not None:
+                at_emb = self._embed_timestep_per_token(audio_timesteps)
+                audio_adaln_emb, audio_embedded_ts = self._adaln_per_token(self.audio_adaln_single, at_emb)
+                av_ca_audio_emb, _ = self._adaln_per_token(self.av_ca_audio_scale_shift_adaln_single, at_emb)
+            else:
+                audio_adaln_emb, audio_embedded_ts = self.audio_adaln_single(t_emb)
+                av_ca_audio_emb, _ = self.av_ca_audio_scale_shift_adaln_single(t_emb)
+            # AV cross-attention gate always uses scalar timestep at av_ca scale (video sigma)
+            av_ca_v2a_gate_emb, _ = self.av_ca_v2a_gate_adaln_single(video_t_emb_av_gate)
+            # Audio prompt AdaLN: always scalar (from the audio sigma)
+            audio_prompt_emb, _ = self.audio_prompt_adaln_single(audio_t_emb)
 
         # RoPE frequencies (per-head, using reference log-spaced grid)
         video_rope_freqs = None
@@ -834,7 +846,7 @@ class LTXModel(nn.Module):
                 self.config.video_num_heads,
                 self.config.video_head_dim,
             )
-        if audio_positions is not None:
+        if audio_latent is not None and audio_positions is not None:
             audio_rope_freqs = self._compute_rope_freqs(
                 audio_positions,
                 self.config.audio_num_heads,
@@ -851,14 +863,14 @@ class LTXModel(nn.Module):
             self.config.positional_embedding_max_pos[0],
             self.config.audio_positional_embedding_max_pos[0],
         )
-        if video_positions is not None:
+        if audio_latent is not None and video_positions is not None:
             video_cross_rope_freqs = self._compute_rope_freqs(
                 video_positions[:, :, 0:1],  # temporal dimension only
                 self.config.av_cross_num_heads,
                 self.config.av_cross_head_dim,
                 max_pos_override=[cross_pe_max_pos],
             )
-        if audio_positions is not None:
+        if audio_latent is not None and audio_positions is not None:
             audio_cross_rope_freqs = self._compute_rope_freqs(
                 audio_positions[:, :, 0:1],  # temporal dimension only
                 self.config.av_cross_num_heads,
@@ -878,6 +890,9 @@ class LTXModel(nn.Module):
                 block = block_provider(block_idx) if block_provider is not None else self.transformer_blocks[block_idx]
 
                 if self.gradient_checkpointing:
+                    if audio_latent is None:
+                        raise NotImplementedError("video-only training is not supported")
+
                     # Recompute this block in the backward pass to cap activation
                     # memory. The block's trainable params MUST be passed as an
                     # explicit mx.checkpoint input (and rebound via update inside),
@@ -944,20 +959,22 @@ class LTXModel(nn.Module):
                     # Streaming: force MLX graph materialization between
                     # blocks so the previous block's weights become
                     # evictable.
-                    _mx_eval(video_hidden, audio_hidden)
+                    _mx_eval(video_hidden, *([] if audio_hidden is None else [audio_hidden]))
                 elif _DIT_EVAL_EVERY > 0 and (block_idx + 1) % _DIT_EVAL_EVERY == 0:
                     # Watchdog guard: flush accumulated lazy graph every N blocks
                     # so no single Metal command buffer exceeds the ~10 s deadline.
-                    _mx_eval(video_hidden, audio_hidden)
+                    _mx_eval(video_hidden, *([] if audio_hidden is None else [audio_hidden]))
 
         if tap is not None:
-            tap(video_hidden - block_input_v, audio_hidden - block_input_a)
+            tap(video_hidden - block_input_v, None if audio_hidden is None else audio_hidden - block_input_a)
 
         # Output: AdaLN with scale_shift_table + embedded_timestep + proj
         video_out = self._output_block(video_hidden, video_embedded_ts, self.scale_shift_table, self.proj_out)
-        audio_out = self._output_block(
-            audio_hidden, audio_embedded_ts, self.audio_scale_shift_table, self.audio_proj_out
-        )
+        audio_out = None
+        if audio_hidden is not None:
+            audio_out = self._output_block(
+                audio_hidden, audio_embedded_ts, self.audio_scale_shift_table, self.audio_proj_out
+            )
 
         return video_out, audio_out
 
@@ -1042,7 +1059,7 @@ class X0Model(nn.Module):
     def __call__(
         self,
         video_latent: mx.array,
-        audio_latent: mx.array,
+        audio_latent: mx.array | None,
         sigma: mx.array,
         video_timesteps: mx.array | None = None,
         audio_timesteps: mx.array | None = None,
@@ -1050,7 +1067,7 @@ class X0Model(nn.Module):
         tap: callable | None = None,
         block_stack_override: callable | None = None,
         **kwargs,
-    ) -> tuple[mx.array, mx.array]:
+    ) -> tuple[mx.array, mx.array | None]:
         """Predict x0 from noisy input.
 
         Uses per-token timesteps when available so preserved tokens (timestep=0)
@@ -1090,14 +1107,16 @@ class X0Model(nn.Module):
         else:
             video_sigma = sigma[:, None, None].astype(mx.float32)
 
+        video_x0 = (video_latent.astype(mx.float32) - video_sigma * video_v.astype(mx.float32)).astype(
+            video_latent.dtype
+        )
+        if audio_v is None:
+            return video_x0, None
+
         if audio_timesteps is not None:
             audio_sigma = audio_timesteps[:, :, None].astype(mx.float32)
         else:
             audio_sigma = sigma[:, None, None].astype(mx.float32)
-
-        video_x0 = (video_latent.astype(mx.float32) - video_sigma * video_v.astype(mx.float32)).astype(
-            video_latent.dtype
-        )
         audio_x0 = (audio_latent.astype(mx.float32) - audio_sigma * audio_v.astype(mx.float32)).astype(
             audio_latent.dtype
         )

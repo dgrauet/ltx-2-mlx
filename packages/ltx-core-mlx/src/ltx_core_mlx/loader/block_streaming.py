@@ -358,7 +358,12 @@ class StreamingLTXModel(nn.Module):
             # perturbations are active. This loses the compile speedup
             # but the eager block's per-step latency is dominated by
             # attention compute, so the regression is small (~5-10%).
-            use_compiled = kwargs.get("perturbations") is None
+            #
+            # The video-only path (``audio_latent=None``) also runs eagerly:
+            # the compiled shared block cannot trace ``None`` audio inputs
+            # reliably.
+            audio_latent = args[1] if len(args) > 1 else kwargs.get("audio_latent")
+            use_compiled = kwargs.get("perturbations") is None and audio_latent is not None
 
             def provider(idx: int) -> nn.Module:
                 streamer.bind(

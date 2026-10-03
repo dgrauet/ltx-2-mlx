@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import mlx.core as mx
 
+from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig, X0Model
 from ltx_core_mlx.model.transformer.transformer import BasicAVTransformerBlock
+from ltx_core_mlx.utils.positions import compute_video_positions
 
 
 def _block() -> BasicAVTransformerBlock:
@@ -69,3 +71,52 @@ def test_video_only_equals_joint_with_a2v_gated_off():
     )
     solo_v, _ = block(**_NO_AUDIO, **kw)
     assert mx.allclose(joint_v, solo_v, atol=1e-5).item()
+
+
+def _tiny_model() -> LTXModel:
+    mx.random.seed(1)
+    cfg = LTXModelConfig(
+        num_layers=2,
+        video_dim=64,
+        audio_dim=32,
+        video_num_heads=2,
+        video_head_dim=32,
+        audio_num_heads=2,
+        audio_head_dim=16,
+        av_cross_num_heads=2,
+        av_cross_head_dim=16,
+    )
+    model = LTXModel(cfg)
+    mx.eval(model.parameters())
+    return model
+
+
+def test_ltxmodel_video_only_returns_none_audio():
+    model = _tiny_model()
+    F, H, W = 2, 2, 2
+    video = mx.random.normal((1, F * H * W, model.config.video_patch_channels))
+    v, a = model(
+        video_latent=video,
+        audio_latent=None,
+        timestep=mx.array([0.5]),
+        video_text_embeds=mx.random.normal((1, 3, model.config.video_dim)),
+        audio_text_embeds=None,
+        video_positions=compute_video_positions(F, H, W, frame_rate=24.0),
+    )
+    assert a is None and v.shape == video.shape
+
+
+def test_x0model_video_only():
+    model = _tiny_model()
+    x0 = X0Model(model)
+    F, H, W = 2, 2, 2
+    video = mx.random.normal((1, F * H * W, model.config.video_patch_channels))
+    v, a = x0(
+        video_latent=video,
+        audio_latent=None,
+        sigma=mx.array([0.5]),
+        video_text_embeds=mx.random.normal((1, 3, model.config.video_dim)),
+        audio_text_embeds=None,
+        video_positions=compute_video_positions(F, H, W, frame_rate=24.0),
+    )
+    assert a is None and v.shape == video.shape
