@@ -30,6 +30,11 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.7.0",
     "ty>=0.0.0a1",
+    "OpenEXR>=3.3",
+    "colour-science>=0.4.6",
+    # colour-science puts a MagicMock in sys.modules["scipy"] when SciPy is
+    # missing, which breaks transformers' import-time scipy probe.
+    "scipy>=1.10",
 ]
 all = ["ltx-2-mlx[trainer,dev]"]
 
