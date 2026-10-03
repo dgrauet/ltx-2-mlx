@@ -37,7 +37,11 @@ class ImageConditioningInput(NamedTuple):
         frame_idx: Target latent frame index. ``0`` replaces the first
             latent frame (``VideoConditionByLatentIndex``); any other
             value appends a keyframe at that pixel-frame position
-            (``VideoConditionByKeyframeIndex``).
+            (``VideoConditionByKeyframeIndex``). A negative value counts
+            back from the end (``-1`` is the last pixel frame) and is
+            resolved by :func:`resolve_frame_indices` once the frame count
+            is known, which is what makes an end anchor usable with an
+            auto-predicted duration.
         strength: Conditioning strength in ``[0, 1]``. ``1.0`` = fully
             preserved.
         crf: Optional H.264 CRF for input degradation (default 33).
@@ -50,6 +54,41 @@ class ImageConditioningInput(NamedTuple):
     crf: int = DEFAULT_IMAGE_CRF
 
 
+def resolve_frame_indices(images: list[ImageConditioningInput], num_frames: int) -> list[ImageConditioningInput]:
+    """Turn negative ``frame_idx`` values into pixel-frame positions counted from the end.
+
+    ``-1`` becomes ``num_frames - 1`` (the last pixel frame), ``-2`` the one
+    before it, and so on. Non-negative indices pass through unchanged.
+    ``-num_frames`` resolves to ``0``, so it gets the hard first-latent replace
+    (``VideoConditionByLatentIndex``) rather than a soft keyframe.
+
+    Args:
+        images: Conditioning inputs as parsed from ``--image``.
+        num_frames: Concrete pixel-frame count of the clip being generated.
+
+    Returns:
+        The inputs with every ``frame_idx`` in ``[0, num_frames)``.
+
+    Raises:
+        ValueError: If an index lies outside the clip, before its first frame or
+            past its last (upstream ``assert_image_frames_in_clip`` checks the
+            same range).
+    """
+    resolved = []
+    for image in images:
+        frame_idx = num_frames + image.frame_idx if image.frame_idx < 0 else image.frame_idx
+        if frame_idx < 0:
+            raise ValueError(
+                f"--image {image.path}: frame index {image.frame_idx} is before the first of {num_frames} frames"
+            )
+        if frame_idx >= num_frames:
+            raise ValueError(
+                f"--image {image.path}: frame index {image.frame_idx} is past the last of {num_frames} frames"
+            )
+        resolved.append(image._replace(frame_idx=frame_idx))
+    return resolved
+
+
 class ImageAction(argparse.Action):
     """Variadic argparse action accepting ``PATH [FRAME_IDX [STRENGTH [CRF]]]``.
 
@@ -60,6 +99,10 @@ class ImageAction(argparse.Action):
     ``frame_idx=0, strength=1.0, crf=33`` — matches the prior single-arg
     API. The strict upstream form is ``--image PATH FRAME_IDX STRENGTH
     [CRF]`` (3 or 4 args).
+
+    ``FRAME_IDX`` may also be ``last`` (or ``end``), or a negative number
+    counting back from the end: ``--image end.png last 1.0`` anchors the
+    final frame even when ``--auto-duration`` picks the length.
     """
 
     def __call__(  # type: ignore[override]
@@ -83,7 +126,7 @@ class ImageAction(argparse.Action):
             frame_idx, strength, crf = 0, 1.0, DEFAULT_IMAGE_CRF
         else:
             try:
-                frame_idx = int(values[1])
+                frame_idx = -1 if str(values[1]).lower() in ("last", "end") else int(values[1])
                 strength = float(values[2])
                 crf = int(values[3]) if len(values) == 4 else DEFAULT_IMAGE_CRF
             except (ValueError, TypeError) as e:

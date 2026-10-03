@@ -41,6 +41,7 @@ from ltx_core_mlx.utils.positions import (
     compute_video_positions,
 )
 from ltx_pipelines_mlx._base import reject_negative_prompt
+from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 from ltx_pipelines_mlx.utils.helpers import generated_keyframe_conditionings
 
 from .scheduler import (
@@ -102,6 +103,39 @@ class Stage1Result:
     audio_embeds: mx.array
     relay_mask: Callable
     x0_model: X0Model | None
+
+
+def resolve_stage1_frames(
+    num_frames: int,
+    image: str | None,
+    images: Sequence[ImageConditioningInput] | None,
+    generated_keyframes: int | Sequence[int],
+    canvas_for: Callable[[int], tuple[int, list[int]]] | None,
+) -> tuple[int, int | Sequence[int], list[ImageConditioningInput]]:
+    """Resolve the I2V anchors on the requested clip, then let ``canvas_for`` pad it.
+
+    ``last`` and negative ``frame_idx`` values count back from the end of the clip that was
+    asked for. :class:`DFRPipeline`'s ``canvas_for`` pads that clip to whole keyframe segments
+    and the padding is trimmed off after stage 2, so resolving against the padded canvas would
+    put an end anchor on a frame that never reaches the output.
+
+    Args:
+        num_frames: Requested pixel-frame count, with any ``AutoDuration`` already resolved.
+        image: Legacy single-image shorthand, anchored on frame 0 when ``images`` is empty.
+        images: Multi-anchor I2V conditioning inputs.
+        generated_keyframes: Generated keyframe slots, as passed to ``_stage1``.
+        canvas_for: Optional canvas hook (see :meth:`DistilledPipeline._stage1`).
+
+    Returns:
+        Tuple of (stage 1 frame count, generated keyframe slots, resolved image inputs).
+    """
+    resolved_images = list(images) if images else []
+    if image is not None and not resolved_images:
+        resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
+    resolved_images = resolve_frame_indices(resolved_images, num_frames)
+    if canvas_for is not None:
+        num_frames, generated_keyframes = canvas_for(num_frames)
+    return num_frames, generated_keyframes, resolved_images
 
 
 class DistilledPipeline(TI2VidTwoStagesPipeline):
@@ -349,7 +383,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
                 ``(canvas_frames, slot_pixel_indices)``. Used by :class:`DFRPipeline` to pad
                 the clip to whole keyframe segments and place one slot per boundary; the
                 returned canvas length replaces ``num_frames`` for the rest of stage 1 and is
-                what this method returns. ``None`` (every other caller) leaves both untouched.
+                what this method returns. ``--image`` frame indices are resolved against the
+                requested length before the hook runs (:func:`resolve_stage1_frames`). ``None``
+                (every other caller) leaves both untouched.
             video_fps: Transformer RoPE fps for the video-side positions and conditionings
                 (``compute_video_positions``, ``combined_image_conditionings``,
                 ``generated_keyframe_conditionings``). ``None`` (every caller except
@@ -384,8 +420,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         num_frames = self._resolve_num_frames(
             num_frames, video_encoding=video_embeds, audio_encoding=audio_embeds, frame_rate=frame_rate
         )
-        if canvas_for is not None:
-            num_frames, generated_keyframes = canvas_for(num_frames)
+        num_frames, generated_keyframes, resolved_images = resolve_stage1_frames(
+            num_frames, image, images, generated_keyframes, canvas_for
+        )
         if self.low_memory:
             self.prompt_encoder.free()
             aggressive_cleanup()
@@ -414,15 +451,12 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         audio_positions = compute_audio_positions(audio_T)
 
         # I2V conditioning at half resolution. ``images`` is the upstream-iso
-        # multi-anchor list; ``image`` is the legacy single-image shorthand.
+        # multi-anchor list; ``image`` is the legacy single-image shorthand
+        # (both already resolved by ``resolve_stage1_frames``).
         from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
-        from ltx_pipelines_mlx.utils.args import ImageConditioningInput
 
         enc_h_half = H_half * 32
         enc_w_half = W_half * 32
-        resolved_images = list(images) if images else []
-        if image is not None and not resolved_images:
-            resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
         conditionings_1: list = []
         if resolved_images:
             conditionings_1 = combined_image_conditionings(

@@ -228,13 +228,14 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         # I2V conditioning at half resolution. ``images`` is the upstream-iso
         # multi-anchor list; ``image`` is the legacy single-image shorthand.
         from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
-        from ltx_pipelines_mlx.utils.args import ImageConditioningInput
+        from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 
         enc_h_half = H_half * 32
         enc_w_half = W_half * 32
         resolved_images = list(images) if images else []
         if image is not None and not resolved_images:
             resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
+        resolved_images = resolve_frame_indices(resolved_images, num_frames)
         conditionings_1: list = []
         if resolved_images:
 

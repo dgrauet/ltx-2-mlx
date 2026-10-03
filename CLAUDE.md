@@ -529,6 +529,7 @@ All `generate` modes (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distil
 
 - `frame_idx=0` → `VideoConditionByLatentIndex`: hard-replaces the first latent frame (strongly preserved)
 - `frame_idx>0` → `VideoConditionByKeyframeIndex`: appends soft reference tokens at that temporal position
+- `FRAME_IDX` can also be `last` (or `end`) or a negative number counted back from the end (`-1` = last frame). `resolve_frame_indices` (`utils/args.py`) turns it into a pixel index once the pipeline knows the frame count, so an end anchor stays on the final frame when `--auto-duration` picks the length (a fixed `96` would not). Resolved in every pipeline that takes `--image`, before the keyframe-token bookkeeping that tests `frame_idx > 0`. On `--dfr` it is resolved against the requested length before the clip is padded to whole keyframe segments (`resolve_stage1_frames`, `distilled.py`), so `last` lands on the final frame of the trimmed output. `-num_frames` resolves to `0` and therefore gets the hard first-latent replace above, not a soft keyframe. An index outside the clip (before frame 0, or `>= num_frames`) raises a `ValueError` that names the image.
 
 ```bash
 # Anchor both ends — model animates the transition
@@ -547,6 +548,14 @@ ltx-2-mlx generate \
   --image frame.jpg 0 1.0 \
   --image frame.jpg 96 1.0 \
   -f 97 --frame-rate 24 -o loop.mp4
+
+# End anchor with a predicted length (2.5 packs): `last` follows the frame count
+ltx-2-mlx generate \
+  --prompt "a door slowly swings shut" \
+  --distilled \
+  --image open.jpg 0 1.0 \
+  --image closed.jpg last 1.0 \
+  --auto-duration 2:6 -o door.mp4
 ```
 
 **Mode recommendations for multi-anchor:** `--two-stage` or `--two-stages-hq` (dev model + CFG) respects anchors most faithfully. `--distilled` (8 steps, no CFG) also honors them — soft keyframe anchors are hints, not law, so the model may drift from them at longer durations, but a distilled start+end smoke test (512×512×25) tracked both anchors cleanly. `--one-stage` works but is slower than `--two-stage` at large resolutions.

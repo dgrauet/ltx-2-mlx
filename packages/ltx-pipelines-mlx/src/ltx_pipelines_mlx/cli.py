@@ -522,6 +522,8 @@ examples:
             "--image foo.jpg 96 1.0 to anchor both ends and preserve identity). "
             "FRAME_IDX is the pixel frame index (0-based); 0 replaces the first latent "
             "frame directly, others guide via VideoConditionByKeyframeIndex. "
+            "FRAME_IDX may be 'last' or negative (counted from the end), so an end "
+            "anchor follows the frame count --auto-duration picks. "
             "Mirrors upstream LTX_2_3 --image."
         ),
     )
