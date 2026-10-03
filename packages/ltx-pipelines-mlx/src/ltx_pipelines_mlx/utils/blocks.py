@@ -729,6 +729,27 @@ def snap_frames_to_grid(frames: int, time_scale: int = 8) -> int:
     return ((frames - 1) // time_scale) * time_scale + 1
 
 
+def snap_num_frames(num_frames: int, time_scale: int = 8) -> int:
+    """Floor a requested frame count to the causal grid, warning when it changes.
+
+    The video latent of ``num_frames`` frames covers only ``snap_frames_to_grid(num_frames)``
+    decoded frames, so every size derived from the clip (audio tokens, conditioning windows)
+    must use the snapped count or the audio outlasts the video. Mirrors upstream v1.4.0, which
+    floors the target to the causal grid with a warning before sizing any latent.
+
+    Args:
+        num_frames: Requested pixel frame count.
+        time_scale: Temporal grid scale factor (default 8 for LTX-2).
+
+    Returns:
+        The frame count on the ``k * time_scale + 1`` grid.
+    """
+    snapped = snap_frames_to_grid(num_frames, time_scale)
+    if snapped != num_frames:
+        logger.warning("Target %d pixel frames floors to %d on the causal grid", num_frames, snapped)
+    return snapped
+
+
 def seconds_to_clamped_num_frames(
     seconds: float,
     *,

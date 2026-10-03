@@ -42,6 +42,7 @@ from ltx_pipelines_mlx.iclora_utils import (
     read_lora_reference_downscale_factor,
 )
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS, shorten_schedule
+from ltx_pipelines_mlx.utils.blocks import snap_num_frames
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.samplers import denoise_loop
 
@@ -423,6 +424,7 @@ class ICLoraPipeline(BasePipeline):
             raise ValueError(
                 f"conditioning_attention_strength must be in [0.0, 1.0], got {conditioning_attention_strength}"
             )
+        num_frames = snap_num_frames(num_frames)
 
         # Load text encoder, encode, free, then load generation components.
         # Done manually instead of _encode_text_and_load() to avoid loading
