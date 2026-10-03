@@ -913,7 +913,7 @@ examples:
     # --- hdr-ic-lora ---
     hdr = sub.add_parser(
         "hdr-ic-lora",
-        help="Generate HDR video via IC-LoRA with LogC3 inverse (saves SDR mp4 + .hdr.npz)",
+        help="SDR-to-HDR IC-LoRA (being rewired to the single-stage ACEScct pipeline)",
     )
     _add_generation_args(hdr)
     hdr.add_argument(
@@ -1686,48 +1686,8 @@ def _cmd_lipdub(args: argparse.Namespace) -> None:
 
 
 def _cmd_hdr_ic_lora(args: argparse.Namespace) -> None:
-    """Generate HDR video via IC-LoRA + LogC3 inverse decompression."""
-    t0 = time.time()
-
-    from ltx_pipelines_mlx.hdr_ic_lora import HDRICLoraPipeline
-
-    lora_paths = [(path, float(strength)) for path, strength in args.lora]
-    video_conditioning = [(path, float(strength)) for path, strength in (args.video_conditioning or [])]
-
-    if not args.quiet:
-        mode_suffix = "T2V" if not video_conditioning else "V2V"
-        print(f"Mode: HDR IC-LoRA (two-stage, LogC3, {mode_suffix})")
-        for path, strength in lora_paths:
-            print(f"  LoRA: {path} (strength={strength})")
-        for path, strength in video_conditioning:
-            print(f"  Control: {path} (strength={strength})")
-
-    pipe = HDRICLoraPipeline(
-        model_dir=args.model,
-        lora_paths=lora_paths,
-        gemma_model_id=args.gemma,
-        low_memory=True,
-        low_ram_streaming=getattr(args, "low_ram", False),
-    )
-    pipe.verbose = not args.quiet
-    pipe.stepwise = _build_stepwise(args)
-
-    pipe.generate_and_save(
-        prompt=args.prompt,
-        output_path=args.output,
-        video_conditioning=video_conditioning,
-        height=args.height,
-        width=args.width,
-        num_frames=args.frames,
-        frame_rate=args.frame_rate,
-        seed=args.seed,
-        stage1_steps=args.stage1_steps,
-        stage2_steps=args.stage2_steps,
-        images=args.images,
-        conditioning_attention_strength=args.conditioning_strength,
-        skip_stage_2=args.skip_stage_2,
-    )
-    _print_result(args.output, t0, args.quiet)
+    """HDR IC-LoRA entry point -- being rewired to the single-stage ACEScct pipeline."""
+    raise NotImplementedError("rewired in the next commit")
 
 
 # =============================================================================
