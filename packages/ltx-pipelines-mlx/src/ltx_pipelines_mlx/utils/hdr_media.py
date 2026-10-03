@@ -111,6 +111,9 @@ class HlgFfmpegWriter:
 
     def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> None:
         assert self._proc is not None and self._proc.stdin is not None
+        # None = ffmpeg never reaped (e.g. KeyboardInterrupt while draining stderr): a failure
+        code: int | None = None
+        err = ""
         try:
             with contextlib.suppress(BrokenPipeError, OSError):
                 self._proc.stdin.close()
@@ -120,8 +123,8 @@ class HlgFfmpegWriter:
             # Always unlink on any failure
             if exc_type is not None or code != 0:
                 Path(self.output_path).unlink(missing_ok=True)
-            # Raise RuntimeError only if no exception is in flight
-            if exc_type is None and code != 0:
+            # Raise RuntimeError only if no exception is in flight (code None = the drain itself raised)
+            if exc_type is None and code is not None and code != 0:
                 raise RuntimeError(f"ffmpeg HLG encode failed ({code}): {err}")
 
 
@@ -205,36 +208,57 @@ def resize_and_reflect_pad(frame: np.ndarray, height: int, width: int) -> np.nda
 
 
 def _decode_rgb24_frames(path: Path, frame_cap: int) -> Iterator[np.ndarray]:
-    """Yield ``(H, W, 3)`` uint8 frames from a video via ffmpeg (no scaling)."""
+    """Yield ``(H, W, 3)`` uint8 frames from a video via ffmpeg (no scaling, no auto-rotation).
+
+    ``-noautorotate`` keeps the coded ``W x H`` that ffprobe reports (upstream PyAV does not
+    rotate either); without it a rotated phone MOV would come out ``H x W`` with the same byte
+    count and be silently scrambled by the reshape.
+
+    Raises:
+        RuntimeError: If ffmpeg exits with a non-zero status.
+    """
+    import tempfile
+
     from ltx_core_mlx.utils.ffmpeg import probe_video_info
 
     info = probe_video_info(str(path))
     w, h = info.width, info.height
-    proc = subprocess.Popen(
-        [
-            find_ffmpeg(),
-            "-loglevel",
-            "error",
-            "-i",
-            str(path),
-            "-frames:v",
-            str(frame_cap),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-",
-        ],
-        stdout=subprocess.PIPE,
-    )
-    assert proc.stdout is not None
-    size = w * h * 3
-    try:
-        while (buf := proc.stdout.read(size)) and len(buf) == size:
-            yield np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 3)
-    finally:
-        proc.stdout.close()
-        proc.wait()
+    # stderr to a temp file: a PIPE nobody drains could fill up and stall the decode
+    with tempfile.TemporaryFile() as err_file:
+        proc = subprocess.Popen(_rgb24_decode_cmd(path, frame_cap), stdout=subprocess.PIPE, stderr=err_file)
+        assert proc.stdout is not None
+        size = w * h * 3
+        completed = False
+        try:
+            while (buf := proc.stdout.read(size)) and len(buf) == size:
+                yield np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 3)
+            completed = True
+        finally:
+            proc.stdout.close()
+            code = proc.wait()
+        # Only on a full read: an early-closed generator kills ffmpeg's pipe on purpose
+        if completed and code != 0:
+            err_file.seek(0)
+            raise RuntimeError(f"ffmpeg decode of '{path}' failed ({code}): {err_file.read().decode(errors='replace')}")
+
+
+def _rgb24_decode_cmd(path: Path, frame_cap: int) -> list[str]:
+    """ffmpeg command decoding ``path`` to raw rgb24 on stdout, in coded orientation."""
+    return [
+        find_ffmpeg(),
+        "-loglevel",
+        "error",
+        "-noautorotate",
+        "-i",
+        str(path),
+        "-frames:v",
+        str(frame_cap),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-",
+    ]
 
 
 def load_video_as_hdr_conditioning(
@@ -260,7 +284,11 @@ def _openexr():
 
 
 def read_exr(path: str | Path) -> np.ndarray:
-    """Read an EXR frame as float32 ``(H, W, 3)`` RGB (alpha dropped, mono broadcast)."""
+    """Read an EXR frame as float32 ``(H, W, 3)`` RGB (alpha dropped, mono broadcast).
+
+    Raises:
+        ValueError: If the channels are neither RGB/RGBA nor a recognisable mono channel.
+    """
     oe = _openexr()
     with oe.File(str(path)) as f:
         channels = f.channels()
@@ -272,8 +300,15 @@ def read_exr(path: str | Path) -> np.ndarray:
             names = list(channels)
             if not names:
                 raise RuntimeError(f"EXR '{path}' has no channels")
-            mono = channels[names[0]].pixels
-            rgb = np.repeat(mono[..., None], 3, axis=-1) if mono.ndim == 2 else mono[..., :3]
+            if "Y" in channels:
+                mono = channels["Y"].pixels
+            elif len(names) == 1 and channels[names[0]].pixels.ndim == 2:
+                mono = channels[names[0]].pixels
+            else:
+                raise ValueError(
+                    f"EXR '{path}' has channels {sorted(names)}; expected RGB, RGBA or a single mono channel (Y)"
+                )
+            rgb = np.repeat(mono[..., None], 3, axis=-1)
     return np.ascontiguousarray(rgb, dtype=np.float32)
 
 
