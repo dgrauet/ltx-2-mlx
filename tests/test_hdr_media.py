@@ -49,3 +49,14 @@ def test_hlg_writer_tags_bt2020_hlg_10bit(tmp_path):
 def test_writer_rejects_odd_dims(tmp_path):
     with pytest.raises(ValueError, match="even"):
         HlgFfmpegWriter(str(tmp_path / "x.mp4"), width=63, height=32, fps=24.0)
+
+
+def test_writer_cleans_up_on_write_error(tmp_path):
+    out = tmp_path / "m.mp4"
+    with (
+        pytest.raises(ValueError, match="expected"),
+        HlgFfmpegWriter(str(out), width=64, height=32, fps=24.0) as writer,
+    ):
+        writer.write(np.full((1, 32, 64, 3), 0.5, dtype=np.float32))
+        writer.write(np.full((2, 32, 32, 3), 0.5, dtype=np.float32))  # wrong width
+    assert not out.exists()

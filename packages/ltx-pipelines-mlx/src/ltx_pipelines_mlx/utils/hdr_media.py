@@ -5,7 +5,9 @@ ffmpeg subprocess instead of PyAV, OpenEXR (optional ``hdr`` extra) instead of O
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +40,8 @@ class HlgFfmpegWriter:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         self.output_path = output_path
         self.width, self.height = width, height
+        frac = Fraction(fps).limit_denominator(1000)
+        fps_str = f"{frac.numerator}/{frac.denominator}"
         self._cmd = [
             find_ffmpeg(),
             "-y",
@@ -50,7 +54,7 @@ class HlgFfmpegWriter:
             "-s",
             f"{width}x{height}",
             "-r",
-            f"{fps}",
+            fps_str,
             "-i",
             "-",
             "-c:v",
@@ -88,15 +92,30 @@ class HlgFfmpegWriter:
         assert self._proc is not None and self._proc.stdin is not None
         if frames.shape[1:] != (self.height, self.width, 3):
             raise ValueError(f"expected (F, {self.height}, {self.width}, 3), got {frames.shape}")
-        for frame in frames:
-            y, u, v = rgb_to_yuv420p10_bt2020_limited(linear_to_hlg_signal(frame, Primaries.REC709))
-            self._proc.stdin.write(y.tobytes() + u.tobytes() + v.tobytes())
+        try:
+            for frame in frames:
+                y, u, v = rgb_to_yuv420p10_bt2020_limited(linear_to_hlg_signal(frame, Primaries.REC709))
+                self._proc.stdin.write(y.tobytes() + u.tobytes() + v.tobytes())
+        except BrokenPipeError as broken_pipe_err:
+            # ffmpeg died mid-stream; reap it and raise with its stderr
+            assert self._proc.stdin is not None
+            with contextlib.suppress(BrokenPipeError, OSError):
+                self._proc.stdin.close()
+            err = self._proc.stderr.read().decode() if self._proc.stderr else ""
+            self._proc.wait()
+            raise RuntimeError(f"ffmpeg HLG encode failed: {err}") from broken_pipe_err
 
     def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> None:
         assert self._proc is not None and self._proc.stdin is not None
-        self._proc.stdin.close()
-        err = self._proc.stderr.read().decode() if self._proc.stderr else ""
-        code = self._proc.wait()
-        if exc_type is None and code != 0:
-            Path(self.output_path).unlink(missing_ok=True)
-            raise RuntimeError(f"ffmpeg HLG encode failed ({code}): {err}")
+        try:
+            with contextlib.suppress(BrokenPipeError, OSError):
+                self._proc.stdin.close()
+            err = self._proc.stderr.read().decode() if self._proc.stderr else ""
+            code = self._proc.wait()
+        finally:
+            # Always unlink on any failure
+            if exc_type is not None or code != 0:
+                Path(self.output_path).unlink(missing_ok=True)
+            # Raise RuntimeError only if no exception is in flight
+            if exc_type is None and code != 0:
+                raise RuntimeError(f"ffmpeg HLG encode failed ({code}): {err}")
