@@ -108,7 +108,8 @@ Everything else is in [Common flags](#common-flags).
 
 - **Produces:** `<output>.mp4`, a BT.2020/HLG 10-bit HEVC master, plus `<stem>_<exr-colorspace>_exr/frame_*.exr` beside it (ACEScg by default).
 - **Packs:** 2.5 only (2.3 packs are refused). **Tier:** Experimental.
-- **Required:** `--input` (MP4/MOV or a folder of `*.exr`), `--output-path` / `-o`, `--hdr-lora` (the gated `Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR`, as a local file), `--text-embeddings` (the scene-emb file from the same repo).
+- **Install:** the EXR writer needs the optional `hdr` extra (`pip install 'ltx-pipelines-mlx[hdr]'`, or `uv sync --extra hdr` in this repo) and the HLG master needs an ffmpeg with the `libx265` encoder (Homebrew's has it). Both are checked when the pipeline is built, before any download.
+- **Required:** `--input` (MP4/MOV or a folder of `*.exr`), `--output-path` / `--output` / `-o`, `--hdr-lora` (the gated `Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR`, as a local file), `--text-embeddings` (the scene-emb file from the same repo).
 - **Own flags:** `--input-colorspace {srgb_gamma,srgb,acescg,acescct}` (default `srgb_gamma`), `--exr-colorspace {srgb_linear,acescg,acescct}` (default `acescg`), `--frame-rate` (EXR folders only, forbidden for MP4/MOV), `--high-quality` (2x frames internally, ~2x slower), `--no-keyframes`, `--keyframe-strength` (0.95). There is no prompt, size, frame-count or stage flag: the output follows the source (frame count must be 8k+1).
 - **Example:**
   ```
@@ -173,10 +174,10 @@ Run `ltx-2-mlx <subcommand> --help` for the exact spelling of these options.
 
 | Flag | Default | Effect | Applies to |
 |---|---|---|---|
-| `--prompt`, `-p` | required | Text prompt. | all except `hdr-ic-lora` (`--input` / `-o`) |
-| `--output`, `-o` | required | Output video path (`.mp4`). | all except `hdr-ic-lora` (`--input` / `-o`) |
-| `--model`, `-m` | `dgrauet/ltx-2.3-mlx-q8` | Weights, as a HuggingFace repo id or a local pack directory. 2.5 support is auto-detected from the pack. | all |
-| `--gemma` | `mlx-community/gemma-3-12b-it-4bit` | Text encoder for 2.3 packs. 2.5 packs carry their own Gemma 4 tower and ignore it. | all except `hdr-ic-lora` (`--input` / `-o`) |
+| `--prompt`, `-p` | required | Text prompt. | all except `hdr-ic-lora` |
+| `--output`, `-o` | required | Output video path (`.mp4`). | all (on `hdr-ic-lora` both are aliases of `--output-path`) |
+| `--model`, `-m` | `dgrauet/ltx-2.3-mlx-q8` (`hdr-ic-lora`: `dgrauet/ltx-2.5-mlx-q8`) | Weights, as a HuggingFace repo id or a local pack directory. 2.5 support is auto-detected from the pack. | all |
+| `--gemma` | `mlx-community/gemma-3-12b-it-4bit` | Text encoder for 2.3 packs. 2.5 packs carry their own Gemma 4 tower and ignore it. | all except `hdr-ic-lora` |
 | `--seed`, `-s` | -1 (random) | Random seed. Pass a fixed value for reproducible runs. | all |
 | `--quiet`, `-q` | off | Suppress the progress output described below. | all |
 | `--height`, `-H` | 480 | Output height in pixels. Non-multiples of 64 round down on two-stage paths. | all except `retake` / `extend` / `hdr-ic-lora` |
@@ -243,7 +244,7 @@ are utilities and have no column.
 | Flag | distilled | two-stage | hq | one-stage | dfr | keyframe | ic-lora | hdr-ic-lora | a2v | retake | extend | lipdub |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `--prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| `--output` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--output` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `--model` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `--gemma` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `--seed` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

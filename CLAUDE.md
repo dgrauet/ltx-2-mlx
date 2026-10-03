@@ -926,13 +926,17 @@ Port of upstream v1.4 `ltx_pipelines.hdr_ic_lora.HDRICLoraPipeline`: a **single-
 
 **Breaking (release notes):** `hdr-ic-lora` is now upstream's single-stage ACEScct SDR-to-HDR pipeline on LTX-2.5 packs; LogC3 / LTX-2.3 HDR and the `.hdr.npz` output are gone.
 
+### Install and early refusals
+
+The EXR writer needs the optional `hdr` extra: `pip install 'ltx-pipelines-mlx[hdr]'` (or `uv sync --extra hdr` in this repo); the HLG master needs an ffmpeg with the `libx265` encoder (Homebrew's has it). `HDRICLoraPipeline.__init__` checks, in order and **before the pack snapshot download**: OpenEXR importable + `libx265` listed by `ffmpeg -encoders` (`require_hdr_export_tools`), the `--text-embeddings` file loads, the LoRA resolves (a `.safetensors` path must exist locally, no HF call), and the pack is 2.5 (local dir checked in place; for a repo id only `embedded_config.json` is fetched). `generate` then refuses odd source width/height (4:2:0 master; upstream fails later in the encoder) and a short read (loaded frames != probed count; the count is decoded with `-count_frames` when the container has no `nb_frames`) before the DiT load.
+
 ### Flow
 
 1. **Inputs**: `--hdr-lora` (the gated `Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR`; accept its licence once, a missing acceptance raises `PermissionError` before any model load) and `--text-embeddings` (the scene-emb `.safetensors` shipped in the same repo, key `video_context`). Pass the LoRA as a local file: the repo holds two `.safetensors` so a bare repo id is ambiguous.
 2. **Source**: MP4/MOV (`srgb_gamma` = display sRGB, EOTF applied; `srgb` = linear Rec.709) or an EXR-frame folder (`srgb` / `acescg` / `acescct`, `--frame-rate` mandatory). Converted to ACEScct by the input transform (`utils/hdr_media.py`). Frame count must be 8k+1; the output length matches the source.
 3. **Conditioning order**: the VAE-encoded SDR clip at full resolution is the IC-LoRA reference (downscale 1, strength 1.0 by default). With seam keyframes on (default, `--keyframe-strength` 0.95) every DFR `resolve_canvas` x8 border gets a generated HDR slot plus a 1-frame SDR guide; `--no-keyframes` gives plain IC-LoRA.
 4. **Denoise**: one stage, the 8-step distilled schedule, distilled transformer with the LoRA at fixed strength 1.0 (fused, or a `BlockLoraSource` under `--low-ram`). `--high-quality` duplicates each conditioning frame, generates 2N-1 frames and keeps every other one.
-5. **Precision**: both VAE ends (image encoder, diffusion video decoder) run in **fp32**, the DiT in bf16 (upstream `vae_dtype = float32`).
+5. **Precision**: both VAE ends (image encoder, diffusion video decoder) run in **fp32**, the DiT in bf16 (upstream `vae_dtype = float32`); the denoised latent is cast to fp32 explicitly before the decode.
 6. **Decode**: the keyframe-aware **diffusion** decoder streams chunks (`iter_frames`); the DiT is freed first.
 
 ### Outputs
