@@ -665,8 +665,11 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             legacy_scalar_blend=True,
         )
 
-        # Stage 2 audio: legacy used noise_latent_state (bf16 mask path),
-        # so leave legacy_scalar_blend=False (default) to preserve bit-equivalence.
+        # Stage 2 audio: frozen conditioning, as upstream v1.4.0
+        # (``denoise_chunks(..., freeze_audio=True)``). The model sees stage 1's
+        # audio clean (sigma 0 for the audio prompt AdaLN and the A->V gate)
+        # instead of a copy re-noised at ``start_sigma``; ``frozen=True`` forces
+        # the zero noise scale and the all-zero denoise mask.
         audio_tokens_1 = output_1.audio_latent
         audio_state_2 = create_noised_state(
             base_shape=audio_tokens_1.shape,
@@ -676,6 +679,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             seed=seed + 2,
             sigma=start_sigma,
             initial_latent=audio_tokens_1,
+            frozen=True,
         )
 
         # Stage 2 reuses the same x0_model as stage 1 by default. With
@@ -704,10 +708,9 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         gen_tokens_2 = output_2.video_latent[:, : F * H_full * W_full, :]
         video_latent = self.video_patchifier.unpatchify(gen_tokens_2, (F, H_full, W_full))
-        # Stage 2 refines video only; discard its audio and keep stage 1's
-        # (upstream ti2vid_two_stages.py: ``video_state, _ = self.stage_2(...)``
-        # then decodes the stage-1 ``audio_state``). Stage 2 still runs the
-        # audio modality as model context for the joint forward.
+        # Stage 2 refines video only; its audio is frozen context, so keep
+        # stage 1's latent rather than the loop's copy of it (upstream keeps
+        # ``chunk.audio`` for a frozen modality).
         audio_latent = self.audio_patchifier.unpatchify(audio_tokens_1)
 
         return video_latent, audio_latent
