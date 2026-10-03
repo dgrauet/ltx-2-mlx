@@ -457,27 +457,29 @@ class HDRICLoraPipeline(BasePipeline):
         Upstream decimates the concatenated clip (``decoded[::2]``); here the chunks stream, so the
         global frame index is tracked and only even indices are kept across chunk boundaries.
         """
-        if keyframes is not None:
-            # Upstream docs (``hdr.md``): a decoder without a trained ``type_emb`` loads with zeros and the
-            # keyframe stream then silently does nothing. Refuse instead of shipping a no-op decode.
-            decoder = self.video_decoder_block.load()
-            type_emb = getattr(getattr(decoder, "_decoder", None), "type_emb", None)
-            if type_emb is not None and bool(mx.all(type_emb == 0).item()):
-                raise RuntimeError(
-                    "the pack's diffusion video decoder has no trained type_emb; keyframe-aware decode would "
-                    "silently do nothing (use --no-keyframes)"
-                )
-        index = 0
-        with phase("Decoding HDR video (fp32 diffusion decoder)", verbose=self.verbose):
-            for chunk in self.video_decoder_block.iter_frames(latent, seed=seed, keyframes=keyframes):
-                chunk = chunk[:, :crop_h, :crop_w]
-                if high_quality_hdr:
-                    start = index
-                    index += chunk.shape[0]
-                    chunk = chunk[(-start) % 2 :: 2]
-                if chunk.shape[0]:
-                    yield chunk
-        self.video_decoder_block.free()
+        try:
+            if keyframes is not None:
+                # Upstream docs (``hdr.md``): a decoder without a trained ``type_emb`` loads with zeros and the
+                # keyframe stream then silently does nothing. Refuse instead of shipping a no-op decode.
+                type_emb = self.video_decoder_block.load()._decoder.type_emb
+                if bool(mx.all(type_emb == 0).item()):
+                    raise RuntimeError(
+                        "the pack's diffusion video decoder has no trained type_emb; keyframe-aware decode would "
+                        "silently do nothing (use --no-keyframes)"
+                    )
+            index = 0
+            with phase("Decoding HDR video (fp32 diffusion decoder)", verbose=self.verbose):
+                for chunk in self.video_decoder_block.iter_frames(latent, seed=seed, keyframes=keyframes):
+                    chunk = chunk[:, :crop_h, :crop_w]
+                    if high_quality_hdr:
+                        start = index
+                        index += chunk.shape[0]
+                        chunk = chunk[(-start) % 2 :: 2]
+                    if chunk.shape[0]:
+                        yield chunk
+        finally:
+            # Also on an error or an abandoned iterator (``GeneratorExit``): never leave the fp32 decoder resident.
+            self.video_decoder_block.free()
 
     def generate_and_save(
         self,

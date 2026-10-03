@@ -316,11 +316,13 @@ class _DiffusionVideoDecoder:
 
     Args:
         decoder: The loaded ``NADiffusionDecoder``.
-        weight_bytes: Size of its weights (charged against the decode budget).
+        weight_bytes: Size of its weights in memory (charged against the decode budget).
         tile_override: ``--diffvae-tile`` value: ``None`` = automatic sizing from the budget,
             ``(0, 0, 0)`` = force one tile (the ``LTX2_DIFFVAE_MAX_TOKENS`` guard applies),
             otherwise explicit tile sizes in frames / pixels with the recommended overlaps.
         verbose: Print the tile schedule and the measured peak Metal memory to stderr.
+        itemsize: Bytes per element of the decoder's run dtype (2 = bf16, 4 = fp32); the activation
+            estimate is calibrated in bf16 and scaled by this.
     """
 
     def __init__(
@@ -330,9 +332,11 @@ class _DiffusionVideoDecoder:
         weight_bytes: int,
         tile_override: tuple[int, int, int] | None = None,
         verbose: bool = False,
+        itemsize: int = 2,
     ) -> None:
         self._decoder = decoder
         self.weight_bytes = weight_bytes
+        self.itemsize = itemsize
         self.tile_override = tile_override
         self.verbose = verbose
 
@@ -387,6 +391,7 @@ class _DiffusionVideoDecoder:
                 budget_bytes=diffusion_decode_budget_bytes(),
                 weight_bytes=self.weight_bytes,
                 keyframe_planes=keyframe_planes,
+                itemsize=self.itemsize,
             )
         if self.tile_override == (0, 0, 0):
             tokens = self._stage5_tokens_for_config(self._decoder.config, latent_shape, keyframe_planes)
@@ -479,8 +484,14 @@ class VideoDecoder:
                 raise FileNotFoundError(f"{path} — the diffusion video decoder ships with LTX 2.5 packs only")
             decoder = load_diffusion_decoder(path)
             decoder.set_dtype(self.dtype)
+            itemsize = self.dtype.size
+            # The pack stores the decoder in bf16; an fp32 run (HDR) holds twice the file size.
             self._decoder = _DiffusionVideoDecoder(
-                decoder, weight_bytes=path.stat().st_size, tile_override=self.diffvae_tile, verbose=self.verbose
+                decoder,
+                weight_bytes=path.stat().st_size * itemsize // 2,
+                tile_override=self.diffvae_tile,
+                verbose=self.verbose,
+                itemsize=itemsize,
             )
             aggressive_cleanup()
             return self._decoder
