@@ -10,6 +10,16 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.15.13](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.12...v0.15.13) (2026-10-03)
+
+
+### Bug Fixes
+
+* **pipelines:** freeze the stage-2 audio of the two-stage pipeline ([#173](https://github.com/dgrauet/ltx-2-mlx/issues/173)) ([6f05eaa](https://github.com/dgrauet/ltx-2-mlx/commit/6f05eaaa3094989c8d1c0f65a9be4f953b2b82c0))
+* **pipelines:** run the DFR spatial epilogue as pinned windows, 2x2 then 4x4 ([#180](https://github.com/dgrauet/ltx-2-mlx/issues/180)) ([8de47e1](https://github.com/dgrauet/ltx-2-mlx/commit/8de47e183dc7ad40ea22f50c0b476ea2198afbf5))
+* **pipelines:** sample LTX-2.5 distilled stage 2 with ancestral Euler ([#172](https://github.com/dgrauet/ltx-2-mlx/issues/172)) ([5c1ca4a](https://github.com/dgrauet/ltx-2-mlx/commit/5c1ca4a3f416751149be572cdcff34b72f260852))
+* **pipelines:** start DFR temporal tiles on a keyframe plane with a pinned prefix ([#179](https://github.com/dgrauet/ltx-2-mlx/issues/179)) ([57794bb](https://github.com/dgrauet/ltx-2-mlx/commit/57794bb08ddd38443806865a5421b2addffcbcc5))
+
 ## [0.15.12](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.11...v0.15.12) (2026-09-27)
 
 
