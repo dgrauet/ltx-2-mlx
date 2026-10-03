@@ -4,6 +4,8 @@ import argparse
 
 import pytest
 
+from ltx_pipelines_mlx.dfr_layout import resolve_canvas
+from ltx_pipelines_mlx.distilled import resolve_stage1_frames
 from ltx_pipelines_mlx.utils.args import ImageAction, ImageConditioningInput, resolve_frame_indices
 
 
@@ -40,3 +42,38 @@ def test_resolve_counts_back_from_the_end() -> None:
 def test_resolve_rejects_an_index_before_the_first_frame() -> None:
     with pytest.raises(ValueError, match="before the first of 25 frames"):
         resolve_frame_indices([ImageConditioningInput("a.png", -26, 1.0)], 25)
+
+
+def test_resolve_rejects_an_index_past_the_last_frame() -> None:
+    with pytest.raises(ValueError, match="past the last of 25 frames"):
+        resolve_frame_indices([ImageConditioningInput("a.png", 25, 1.0)], 25)
+    assert resolve_frame_indices([ImageConditioningInput("a.png", 24, 1.0)], 25)[0].frame_idx == 24
+
+
+def test_minus_num_frames_resolves_to_the_first_frame() -> None:
+    assert resolve_frame_indices([ImageConditioningInput("a.png", -25, 1.0)], 25)[0].frame_idx == 0
+
+
+@pytest.mark.parametrize(("requested", "canvas"), [(137, 145), (41, 49)])
+def test_last_lands_on_the_requested_end_when_dfr_pads_the_canvas(requested: int, canvas: int) -> None:
+    """``--dfr`` pads the clip to whole keyframe segments and trims the output back afterwards."""
+    seen = []
+
+    def canvas_for(resolved_frames: int) -> tuple[int, list[int]]:
+        seen.append(resolved_frames)
+        canvas_frames, _segment, positions = resolve_canvas(resolved_frames)
+        return canvas_frames, positions
+
+    images = [ImageConditioningInput("start.png", 0, 1.0), ImageConditioningInput("end.png", -1, 1.0)]
+    num_frames, slots, resolved = resolve_stage1_frames(requested, None, images, 0, canvas_for)
+
+    assert seen == [requested]
+    assert num_frames == canvas
+    assert slots == resolve_canvas(requested)[2]
+    assert [image.frame_idx for image in resolved] == [0, requested - 1]
+
+
+def test_stage1_frames_without_a_canvas_hook() -> None:
+    num_frames, slots, resolved = resolve_stage1_frames(97, "a.png", None, 2, None)
+    assert (num_frames, slots) == (97, 2)
+    assert resolved == [ImageConditioningInput("a.png", 0, 1.0)]

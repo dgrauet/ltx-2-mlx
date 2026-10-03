@@ -59,27 +59,33 @@ def resolve_frame_indices(images: list[ImageConditioningInput], num_frames: int)
 
     ``-1`` becomes ``num_frames - 1`` (the last pixel frame), ``-2`` the one
     before it, and so on. Non-negative indices pass through unchanged.
+    ``-num_frames`` resolves to ``0``, so it gets the hard first-latent replace
+    (``VideoConditionByLatentIndex``) rather than a soft keyframe.
 
     Args:
         images: Conditioning inputs as parsed from ``--image``.
         num_frames: Concrete pixel-frame count of the clip being generated.
 
     Returns:
-        The inputs with every ``frame_idx`` non-negative.
+        The inputs with every ``frame_idx`` in ``[0, num_frames)``.
 
     Raises:
-        ValueError: If a negative index reaches before the first frame.
+        ValueError: If an index lies outside the clip, before its first frame or
+            past its last (upstream ``assert_image_frames_in_clip`` checks the
+            same range).
     """
     resolved = []
     for image in images:
-        if image.frame_idx < 0:
-            frame_idx = num_frames + image.frame_idx
-            if frame_idx < 0:
-                raise ValueError(
-                    f"--image {image.path}: frame index {image.frame_idx} is before the first of {num_frames} frames"
-                )
-            image = image._replace(frame_idx=frame_idx)
-        resolved.append(image)
+        frame_idx = num_frames + image.frame_idx if image.frame_idx < 0 else image.frame_idx
+        if frame_idx < 0:
+            raise ValueError(
+                f"--image {image.path}: frame index {image.frame_idx} is before the first of {num_frames} frames"
+            )
+        if frame_idx >= num_frames:
+            raise ValueError(
+                f"--image {image.path}: frame index {image.frame_idx} is past the last of {num_frames} frames"
+            )
+        resolved.append(image._replace(frame_idx=frame_idx))
     return resolved
 
 
