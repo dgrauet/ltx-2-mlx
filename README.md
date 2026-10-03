@@ -11,7 +11,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **Retake / Extend** — edit existing videos (regenerate segments, add frames)
 - **Keyframe interpolation** — smooth transition between reference images
 - **IC-LoRA** — reference video conditioning (depth/pose/edges)
-- **HDR IC-LoRA** — LogC3-compressed HDR generation (V2V upgrade or pure T2V) producing linear HDR `.npz` + SDR mp4 preview
+- **HDR IC-LoRA** — single-stage ACEScct SDR-to-HDR (LTX-2.5 packs) producing an HLG BT.2020 10-bit mp4 + EXR frames
 - **LipDub** *(experimental)* — lip-dub a reference video by re-syncing visuals to the source audio
 - **Two-stage generation** — half-res → neural upscale → refine
 - **HQ generation** — res_2s second-order sampler + CFG/STG guidance
@@ -102,14 +102,10 @@ ltx-2-mlx a2v -p "music video" --audio music.wav --frame-rate 24 -o a2v.mp4 --lo
 ltx-2-mlx keyframe -p "transition" --start a.png --end b.png --frame-rate 24 -o kf.mp4 --low-ram
 ltx-2-mlx ic-lora -p "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 --frame-rate 24 --low-ram -o out.mp4
 
-# HDR IC-LoRA — V2V upgrade an SDR video to linear HDR (saves out.mp4 + out.hdr.npz)
-ltx-2-mlx hdr-ic-lora -p "cinematic golden hour" \
-    --lora Lightricks/LTX-2.3-22b-IC-LoRA-HDR 1.0 \
-    --video-conditioning source_sdr.mp4 1.0 --frame-rate 24 --low-ram -o out.mp4
-
-# HDR IC-LoRA — pure T2V (no conditioning video)
-ltx-2-mlx hdr-ic-lora -p "a sunset over the ocean, vivid HDR" \
-    --lora Lightricks/LTX-2.3-22b-IC-LoRA-HDR 1.0 --frame-rate 24 --low-ram -o out.mp4
+# HDR IC-LoRA — SDR mp4 -> HLG master + ACEScg EXR frames (LTX-2.5 pack; gated LoRA repo)
+ltx-2-mlx hdr-ic-lora --model dgrauet/ltx-2.5-mlx-q8 --input source_sdr.mp4 \
+    --hdr-lora ltx-2.5-22b-ic-lora-sdr-to-hdr-1.0.safetensors \
+    --text-embeddings ltx-2.5-22b-ic-lora-sdr-to-hdr-scene-emb.safetensors --low-ram -o out.mp4
 
 # Modality tiling: split video tokens for long/HD scenarios that exceed attention memory.
 # Stack with --low-ram for max memory savings on big targets.
@@ -170,13 +166,14 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
 | `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB) |
 | `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames). `--low-ram` wired (mirrors upstream `offload_mode`): 49-frame retake that OOM'd now peaks at 13.8 GB |
-| `ic-lora`, `hdr-ic-lora`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
+| `ic-lora`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
+| `hdr-ic-lora` | supported, 2.5 only (single-stage ACEScct SDR-to-HDR; Experimental) |
 | `enhance` / `--enhance-prompt` | raises a clear error (Gemma 3-only) |
 | `--enable-teacache` | raises a clear error (not calibrated for 2.5) |
 | Modality tiling, Prompt Relay | validated on 2.3 only |
 | Diffusion (`DiffVAEMode`) VAE decoder | not loaded — conv decoder used |
 
-The IC-LoRA family (`ic-lora` / `hdr-ic-lora` / `lipdub`) lands once
+The IC-LoRA family (`ic-lora` / `lipdub`) lands once
 Lightricks publishes the official 2.5 task IC-LoRAs.
 
 For maximum detail on a 2.5 pack, `generate --dfr` (experimental) runs a base DFR pass with
