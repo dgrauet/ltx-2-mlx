@@ -41,7 +41,7 @@ class HDRICLoraPipeline(ICLoraPipeline):
 
     Auto-detects the HDR transform from LoRA safetensors metadata
     (matches upstream behavior). All standard IC-LoRA flags are
-    inherited: ``low_ram``, ``tile_count``, ``conditioning_attention_strength``,
+    inherited: ``low_ram``, ``conditioning_attention_strength``,
     ``skip_stage_2``, etc.
     """
 
