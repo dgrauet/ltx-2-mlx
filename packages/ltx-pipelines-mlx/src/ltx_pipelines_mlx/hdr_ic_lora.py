@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import json
 import logging
+import subprocess
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
+from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import GatedRepoError
 
 from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
@@ -26,7 +29,7 @@ from ltx_core_mlx.conditioning.types.keyframe_slots import extract_generated_key
 from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
 from ltx_core_mlx.model.video_vae.tiling import TilingConfig
-from ltx_core_mlx.utils.ffmpeg import probe_video_info
+from ltx_core_mlx.utils.ffmpeg import find_ffmpeg, find_ffprobe, probe_video_info
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_video_positions
 
@@ -35,6 +38,7 @@ from .dfr import decode_keyframes_from_slots
 from .dfr_layout import resolve_canvas
 from .iclora_utils import reference_conditioning_from_latent
 from .scheduler import DISTILLED_SIGMAS
+from .utils import hdr_media
 from .utils._orchestration import resolve_lora_path, resolve_model_dir
 from .utils.blocks import ImageConditioner, VideoDecoder
 from .utils.generation import is_ltx25_pack
@@ -126,6 +130,87 @@ def load_video_context(path: str | Path) -> mx.array:
     raise KeyError(f"video_context/video_prompt_embeds not found in {emb_path} (keys={sorted(tensors)})")
 
 
+def require_hdr_export_tools() -> None:
+    """Fail fast when the HDR export cannot run (it only starts after the whole denoise).
+
+    Raises:
+        ImportError: OpenEXR (the optional ``hdr`` extra) is not installed.
+        RuntimeError: the local ffmpeg has no ``libx265`` encoder (the HLG master is HEVC).
+    """
+    hdr_media._openexr()
+    result = subprocess.run([find_ffmpeg(), "-hide_banner", "-encoders"], capture_output=True, text=True, check=False)
+    if result.returncode != 0 or not any(
+        len(fields) > 1 and fields[1] == "libx265" for fields in (line.split() for line in result.stdout.splitlines())
+    ):
+        raise RuntimeError(
+            "hdr-ic-lora writes a 10-bit HEVC (HLG) master but this ffmpeg has no libx265 encoder "
+            f"({find_ffmpeg()}); install an ffmpeg built with libx265 (e.g. brew install ffmpeg)."
+        )
+
+
+def _resolve_hdr_lora(hdr_lora: str) -> str:
+    """Resolve the SDR-to-HDR IC-LoRA without touching the network for a local file path.
+
+    Raises:
+        FileNotFoundError: ``hdr_lora`` names a ``.safetensors`` file that does not exist.
+        PermissionError: ``hdr_lora`` is a gated HuggingFace repo whose licence was not accepted.
+    """
+    if hdr_lora.endswith(".safetensors"):
+        if not Path(hdr_lora).is_file():
+            raise FileNotFoundError(f"HDR IC-LoRA file not found: {hdr_lora}")
+        return hdr_lora
+    try:
+        return resolve_lora_path(hdr_lora)
+    except GatedRepoError as exc:
+        raise PermissionError(
+            f"The HDR IC-LoRA '{hdr_lora}' is a gated HuggingFace repo: accept its licence once at "
+            f"https://huggingface.co/{hdr_lora} with the account you are logged in as "
+            "(huggingface-cli login), then rerun. No model was loaded."
+        ) from exc
+
+
+def _require_ltx25_pack(model_dir: str) -> None:
+    """Refuse a non-2.5 pack before the (multi-GB) snapshot download.
+
+    A local directory is checked in place; for a HuggingFace repo id only ``embedded_config.json``
+    is fetched.
+
+    Raises:
+        ValueError: ``model_dir`` is not an LTX-2.5 pack.
+    """
+    local = Path(model_dir)
+    config_dir = local if local.exists() else Path(hf_hub_download(model_dir, "embedded_config.json")).parent
+    if not is_ltx25_pack(config_dir):
+        raise ValueError("hdr-ic-lora needs an LTX-2.5 pack (the SDR-to-HDR IC-LoRA is 2.5-only)")
+
+
+def _count_video_frames(path: Path) -> int:
+    """Frame count of the first video stream (upstream ``get_videostream_metadata``).
+
+    Uses the container's ``nb_frames`` when present; otherwise decodes and counts
+    (``-count_frames``) instead of estimating from ``duration * fps``.
+    """
+
+    def _ffprobe(*extra: str, entry: str) -> str:
+        result = subprocess.run(
+            [find_ffprobe(), "-v", "error", "-select_streams", "v:0", *extra]
+            + ["-show_entries", f"stream={entry}", "-of", "json", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffprobe failed on {path}: {result.stderr}")
+        streams = json.loads(result.stdout).get("streams", [])
+        return str(streams[0].get(entry, "")) if streams else ""
+
+    declared = _ffprobe(entry="nb_frames")
+    if declared.isdigit() and int(declared) > 0:
+        return int(declared)
+    counted = _ffprobe("-count_frames", entry="nb_read_frames")
+    return int(counted) if counted.isdigit() else 0
+
+
 class HDRICLoraPipeline(BasePipeline):
     """IC-LoRA from SDR to HDR in one denoise stage (upstream ``HDRICLoraPipeline``).
 
@@ -142,8 +227,14 @@ class HDRICLoraPipeline(BasePipeline):
             block bind instead of in place.
 
     Raises:
-        ValueError: ``model_dir`` is not an LTX-2.5 pack (checked before anything is loaded).
+        ImportError: OpenEXR (the ``hdr`` extra) is missing.
+        RuntimeError: ffmpeg has no ``libx265`` encoder.
+        FileNotFoundError: the text embeddings or a local LoRA ``.safetensors`` do not exist.
+        KeyError: the embeddings file holds neither ``video_context`` nor ``video_prompt_embeds``.
+        ValueError: ``model_dir`` is not an LTX-2.5 pack.
         PermissionError: ``hdr_lora`` is a gated HuggingFace repo whose licence was not accepted.
+
+    All of these are checked before the model pack is downloaded or anything is loaded.
     """
 
     video_decoder = "diffusion"
@@ -157,26 +248,21 @@ class HDRICLoraPipeline(BasePipeline):
         *,
         low_ram_streaming: bool = False,
     ) -> None:
+        # Cheap refusals first: the export tooling (otherwise only hit after the whole denoise), the
+        # embeddings, the LoRA and the pack generation, all before the multi-GB pack snapshot.
+        require_hdr_export_tools()
+        logger.info("Loading text embeddings from %s", text_embeddings)
+        video_context = load_video_context(text_embeddings)
+        lora_path = _resolve_hdr_lora(hdr_lora)
+        _require_ltx25_pack(model_dir)
+
         resolved = resolve_model_dir(model_dir)
-        if not is_ltx25_pack(resolved):
-            raise ValueError("hdr-ic-lora needs an LTX-2.5 pack (the SDR-to-HDR IC-LoRA is 2.5-only)")
         super().__init__(model_dir=str(resolved), low_memory=True, low_ram_streaming=low_ram_streaming)
         self._is_25 = True
-
-        try:
-            lora_path = resolve_lora_path(hdr_lora)
-        except GatedRepoError as exc:
-            raise PermissionError(
-                f"The HDR IC-LoRA '{hdr_lora}' is a gated HuggingFace repo: accept its licence once at "
-                f"https://huggingface.co/{hdr_lora} with the account you are logged in as "
-                "(huggingface-cli login), then rerun. No model was loaded."
-            ) from exc
+        self.video_context = video_context
         # Upstream: ``loras=(LoraPathStrengthAndSDOps(lora_path, 1.0, LTXV_LORA_COMFY_RENAMING_MAP),)``; the
         # transformer loader fuses it (or attaches a ``BlockLoraSource`` under ``--low-ram``).
         self._pending_loras = [(lora_path, _HDR_LORA_STRENGTH)]
-
-        logger.info("Loading text embeddings from %s", text_embeddings)
-        self.video_context = load_video_context(text_embeddings)
 
         # Upstream ``vae_dtype = torch.float32``: both VAE ends run in fp32, the DiT in bf16.
         self.image_conditioner = ImageConditioner(self.model_dir, dtype=mx.float32)
@@ -203,7 +289,7 @@ class HDRICLoraPipeline(BasePipeline):
             height, width = read_exr(files[0]).shape[:2]
             return len(files), width, height, float(video.frame_rate)
         info = probe_video_info(str(video.path))
-        return info.num_frames, info.width, info.height, info.fps
+        return _count_video_frames(Path(video.path)), info.width, info.height, info.fps
 
     @staticmethod
     def _load_acescct_conditioning(
@@ -219,8 +305,11 @@ class HDRICLoraPipeline(BasePipeline):
             )
             source = Path(video.path)
         stacked = list(frames)
-        if not stacked:
-            raise ValueError(f"No frames loaded from {source}")
+        if len(stacked) != num_frames:
+            raise ValueError(
+                f"Loaded {len(stacked)} frames from {source} but the source was probed at {num_frames} frames "
+                "(truncated or unreadable stream?)."
+            )
         # (F, H, W, 3) -> (1, 3, F, H, W)
         return mx.array(np.stack(stacked, axis=0).astype(np.float32)).transpose(3, 0, 1, 2)[None]
 
@@ -315,7 +404,8 @@ class HDRICLoraPipeline(BasePipeline):
             (cropped to the source size, HQ-decimated) and the source frame rate.
 
         Raises:
-            ValueError: frame count off the 8k+1 grid, or resolution below 32 px after alignment.
+            ValueError: frame count off the 8k+1 grid, resolution below 32 px after alignment, odd
+                source width/height, or fewer frames loaded than probed.
         """
         num_frames, width, height, fps = self._probe(video)
 
@@ -334,6 +424,11 @@ class HDRICLoraPipeline(BasePipeline):
                 f"Resolution ({width}x{height}) too small after alignment "
                 f"(got {gen_w}x{gen_h}, need >= {MIN_RESOLUTION})."
             )
+
+        # The HLG master is 4:2:0: refuse odd source dimensions up front (upstream fails later, in
+        # the encoder, after the whole denoise).
+        if width % 2 or height % 2:
+            raise ValueError(f"Source is {width}x{height}; the HLG 4:2:0 master needs even width and height.")
 
         # Generate 2N-1 frames for high-quality HDR, N frames otherwise.
         gen_frames = 2 * num_frames - 1 if high_quality_hdr else num_frames
@@ -428,6 +523,8 @@ class HDRICLoraPipeline(BasePipeline):
         self._loaded = False
         aggressive_cleanup()
 
+        # Upstream decodes with ``dtype=vae_dtype`` (fp32): cast explicitly rather than rely on the sampler state.
+        latent = latent.astype(mx.float32)
         decode_kf = decode_keyframes_from_slots(slots, generated_kf, gen_frames)
         if decode_kf is not None:
             # Upstream casts the keyframe planes to ``vae_dtype`` (fp32) before the decode.
@@ -509,4 +606,5 @@ __all__ = [
     "conditioning_fps",
     "dfr_seam_roles",
     "load_video_context",
+    "require_hdr_export_tools",
 ]

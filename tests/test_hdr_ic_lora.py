@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 
@@ -187,7 +188,9 @@ class _FakeDecoderBlock:
         self.freed += 1
 
     def iter_frames(self, video_latent, *, seed, keyframes=None):
-        self.calls.append({"shape": tuple(video_latent.shape), "seed": seed, "keyframes": keyframes})
+        self.calls.append(
+            {"shape": tuple(video_latent.shape), "dtype": video_latent.dtype, "seed": seed, "keyframes": keyframes}
+        )
         start = 0
         for n in self.chunk_sizes:
             idx = np.arange(start, start + n, dtype=np.float32) / 1000.0
@@ -213,7 +216,8 @@ def _wire(tmp_path, monkeypatch, *, frames, size, rate, chunk_sizes, type_emb=1.
             dict(model=model, video_state=video_state, audio_state=audio_state, video_text_embeds=video_text_embeds,
                  audio_text_embeds=audio_text_embeds, sigmas=sigmas)
         )  # fmt: skip
-        return DenoiseOutput(video_latent=video_state.latent, audio_latent=None)
+        # bf16 like a sampler state without per-token sigmas: the decode must not inherit it
+        return DenoiseOutput(video_latent=video_state.latent.astype(mx.bfloat16), audio_latent=None)
 
     monkeypatch.setattr(hdr_mod, "denoise_loop", _loop)
     noised: list[dict] = []
@@ -264,6 +268,7 @@ def test_generate_wiring_matches_upstream(tmp_path, monkeypatch):
 
     (dec,) = pipe.video_decoder_block.calls
     assert dec["shape"] == (1, 128, 10, 2, 2) and dec["seed"] == 3
+    assert dec["dtype"] == mx.float32, "upstream decodes with dtype=vae_dtype (fp32)"
     assert dec["keyframes"] is not None and dec["keyframes"].pixel_frame_indices == (24, 48, 72)
     assert [c.shape for c in out] == [(40, 40, 48, 3), (33, 40, 48, 3)]
     assert pipe.video_decoder_block.freed == 1
@@ -422,3 +427,115 @@ def test_cmd_wires_the_pipeline(tmp_path, monkeypatch):
     assert video == VideoInput(tmp_path / "a.mp4", gamma_encoded=True)
     assert kw["keyframe_strength"] is None and kw["high_quality_hdr"] is True and kw["seed"] == 3
     assert kw["exr_color_space"] == EXRColorSpace.ACESCG
+
+
+# --- early refusals ---------------------------------------------------------------------------
+
+
+def _no_snapshot(monkeypatch):
+    calls: list[str] = []
+
+    def _resolver(model_dir):
+        calls.append(str(model_dir))
+        raise AssertionError("the pack must not be resolved before the cheap refusals")
+
+    monkeypatch.setattr(hdr_mod, "resolve_model_dir", _resolver)
+    return calls
+
+
+def test_hf_23_pack_is_refused_from_its_config_only(tmp_path, monkeypatch):
+    emb = _embeddings(tmp_path)
+    (tmp_path / "cfg").mkdir()
+    cfg_dir = _pack25(tmp_path / "cfg", ltx25=False)
+    fetched: list[tuple[str, str]] = []
+
+    def _download(repo_id, filename):
+        fetched.append((repo_id, filename))
+        return str(cfg_dir / filename)
+
+    monkeypatch.setattr(hdr_mod, "hf_hub_download", _download)
+    calls = _no_snapshot(monkeypatch)
+    with pytest.raises(ValueError, match=r"LTX-2\.5"):
+        HDRICLoraPipeline("someone/ltx-2.3-pack", hdr_lora=str(emb), text_embeddings=str(emb))
+    assert fetched == [("someone/ltx-2.3-pack", "embedded_config.json")] and calls == []
+
+
+@pytest.mark.parametrize("what", ["embeddings", "embeddings-key", "lora"])
+def test_bad_inputs_are_refused_before_any_download(tmp_path, monkeypatch, what):
+    emb = _embeddings(tmp_path)
+    calls = _no_snapshot(monkeypatch)
+    monkeypatch.setattr(
+        hdr_mod, "hf_hub_download", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no hub call"))
+    )
+    monkeypatch.setattr(
+        hdr_mod, "resolve_lora_path", lambda p: (_ for _ in ()).throw(AssertionError("no lora download"))
+    )
+    lora, text = str(emb), str(emb)
+    if what == "embeddings":
+        text, err = str(tmp_path / "missing.safetensors"), FileNotFoundError
+    elif what == "embeddings-key":
+        text = str(tmp_path / "k.safetensors")
+        mx.save_safetensors(text, {"other": mx.zeros((1, 2))})
+        err = KeyError
+    else:
+        lora, err = str(tmp_path / "missing_lora.safetensors"), FileNotFoundError
+    with pytest.raises(err):
+        HDRICLoraPipeline("someone/ltx-2.5-pack", hdr_lora=lora, text_embeddings=text)
+    assert calls == []
+
+
+def test_missing_openexr_is_refused_up_front(tmp_path, monkeypatch):
+    emb = _embeddings(tmp_path)
+    calls = _no_snapshot(monkeypatch)
+
+    def _no_openexr():
+        raise ImportError("EXR I/O needs the optional extra")
+
+    monkeypatch.setattr(hdr_mod.hdr_media, "_openexr", _no_openexr)
+    with pytest.raises(ImportError, match="optional extra"):
+        HDRICLoraPipeline("someone/ltx-2.5-pack", hdr_lora=str(emb), text_embeddings=str(emb))
+    assert calls == []
+
+
+def test_ffmpeg_without_libx265_is_refused(monkeypatch):
+    monkeypatch.setattr(
+        hdr_mod.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            a, 0, stdout=" V....D libx264  H.264\n V....D hevc_videotoolbox x\n"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="libx265"):
+        hdr_mod.require_hdr_export_tools()
+
+
+def test_odd_source_dims_are_refused_before_loading(tmp_path, monkeypatch):
+    emb = _embeddings(tmp_path)
+    pipe = HDRICLoraPipeline(str(_pack25(tmp_path)), hdr_lora=str(emb), text_embeddings=str(emb))
+    monkeypatch.setattr(pipe, "_probe", lambda video: (9, 63, 64, 24.0))
+    monkeypatch.setattr(pipe, "load", lambda: (_ for _ in ()).throw(AssertionError("must not load")))
+    with pytest.raises(ValueError, match="even"):
+        pipe.generate(VideoInput(tmp_path / "x.mp4", gamma_encoded=True), seed=0)
+
+
+def test_short_read_is_a_clear_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        hdr_mod,
+        "load_video_as_hdr_conditioning",
+        lambda path, h, w, cap, *, gamma_encoded: iter([np.zeros((h, w, 3), np.float32)] * 5),
+    )
+    with pytest.raises(ValueError, match=r"Loaded 5 frames .* 9 frames"):
+        HDRICLoraPipeline._load_acescct_conditioning(VideoInput(tmp_path / "x.mp4", gamma_encoded=True), 32, 32, 9)
+
+
+def test_frame_count_is_decoded_when_the_container_has_no_nb_frames(tmp_path, monkeypatch):
+    src = tmp_path / "s.mkv"  # Matroska streams carry no nb_frames
+    subprocess.run(
+        [find_ffmpeg(), "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=gray:s=64x64:r=24",
+         "-frames:v", "9", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(src)],
+        check=True,
+    )  # fmt: skip
+    real_probe = hdr_mod.probe_video_info
+    # A wrong duration*fps estimate (what probe_video_info falls back to) must not be used.
+    monkeypatch.setattr(hdr_mod, "probe_video_info", lambda p: dataclasses.replace(real_probe(p), num_frames=8))
+    assert HDRICLoraPipeline._probe(VideoInput(src, gamma_encoded=True))[0] == 9
