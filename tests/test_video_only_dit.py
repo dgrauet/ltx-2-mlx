@@ -120,3 +120,36 @@ def test_x0model_video_only():
         video_positions=compute_video_positions(F, H, W, frame_rate=24.0),
     )
     assert a is None and v.shape == video.shape
+
+
+class _EchoX0:
+    """x0 = 0 on video; records the audio argument."""
+
+    def __init__(self):
+        self.audio_args = []
+
+    def __call__(self, *, video_latent, audio_latent, **_):
+        self.audio_args.append(audio_latent)
+        return mx.zeros_like(video_latent), None
+
+
+def test_denoise_loop_runs_video_only():
+    from ltx_core_mlx.conditioning.types.latent_cond import LatentState
+    from ltx_pipelines_mlx.utils.samplers import denoise_loop
+
+    tokens = mx.ones((1, 8, 4))
+    state = LatentState(
+        latent=tokens, clean_latent=tokens, denoise_mask=mx.ones((1, 8, 1)), positions=mx.zeros((1, 8, 3))
+    )
+    model = _EchoX0()
+    out = denoise_loop(
+        model=model,
+        video_state=state,
+        audio_state=None,
+        video_text_embeds=mx.zeros((1, 2, 4)),
+        audio_text_embeds=None,
+        sigmas=[1.0, 0.5, 0.0],
+        show_progress=False,
+    )
+    assert out.audio_latent is None and all(a is None for a in model.audio_args)
+    assert out.video_latent.shape == tokens.shape
