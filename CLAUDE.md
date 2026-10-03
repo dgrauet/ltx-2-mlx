@@ -986,8 +986,8 @@ that path. 2.3 packs are byte-identical to before.
 ### Sampler
 
 - Stage 1: `euler_ancestral_denoising_loop` (`EulerAncestralDiffusionStep(eta=ANCESTRAL_ETA, s_noise=ANCESTRAL_S_NOISE)`, 8 steps) on `LTX_2_5_DISTILLED_SIGMAS`.
-- Stage 2: stays the deterministic Euler loop (`STAGE_2` renoise) on `LTX_2_5_STAGE_2_DISTILLED_SIGMAS`, matching upstream: *"Stage 2 is always deterministic — its 3-step refinement schedule is too short to remove freshly injected noise."*
-- Ancestral noise is seeded from `seed + ANCESTRAL_NOISE_SEED_OFFSET` (10000) to decorrelate from the initial-latent draw.
+- Stage 2: also `euler_ancestral_denoising_loop` (same eta / s_noise, `STAGE_2` renoise) on `LTX_2_5_STAGE_2_DISTILLED_SIGMAS`, as upstream since v1.4.0 (it used to keep stage 2 deterministic). This also covers DFR's stage 2, which reuses `_stage2`.
+- Ancestral noise is seeded from `seed + ANCESTRAL_NOISE_SEED_OFFSET` (10000) for stage 1 and `seed + ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET` (20000) for stage 2, to decorrelate both from the initial-latent draw and from each other. 2.3 packs stay deterministic on both stages.
 - Stage 2 upscaler resolves to `spatial_upscaler_x2_v1_0.safetensors` (vs `v1_1` on 2.3), falling back to the 2.3 stems; hard error only when none exists (#42 style).
 
 ### Auto-Duration (`DurationHead`, `-f` optional on 2.5)
@@ -1133,7 +1133,7 @@ is the identity, so nothing changes numerically; `--distilled` (outside DFR) is 
   ([Generated keyframe slots](#generated-keyframe-slots---num-generated-keyframes-n-25-packs)),
   driven internally rather than by the CLI flag (`--num-generated-keyframes` is refused on
   `--dfr`). Optional I2V anchors (`--image`) apply as usual.
-- **Stage 2** (`_stage2`, full resolution, deterministic): the stage-1 video latent and its
+- **Stage 2** (`_stage2`, full resolution, ancestral on 2.5 like `--distilled`): the stage-1 video latent and its
   extracted keyframe-slot latents are each upsampled once (2× spatial, matching upstream's
   single-call-per-tensor shape), then denoised with two extra conditionings appended:
   `VideoGeneratedKeyframeSlots` (the upsampled slots, at the same canvas pixel-frame positions)
@@ -1174,25 +1174,32 @@ stage-2 video latent with the temporal latent upsampler (pack `temporal_upscaler
 resolved by `_resolve_temporal_upsampler_path` — a local `--temporal-upsampler-path` override skips
 that lookup), then cuts the doubled timeline into `2**round` keyframe-seam tiles (`TemporalTilePlan`,
 `dfr_layout.py`) at the carried keyframe positions (`seams = [2 * p for p in carry_positions]`) —
-tiling is a hard split, not a blend: the lead-in before a seam is dropped and the earlier tile keeps
-the seam frame. Each tile is re-denoised independently with the **distilled transformer, detailing
+tiling is a hard split with **no overlap** (kept runs are disjoint), not a blend. A non-first tile
+**starts on a keyframe plane with a pinned prefix** (upstream v1.4.0 `TilePrefix` / `tile_prefix` /
+`lead_in_carryover`, ours in `dfr_layout.py` / `dfr.py::lead_in_latent`): cell 0 is the plane at the
+last plane position before its seam (usually the previous tile's fresh mid-segment slot), cells
+`1 .. (seam - plane) / 8` are the previous tile's finished output up to the seam, pinned by a
+strength-1 `VideoConditionByLatentIndex` at index 0 (mask 0, so they *are* that output at every
+step), and only the cells after the seam are kept. A tile is denoised as its own clip, whose cell 0
+the model reads as one pixel frame: starting on a plane keeps content, shape and RoPE time in
+agreement (the old mid-canvas lead-in ran 7 frames ahead). Each tile is re-denoised independently with the **distilled transformer, detailing
 LoRA detached** (`_detach_detailing_lora`, run once before round 1: under `--low-ram` this drops the
 `BlockLoraSource` from the streamer, otherwise it reloads a clean transformer) on the last 4 denoising
 steps of the distilled sigma schedule (`TEMPORAL_SIGMAS = LTX_2_5_DISTILLED_SIGMAS[4:]`, 5 sigma
 entries bracketing 4 steps) via ancestral Euler
 (`EulerAncestralDiffusionStep(eta=TEMPORAL_ANCESTRAL_ETA=0.5)`, noise seed `seed + 1000*round + tile`).
-Conditioning per tile: the carried keyframes anchor the tile at `ANCHOR_KEYFRAME_STRENGTH = 0.95`
-(soft, not a hard replace), plus fresh mid-segment generated-keyframe slots on the doubled
-timeline. Audio is **frozen**, not re-denoised: stage 1's audio latent is windowed to the tile's
+Conditioning per tile: the carried keyframes after the tile's resume point (seam + 1) anchor it at
+`ANCHOR_KEYFRAME_STRENGTH = 0.95` (soft, not a hard replace; anchors inside the pinned prefix are
+dropped), plus fresh generated-keyframe slots at the *canvas* segment midpoints that fall in the tile,
+and user images rebased on the tile window (prefix included). Audio is **frozen**, not re-denoised: stage 1's audio latent is windowed to the tile's
 time range and resampled to the tile's new token count (`resample_audio_time`,
 `audio_latent_for_tile`) as a `frozen` state (all-zero `denoise_mask`, sigma 0 for the audio prompt
 AdaLN and the A→V gate — see "Frozen streams and per-modality sigma"), as upstream. The
 transformer's conditioning fps is snapped by
 `conditioning_fps()` — RoPE fps above 30 snaps to 60 (`_MAX_CONDITIONING_FPS = 60.0`); the actual
 playback fps (`frame_rate * 2**temporal_upscalings`) is unchanged. After each round,
-`merge_carry_forward_keyframes` folds the round's new slots (lead-in duplicates: the earlier tile
-wins) and the seam anchors into one carry bag (`generated_keyframes` / `generated_keyframe_positions`)
-on that round's grid; the last round's bag
+the carry bag (`generated_keyframes` / `generated_keyframe_positions`) is every plane on that round's
+grid: the scaled anchors plus each tile's new slots, added as the tile finishes (existing planes win); the last round's bag
 is what the keyframe-aware decode (`--video-decoder diffusion`) consumes instead of the stage-2 slots
 — the conv decoder ignores it exactly as it ignores the stage-2 slots. Output frame count is
 `(requested - 1) * 2**T + 1` at `frame_rate * 2**T` fps. Rounds refuse `--segment` (Prompt Relay) and
@@ -1217,16 +1224,26 @@ The first diffusion-decoder and T=2 attempts were killed by the macOS GPU watchd
 warning when this changes the requested size), stage 1 runs at H/4 and stage 2 plus every temporal
 round run at H/2 instead of the default H/2 / full res split — one extra spatial halving deferred
 to a final epilogue. After stage 2 (and any temporal rounds) finish, `_run_spatial_epilogue`
-details the H/2 latent up to full resolution: the carry keyframe bag is decoded one plane at a
-time with the render's own decoder (conv or diffusion, seeded `seed + 4000 + i`), Lanczos-upsampled
-×2 in RGB, and re-encoded as strength-1.0 keyframe conditionings at full resolution; the H/2 video
-latent is spatially upsampled once more (same latent upsampler as stage 2) and re-denoised with the
-distilled transformer + detailing LoRA (0.5), conditioned on the re-encoded keyframes plus an
-IC-LoRA reference built from the pre-upsample H/2 latent, on the stage-2 sigma table (3-step
-deterministic Euler) with stage 1's audio carried through frozen. Every model call in the epilogue
-goes through `X0Model(TiledLTXModel(..., normalize_positions=True))`: 2×2 spatial tiles (overlap
-12) and `2**temporal_upscalings` temporal tiles cut on the last round's seams, since the full-res
-token count would otherwise be too large for one forward. The re-encoded keyframes (not the
+details the H/2 latent up to full resolution (upstream v1.4.0 `run_spatial_epilogue`): the carry
+keyframe bag is decoded one plane at a time with the render's own decoder (conv or diffusion, seeded
+`seed + 4000 + i`), Lanczos-upsampled ×2 in RGB, and re-encoded as strength-1.0 keyframe
+conditionings at full resolution. When no user image sits at frame 0 of the final grid, the H/2
+latent's first frame is decoded the same way (next seed) as an **opening plane** that anchors frame
+0 of the first window and is not shipped. The H/2 video latent is spatially upsampled once more and
+re-denoised **window by window** (`plan_epilogue_windows`): one window per last-round temporal tile
+(the whole canvas without rounds), run sequentially, each non-first window starting on the last carry
+plane before its seam with its lead-in pinned to the previous window's finished output, exactly as in
+the temporal rounds. Per window: the carry planes after its resume point, the opening plane (first
+window), user images on the final grid, an IC-LoRA reference built from the pre-upsample H/2 latent
+cropped to the window, and stage 1's audio windowed and frozen. Each window runs the stage-2 sigma
+table with the distilled transformer + detailing LoRA (0.5) in two phases (`epilogue_sigma_phases`):
+one ancestral step on a **2×2** spatial grid, then the same conditionings re-applied to that output
+(no new noise) and the remaining steps on a **4×4** grid (a one-step table stays 2×2); spatial
+tiles overlap 10 cells and blend after every step through
+`X0Model(TiledLTXModel(..., normalize_positions=True))`, windows are never blended. Seeds: initial
+noise `seed + 2000 + 100 * window`, ancestral `seed + 30000 + pass` (window i: coarse 2i, fine
+2i + 1). Upstream's own T=0 path builds `TemporalTilePlan([])`, whose seam split refuses an empty
+boundary list; we treat it as one window. The re-encoded keyframes (not the
 pre-epilogue slots) become the decoder keyframes for the final keyframe-aware decode. `--dfr
 --spatial-upscalings 2` refuses `--tile-frames` / `--tile-spatial` (modality tiling collides with
 the epilogue's own tiling) and `--segment` (Prompt Relay), both up front in the CLI before any

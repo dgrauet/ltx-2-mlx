@@ -8,7 +8,8 @@ canvas into keyframe-seam tiles for the temporal-upsample rounds.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from typing import NamedTuple, overload
 
 from ltx_core_mlx.model.video_vae.tiling import split_at_seams as core_split_at_seams
@@ -111,9 +112,12 @@ class TemporalTile(NamedTuple):
 class TemporalTilePlan:
     """Keyframe-seam tiles for one temporal-upsample round (upstream ``TemporalTilePlan``).
 
-    Overlap is one canvas segment in latent cells plus the shared seam cell. Anchors are the seams
-    inside ``[pixel_start, pixel_end]``; slots are the midpoints between consecutive marks
-    ``[pixel_start, seams in (pixel_start, pixel_end]]``.
+    The split takes **no overlap**: a tile's kept cells are exactly the segments it owns, so the
+    stitched runs are disjoint. The pinned prefix a non-first tile denoises before them is not a
+    cell count; it starts at the last keyframe plane before the seam (:func:`tile_prefix`). Anchors
+    are the seams inside ``[pixel_start, pixel_end]``; slots are the midpoints of the *canvas*
+    segments, handed to whichever tile contains them (a tile's own first mark can be off the x8
+    border once it starts mid-canvas, which a plane may not be).
     """
 
     tiles: tuple[TemporalTile, ...]
@@ -131,14 +135,13 @@ class TemporalTilePlan:
         """
         seams = [0, *(pixel_to_latent_index(position, temporal_scale) for position in seam_positions)]
         latent_len = (num_frames - 1) // temporal_scale + 1
-        overlap = (seams[1] - seams[0]) + 1 if len(seams) > 1 else 0
+        global_slots = [(left + right) // 2 for left, right in itertools.pairwise([0, *seam_positions])]
         tiles: list[TemporalTile] = []
-        for interval in split_canvas_at_seams(seams, num_tiles, overlap, latent_len):
+        for interval in split_canvas_at_seams(seams, num_tiles, 0, latent_len):
             pixel_start = interval.start * temporal_scale
             pixel_end = (interval.end - 1) * temporal_scale
             anchors = tuple(p for p in seam_positions if pixel_start <= p <= pixel_end)
-            marks = [pixel_start, *[p for p in seam_positions if pixel_start < p <= pixel_end]]
-            slots = tuple((left + right) // 2 for left, right in itertools.pairwise(marks))
+            slots = tuple(p for p in global_slots if pixel_start <= p <= pixel_end)
             tiles.append(TemporalTile(interval, pixel_start, pixel_end, anchors, slots))
         self.tiles = tuple(tiles)
 
@@ -159,3 +162,57 @@ class TemporalTilePlan:
     def __getitem__(self, index: int | slice) -> TemporalTile | tuple[TemporalTile, ...]:
         """Tile(s) by index."""
         return self.tiles[index]
+
+
+@dataclass(frozen=True)
+class TilePrefix:
+    """Where a non-first temporal tile starts, and how much of it is handed over rather than denoised.
+
+    Mirrors upstream ``dfr_helpers.ops.TilePrefix``. A tile is denoised as its own clip, whose cell 0
+    the model reads as a single pixel frame (causal convention); so a tile begins on a real one-frame
+    latent, the keyframe plane at the last plane position before its seam. Cell 0 is that plane, cells
+    ``1 .. (seam - keyframe) / scale`` are the video between it and the seam, and the tile resumes on
+    the cell after the seam. Cell ``k`` covers ``keyframe + scale*(k-1) + 1 .. keyframe + scale*k``, so
+    the last pinned cell ends on the seam and the seam keyframe is absorbed into it.
+
+    Attributes:
+        keyframe_position: Pixel frame of the plane that becomes cell 0.
+        video_start_cell: First canvas cell of the pinned video run (right after the plane).
+        cells: Pinned latent cells, the plane included.
+        resume_pixel: First pixel frame the tile actually denoises.
+    """
+
+    keyframe_position: int
+    video_start_cell: int
+    cells: int
+    resume_pixel: int
+
+
+def tile_prefix(seam_pixel: int, plane_positions: Iterable[int], temporal_scale: int = _TEMPORAL_SCALE) -> TilePrefix:
+    """Resolve a non-first tile's pinned prefix from the planes available before its seam.
+
+    Mirrors upstream ``dfr_helpers.ops.tile_prefix``.
+
+    Args:
+        seam_pixel: Pixel frame of the tile's seam (the last cell of the previous tile).
+        plane_positions: Pixel frames of the keyframe planes known so far.
+        temporal_scale: Pixel frames per latent frame.
+
+    Returns:
+        The tile's :class:`TilePrefix`.
+
+    Raises:
+        RuntimeError: no plane before the seam, or the plane / seam is off the latent border.
+    """
+    before = [position for position in plane_positions if position < seam_pixel]
+    if not before:
+        raise RuntimeError(f"no keyframe plane before seam {seam_pixel} to start the tile on")
+    keyframe = max(before)
+    if keyframe % temporal_scale or seam_pixel % temporal_scale:
+        raise RuntimeError(f"keyframe {keyframe} and seam {seam_pixel} must both sit on the x{temporal_scale} border")
+    return TilePrefix(
+        keyframe_position=keyframe,
+        video_start_cell=keyframe // temporal_scale + 1,
+        cells=1 + (seam_pixel - keyframe) // temporal_scale,
+        resume_pixel=seam_pixel + 1,
+    )
