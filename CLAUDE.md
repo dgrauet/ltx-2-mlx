@@ -666,7 +666,7 @@ Two-stage pipeline for higher-resolution generation. Requires the dev model + di
   - `--two-stages-hq`: res_2s second-order sampler (`res2s_denoise_loop` with guidance)
   - Dynamic sigma schedule via `ltx2_schedule` (default 30 steps standard, 15 HQ)
   - Optional I2V conditioning (re-encoded at half-res)
-- **Stage 2**: Dev + distilled LoRA fused, simple Euler (no CFG)
+- **Stage 2**: Dev + distilled LoRA fused, no CFG: Euler on `--two-stage`, res_2s on `--two-stages-hq` (as upstream; two forwards per step)
   - `STAGE_2_SIGMAS` (default 3 steps)
   - I2V conditioning re-encoded at full resolution
   - Denormalize → neural upsampler 2x → re-normalize before Stage 2
