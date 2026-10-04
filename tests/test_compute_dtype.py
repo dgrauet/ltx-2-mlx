@@ -112,7 +112,7 @@ def test_set_compute_dtype_casts_only_attention_and_ff_params():
     model.set_compute_dtype(mx.float16)
     assert model.compute_dtype == mx.float16
     for module in _compute_modules(model):
-        assert isinstance(module, (Attention, FeedForward))
+        assert isinstance(module, Attention | FeedForward)
         assert module.compute_dtype == mx.float16
     block = model.transformer_blocks[0]
     assert block.attn1.to_q.weight.dtype == mx.uint32  # packed int8 untouched
@@ -322,6 +322,81 @@ def test_streamed_overflow_guard_drops_the_setting_on_the_wrapper(capsys):
         v2, _ = streamed(**inputs)
         assert "not finite" not in capsys.readouterr().err
         assert _rel_err(v2, ref_v) < 1e-5
+
+
+def _video_only(inputs: dict) -> dict:
+    """The video-only DiT call (``hdr-ic-lora``): no audio latent, no audio prompt."""
+    return {**inputs, "audio_latent": None, "audio_text_embeds": None}
+
+
+def _streamed(path: Path) -> StreamingLTXModel:
+    inner = _model()
+    inner.transformer_blocks = [inner.transformer_blocks[0]]
+    return StreamingLTXModel(inner, BlockStreamer(path, block_prefix="transformer_blocks."))
+
+
+def test_video_only_with_compute_dtype_resident():
+    ref_model, model = _model(), _model()
+    model.set_compute_dtype(mx.float16)
+    inputs = _video_only(_inputs(ref_model.config))
+    ref_v, _ = ref_model(**inputs)
+    v, a = model(**inputs)  # the overflow guard must skip the missing audio output
+    assert a is None
+    assert model.compute_dtype == mx.float16  # finite: the guard did not fire
+    assert 1e-6 < _rel_err(v, ref_v) < 5e-3
+
+
+def test_video_only_overflow_guard_recomputes(capsys):
+    ref_model, model = _model(), _model()
+    for m in (ref_model, model):
+        ff = m.transformer_blocks[0].ff.proj_out
+        ff.scales = ff.scales * 5e5  # finite in float32, past float16's 65504 inside the feed-forward
+        mx.eval(m.parameters())
+    model.set_compute_dtype(mx.float16)
+    inputs = _video_only(_inputs(ref_model.config))
+    ref_v, _ = ref_model(**inputs)
+    v, a = model(**inputs)
+    assert "not finite" in capsys.readouterr().err
+    assert a is None and model.compute_dtype is None
+    assert _rel_err(v, ref_v) < 1e-3
+
+
+def test_video_only_with_compute_dtype_streamed():
+    """``hdr-ic-lora --low-ram``: the streamed wrapper runs the eager block when audio is None."""
+    resident = _model()
+    resident.set_compute_dtype(mx.float16)
+    inputs = _video_only(_inputs(resident.config))
+    ref_v, _ = resident(**inputs)
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "blocks.safetensors"
+        _save_blocks(_model(), path)
+        streamed = _streamed(path)
+        streamed.set_compute_dtype(mx.float16)
+        v, a = streamed(**inputs)
+        assert a is None
+        assert streamed.compute_dtype == mx.float16
+        assert _rel_err(v, ref_v) < 1e-5
+
+
+def test_streamed_video_only_matches_resident():
+    resident = _model()
+    inputs = _video_only(_inputs(resident.config))
+    ref_v, _ = resident(**inputs)
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "blocks.safetensors"
+        _save_blocks(_model(), path)
+        streamed = _streamed(path)
+        v, a = streamed(**inputs)
+        assert a is None
+        assert _rel_err(v, ref_v) < 1e-5
+        # Positional audio argument: the wrapper must still pick the eager fallback.
+        positional = dict(inputs)
+        video = positional.pop("video_latent")
+        audio = positional.pop("audio_latent")
+        v2, a2 = streamed(video, audio, **positional)
+        assert a2 is None and _rel_err(v2, ref_v) < 1e-5
 
 
 @pytest.mark.parametrize(
