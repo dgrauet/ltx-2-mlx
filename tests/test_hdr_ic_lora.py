@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import subprocess
 
 import mlx.core as mx
@@ -484,9 +485,6 @@ def test_bad_inputs_are_refused_before_any_download(tmp_path, monkeypatch, what)
     monkeypatch.setattr(
         hdr_mod, "hf_hub_download", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no hub call"))
     )
-    monkeypatch.setattr(
-        hdr_mod, "resolve_lora_path", lambda p: (_ for _ in ()).throw(AssertionError("no lora download"))
-    )
     lora, text = str(emb), str(emb)
     if what == "embeddings":
         text, err = str(tmp_path / "missing.safetensors"), FileNotFoundError
@@ -499,6 +497,39 @@ def test_bad_inputs_are_refused_before_any_download(tmp_path, monkeypatch, what)
     with pytest.raises(err):
         HDRICLoraPipeline("someone/ltx-2.5-pack", hdr_lora=lora, text_embeddings=text)
     assert calls == []
+
+
+def _no_hub(monkeypatch):
+    def _forbidden(*a, **k):
+        raise AssertionError("no hub call")
+
+    monkeypatch.setattr(hdr_mod, "hf_hub_download", _forbidden)
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _forbidden)
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", _forbidden)
+    monkeypatch.setattr("ltx_pipelines_mlx.utils._orchestration.snapshot_download", _forbidden)
+
+
+def test_hdr_lora_repo_id_is_refused_before_any_download(tmp_path, monkeypatch):
+    """A repo id would snapshot both .safetensors of the repo and then fail as ambiguous."""
+    emb = _embeddings(tmp_path)
+    calls = _no_snapshot(monkeypatch)
+    _no_hub(monkeypatch)
+    with pytest.raises(ValueError, match=r"local \.safetensors") as exc:
+        HDRICLoraPipeline(
+            "someone/ltx-2.5-pack", hdr_lora="Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR", text_embeddings=str(emb)
+        )
+    assert hdr_mod.HDR_LORA_FILENAME in str(exc.value) and hdr_mod.HDR_LORA_REPO in str(exc.value)
+    assert calls == []
+
+
+def test_missing_lora_and_embeddings_name_the_files_to_fetch(tmp_path, monkeypatch):
+    emb = _embeddings(tmp_path)
+    _no_snapshot(monkeypatch)
+    _no_hub(monkeypatch)
+    with pytest.raises(FileNotFoundError, match=re.escape(hdr_mod.HDR_LORA_FILENAME)):
+        HDRICLoraPipeline("p", hdr_lora=str(tmp_path / "nope.safetensors"), text_embeddings=str(emb))
+    with pytest.raises(FileNotFoundError, match=re.escape(hdr_mod.HDR_SCENE_EMBEDDINGS_FILENAME)):
+        HDRICLoraPipeline("p", hdr_lora=str(emb), text_embeddings=hdr_mod.HDR_LORA_REPO)
 
 
 def test_missing_openexr_is_refused_up_front(tmp_path, monkeypatch):

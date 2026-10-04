@@ -972,14 +972,18 @@ examples:
         "--hdr-lora",
         required=True,
         help=(
-            "SDR-to-HDR IC-LoRA .safetensors (Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR, gated). Pass the local file: "
-            "the repo also holds the scene embeddings, so a bare repo id is ambiguous."
+            "Local SDR-to-HDR IC-LoRA file ltx-2.5-22b-ic-lora-sdr-to-hdr-1.0.safetensors, downloaded from the "
+            "gated Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR. A repo id is refused: the repo also holds the "
+            "scene embeddings."
         ),
     )
     hdr.add_argument(
         "--text-embeddings",
         required=True,
-        help=".safetensors with video_context (the scene embeddings shipped in the HDR LoRA repo).",
+        help=(
+            "Local .safetensors with video_context: ltx-2.5-22b-ic-lora-sdr-to-hdr-scene-emb.safetensors from the "
+            "same repo as --hdr-lora."
+        ),
     )
     hdr.add_argument(
         "--input-colorspace",
