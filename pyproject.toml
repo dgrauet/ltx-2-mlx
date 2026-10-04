@@ -25,6 +25,8 @@ dependencies = [
 
 [project.optional-dependencies]
 trainer = ["ltx-trainer-mlx"]
+# hdr-ic-lora EXR I/O; forwards to the pipelines package's own extra (one version pin).
+hdr = ["ltx-pipelines-mlx[hdr]"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -36,7 +38,7 @@ dev = [
     # missing, which breaks transformers' import-time scipy probe.
     "scipy>=1.10",
 ]
-all = ["ltx-2-mlx[trainer,dev]"]
+all = ["ltx-2-mlx[trainer,hdr,dev]"]
 
 [project.urls]
 Homepage = "https://github.com/dgrauet/ltx-2-mlx"

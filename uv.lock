@@ -453,6 +453,7 @@ dependencies = [
 [package.optional-dependencies]
 all = [
     { name = "colour-science" },
+    { name = "ltx-pipelines-mlx", extra = ["hdr"] },
     { name = "ltx-trainer-mlx" },
     { name = "openexr" },
     { name = "pytest" },
@@ -472,6 +473,9 @@ dev = [
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "ty" },
 ]
+hdr = [
+    { name = "ltx-pipelines-mlx", extra = ["hdr"] },
+]
 trainer = [
     { name = "ltx-trainer-mlx" },
 ]
@@ -479,9 +483,10 @@ trainer = [
 [package.metadata]
 requires-dist = [
     { name = "colour-science", marker = "extra == 'dev'", specifier = ">=0.4.6" },
-    { name = "ltx-2-mlx", extras = ["trainer", "dev"], marker = "extra == 'all'" },
+    { name = "ltx-2-mlx", extras = ["trainer", "hdr", "dev"], marker = "extra == 'all'" },
     { name = "ltx-core-mlx", editable = "packages/ltx-core-mlx" },
     { name = "ltx-pipelines-mlx", editable = "packages/ltx-pipelines-mlx" },
+    { name = "ltx-pipelines-mlx", extras = ["hdr"], marker = "extra == 'hdr'", editable = "packages/ltx-pipelines-mlx" },
     { name = "ltx-trainer-mlx", marker = "extra == 'trainer'", editable = "packages/ltx-trainer" },
     { name = "openexr", marker = "extra == 'dev'", specifier = ">=3.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -490,7 +495,7 @@ requires-dist = [
     { name = "scipy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.0a1" },
 ]
-provides-extras = ["trainer", "dev", "all"]
+provides-extras = ["trainer", "hdr", "dev", "all"]
 
 [[package]]
 name = "ltx-core-mlx"
