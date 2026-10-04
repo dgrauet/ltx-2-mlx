@@ -1,6 +1,6 @@
 # Pipelines guide — which pipeline, which flags
 
-Current as of **v0.15.8**. Architecture and internals: [CLAUDE.md](../CLAUDE.md).
+Current as of **v0.16.0**. Architecture and internals: [CLAUDE.md](../CLAUDE.md).
 Stability tiers: [PIPELINE_MATURITY.md](PIPELINE_MATURITY.md).
 User-facing overview: [README.md](../README.md).
 
@@ -12,7 +12,7 @@ takes `--height, -H` first and `--width, -W` second.
 Start from what you have:
 
 - **Text only** → `generate --distilled` (fastest, 2.5 packs recommended) · `generate --two-stage` (dev + CFG, best default quality) · `generate --two-stages-hq` (res_2s sampler, slower) · `generate --one-stage` (native resolution ≤ 704 × 480, no upsampler).
-- **Text + one or more images** → the same four `generate` modes with `--image PATH FRAME STRENGTH` (repeatable).
+- **Text + one or more images** → the same `generate` modes (all five, `--dfr` included) with `--image PATH FRAME STRENGTH` (repeatable).
 - **Two images to interpolate between** → `keyframe`.
 - **A control video** (depth / canny / pose / motion tracks) → `ic-lora`; **an SDR clip to upgrade to HDR (2.5 packs)** → `hdr-ic-lora`.
 - **An audio track to drive the video** → `a2v`.
@@ -34,7 +34,7 @@ Everything else is in [Common flags](#common-flags).
 ### `generate --distilled`
 
 - **Produces:** T2V / I2V mp4 with audio. Half-res distilled pass, 2× latent upsample, 3-step distilled refine.
-- **Packs:** 2.3 and 2.5. On 2.5 stage 1 uses the ancestral sampler. **Tier:** Stable.
+- **Packs:** 2.3 and 2.5. On 2.5 both stages use the ancestral sampler (stage-2 noise seeded from `seed + 20000`); 2.3 stays deterministic Euler. **Tier:** Stable.
 - **Required:** `--prompt`, `--output`, `--frame-rate`. `--frames` is required on 2.3 packs and auto-predicted on 2.5.
 - **Own flags:** `--stage1-steps` (8), `--stage2-steps` (3). No CFG, so `--cfg-scale`, `--stg-scale` and TeaCache do not apply, and `--negative-prompt` is rejected.
 - **Example:** `ltx-2-mlx generate --distilled -p "a fox in the forest" -H 512 -W 768 -f 49 --frame-rate 24 -o fox.mp4`
@@ -42,7 +42,7 @@ Everything else is in [Common flags](#common-flags).
 
 ### `generate --two-stage`
 
-- **Produces:** T2V / I2V mp4 with audio. Dev model + CFG at half resolution, 2× upsample, distilled 3-step refine.
+- **Produces:** T2V / I2V mp4 with audio. Dev model + CFG at half resolution, 2× upsample, distilled 3-step refine of the video. Stage 2 keeps stage 1's audio as frozen conditioning (upstream v1.4.0 `freeze_audio=True`).
 - **Packs:** 2.3 and 2.5. **Tier:** Stable. Best default quality per minute.
 - **Required:** `--prompt`, `--output`, `--frame-rate`; `--frames` on 2.3 packs.
 - **Own flags:** `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--negative-prompt`, `--stg-scale` (1.0; each unit above 0 adds one extra forward pass per step — pass `--stg-scale 0` on 32 GB Macs for long clips), `--dev-transformer` (`transformer-dev.safetensors`), `--distilled-lora`, `--distilled-lora-strength` (1.0), `--enable-teacache`, `--teacache-thresh`.
@@ -51,7 +51,7 @@ Everything else is in [Common flags](#common-flags).
 
 ### `generate --two-stages-hq`
 
-- **Produces:** the same two-stage output with the second-order res_2s sampler in stage 1.
+- **Produces:** the same two-stage output with the second-order res_2s sampler on both stages (stage 2 without guidance, as upstream). Unlike `--two-stage`, stage 2 re-noises the stage-1 audio and refines it with the video, as upstream does.
 - **Packs:** 2.3 and 2.5. **Tier:** Stable. Roughly twice the stage-1 cost of `--two-stage`.
 - **Required:** identical to `--two-stage`.
 - **Own flags:** identical to `--two-stage`, except `--stage1-steps` defaults to 15 and `--stg-scale` to 0.0. Each step runs two model evaluations.
@@ -75,7 +75,7 @@ Everything else is in [Common flags](#common-flags).
 - **Required:** `--prompt`, `--output`, `--frame-rate` (`-f` optional: auto-predicted).
 - **Own flags:** `--detailing-lora PATH_OR_REPO` (official LoRA, downloaded on first use — **gated repo**: accept the licence once at [huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler) with the account `huggingface-cli login` uses, or the run stops before any model load; a local `.safetensors` path skips the download), `--stage1-steps` (8), `--stage2-steps` (3), `--image PATH FRAME STRENGTH` (repeatable), `--spatial-upscalings {1,2}` (1), `--temporal-upscalings {0,1,2}` (0), `--temporal-upsampler-path PATH` (default: the pack's `temporal_upscaler_x2_v1_0.safetensors`). Not accepted: `--num-generated-keyframes` (slots come from the canvas), `--enable-teacache`, `--cfg-scale`, `--stg-scale`, `--negative-prompt`; with `--temporal-upscalings` set or `--spatial-upscalings 2`, also not accepted: `--segment` (Prompt Relay), `--tile-frames` / `--tile-spatial`.
 - **Example:** `ltx-2-mlx generate --dfr --model /path/to/ltx-2.5-mlx-q8 -p "a fox in the forest" -H 512 -W 768 -f 49 --frame-rate 24 --low-ram -o fox.mp4`
-- **Cost (M2 Pro 32 GB, q8, `--low-ram`):** 768 × 512, 49 frames ≈ 277 s (8-step stage 1 at ~10.7 s/forward over 864 video tokens, 3-step stage 2 at ~53.5 s/forward over 4128 tokens — target + 2 keyframe slots + the half-res reference), peak Metal 14.0 GB, max RSS 10.8 GB. Frame 24 is visibly sharper (tree crowns, haze texture) than the plain `--distilled` render at the same seed. `--image` (I2V, frame 0 anchor) adds ~7 s. A 137-frame request pads to a 145-frame canvas (6 slots) and costs ≈ 783 s. `--video-decoder diffusion` at 1152 × 768, 25 frames runs untiled at ≈ 465 s, 12 GB peak Metal (the decoder now runs in its own bf16 whatever dtype the pipeline hands it; the first measurement, 22 GB, was the decode promoted to fp32 by an fp32 stage-2 latent). The keyframe-aware diffusion decode costs +58 % on the decode phase at 768 × 512 × 49 (157 s vs 100 s, 2 planes), same peak Metal. Temporal rounds at 768 × 512, 121 frames: `--temporal-upscalings 1` (241 frames @ 48 fps) ≈ 29 min, `--temporal-upscalings 2` (481 @ 96) ≈ 70 min; each 145-frame round tile costs ~9–10 min (4 ancestral steps). Spatial epilogue at 1536 × 1024, 49 frames: `--spatial-upscalings 2` ≈ 25 min (epilogue ≈ 19 min, 4 tiles × 3 steps), + `--temporal-upscalings 1` ≈ 75 min (97 frames @ 48 fps).
+- **Cost (M2 Pro 32 GB, q8, `--low-ram`):** 768 × 512, 49 frames ≈ 277 s (8-step stage 1 at ~10.7 s/forward over 864 video tokens, 3-step stage 2 at ~53.5 s/forward over 4128 tokens — target + 2 keyframe slots + the half-res reference), peak Metal 14.0 GB, max RSS 10.8 GB. Frame 24 is visibly sharper (tree crowns, haze texture) than the plain `--distilled` render at the same seed. `--image` (I2V, frame 0 anchor) adds ~7 s. A 137-frame request pads to a 145-frame canvas (6 slots) and costs ≈ 783 s. `--video-decoder diffusion` at 1152 × 768, 25 frames runs untiled at ≈ 465 s, 12 GB peak Metal (the decoder now runs in its own bf16 whatever dtype the pipeline hands it; the first measurement, 22 GB, was the decode promoted to fp32 by an fp32 stage-2 latent). The keyframe-aware diffusion decode costs +58 % on the decode phase at 768 × 512 × 49 (157 s vs 100 s, 2 planes), same peak Metal. Temporal rounds at 768 × 512, 121 frames, `--no-audio`: `--temporal-upscalings 1` (241 frames @ 48 fps) ≈ 27 min (1599 s), `--temporal-upscalings 2` (481 @ 96) ≈ 67 min (4028 s). Spatial epilogue at 1536 × 1024, 49 frames, `--no-audio`: `--spatial-upscalings 2` ≈ 38 min (2272 s; epilogue 1941 s: one step on 2×2 tiles, then 4×4), peak Metal 11.2 GB; + `--temporal-upscalings 1` (97 frames @ 48 fps) ≈ 84 min (5015 s; epilogue 4251 s), peak Metal 16.8 GB.
 - **Notes:** on I2V, the first-frame keyframe marker is now applied consistently (see [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental)). `--segment` (Prompt Relay) auto-distributes over the padded canvas, not the requested duration (e.g. 145 frames for `-f 137`), so segment boundaries shift by the padding before the tail is trimmed — pass explicit segment lengths for exact boundaries. [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental).
 
 ### `keyframe`
@@ -154,14 +154,14 @@ Everything else is in [Common flags](#common-flags).
 - **Required:** `--prompt`, `--output`, `--reference-video`, `--lora PATH STRENGTH` (exactly one).
 - **Own flags:** `--reference-strength` (1.0), `--stage1-steps`, `--stage2-steps`. The frame count and frame rate come from the reference video, so `--frames` and `--frame-rate` are absent.
 - **Example:** `ltx-2-mlx lipdub -p "a person speaking" --reference-video clip.mp4 --lora <lipdub-lora> 1.0 -o out.mp4`
-- **Notes:** the output audio is a VAE and vocoder reconstruction, audibly degraded on rich music. Remux the original audio when fidelity matters. `--low-ram` is accepted by the parser but not wired for this pipeline.
+- **Notes:** the output audio is a VAE and vocoder reconstruction, audibly degraded on rich music. Remux the original audio when fidelity matters. Stage 2 uses stage 1's generated audio as its audio reference (upstream Dub-It), and the stage-1 reference is the source audio sliced or zero-padded to the clip window. `--low-ram` is accepted and routed through the `ic-lora` streaming path (the LipDub LoRA is attached as a `BlockLoraSource`), but it has not been validated end to end on this pipeline.
 
 ### Utilities
 
 These subcommands do not generate video and have no column in the matrix below.
 
 - **`enhance`** rewrites a prompt with Gemma and prints it. Takes `--prompt`, `--gemma`, `--seed`, and `--mode`. Gemma 3 only, so it raises on 2.5 packs, which ship Gemma 4.
-- **`info`** prints the configuration and memory estimate of a model directory. Takes `--model`.
+- **`info`** lists a pack's safetensors files and a naive RAM estimate (total weight size × 1.3). The estimate ignores `--low-ram` and which transformer a mode loads, so it heavily overstates 2.5 packs, which carry dev + distilled + Gemma 4. Takes `--model`.
 - **`train`** trains a LoRA or a full model from a YAML config file. Takes a config path and `--low-ram`.
 - **`preprocess`** encodes raw videos into latents and conditions for training. Takes a video directory, a caption directory and extension, an output directory, `--model`, `--gemma`, `--height`, `--width`, `--frame-rate`, a maximum frame count, and an audio switch.
 - **`slice`** cuts long source videos into training clips. Takes an output directory plus clip-selection options (timecodes, interval, sampling, minimum length, maximum clip count, head and tail trims, resolution, fit mode, frame rate, encoder quality, caption template).
@@ -183,7 +183,7 @@ Run `ltx-2-mlx <subcommand> --help` for the exact spelling of these options.
 | `--height`, `-H` | 480 | Output height in pixels. Non-multiples of 64 round down on two-stage paths. | all except `retake` / `extend` / `hdr-ic-lora` |
 | `--width`, `-W` | 704 | Output width in pixels. Same rounding rule. | all except `retake` / `extend` / `hdr-ic-lora` |
 | `--frame-rate` | required | Output frame rate. LTX-2.3 was trained at 24; values far from that drift out of distribution. | all except `retake` / `extend` / `lipdub` |
-| `--frames`, `-f` | 97, or auto on `generate` with a 2.5 pack | Frame count. Must satisfy `(frames - 1) % 8 == 0`. On `generate` with a 2.3 pack, omitting it fails immediately. | all except `retake` / `extend` / `lipdub` |
+| `--frames`, `-f` | 97, or auto on `generate` with a 2.5 pack | Frame count, on the 8k+1 grid; an off-grid value is floored to it with a warning (e.g. 87 → 81). On `generate` with a 2.3 pack, omitting it fails immediately. | all except `retake` / `extend` / `lipdub` / `hdr-ic-lora` |
 | `--auto-duration MIN:MAX` | 1:20 | Clamp, in seconds, for the duration predicted by the 2.5 DurationHead. Ignored with a warning when `--frames` is given. [Details](../CLAUDE.md#auto-duration-durationhead--f-optional-on-25). | `generate` on 2.5 packs |
 | `--image`, `-i` | — | Reference image: `PATH [FRAME_IDX STRENGTH [CRF]]`. Repeatable, so you can anchor several pixel frames. Frame 0 replaces the first latent frame; later indices act as soft keyframes. `FRAME_IDX` may be `last` or negative (counted from the end), which keeps an end anchor on the final frame under `--auto-duration`. On 2.5 packs, a frame-0 anchor now also carries the learned keyframe marker through, which shifts 2.5 I2V output slightly (2.3 unaffected). `CRF` (H.264 re-compression of the image, `0` = none) defaults to the model generation's value, as upstream: 33 on 2.3 packs, 18 on 2.5 packs (LTX-2.4 and later). [Details](../CLAUDE.md#multi-anchor-i2v---image-repeatable). | `generate` modes, `ic-lora`, `a2v` |
 | `--num-generated-keyframes N` | 0 | Add N generated keyframe slots at evenly spaced interior frames in stage 1, which relaxes the temporal compression where motion is fast. Each slot costs a latent frame of tokens. Refused up front on 2.3 packs. [Details](../CLAUDE.md#generated-keyframe-slots---num-generated-keyframes-n-25-packs) | `generate` modes on 2.5 packs |
@@ -201,7 +201,7 @@ Run `ltx-2-mlx <subcommand> --help` for the exact spelling of these options.
 
 | Flag or variable | Default | Effect | Applies to |
 |---|---|---|---|
-| `--low-ram` | off | Stream transformer blocks from mmap'd safetensors. Cuts transformer peak Metal memory by about 75%, at roughly 5% more time per step. Targets 16 GB Macs at q8 and 32 GB Macs at bf16. [Details](../CLAUDE.md#block-streaming---low-ram). | every pipeline except `lipdub` |
+| `--low-ram` | off | Stream transformer blocks from mmap'd safetensors. Cuts transformer peak Metal memory by about 75%, at roughly 5% more time per step. Targets 16 GB Macs at q8 and 32 GB Macs at bf16. [Details](../CLAUDE.md#block-streaming---low-ram). | every generating pipeline (`lipdub`: accepted, not validated end to end) |
 | `--tile-frames N` | 1 | Split the video tokens into N temporal tiles, denoised independently and blended back. Caps the quadratic attention activation. [Details](../CLAUDE.md#modality-tiling---tile-frames-n---tile-spatial-m). | `generate` modes |
 | `--tile-spatial M` | 1 | Split into M × M spatial tiles. Total tiles are `tile-frames × M²`. | same as above |
 | `--tile-overlap K` | 2 | Token-grid overlap between adjacent tiles. More overlap means a smoother blend and more redundant compute. | when tiling is active |
@@ -270,7 +270,7 @@ are utilities and have no column.
 | `--spatial-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--temporal-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--temporal-upsampler-path` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--low-ram` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `--low-ram` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ |
 | `--tile-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--tile-spatial` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--tile-overlap` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -294,9 +294,10 @@ are utilities and have no column.
 | `--keyframe-strength` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 A ❌ means the flag is either rejected by the parser or accepted and inert for that
-mode. The four `generate` modes share one parser, so a flag marked ❌ on `distilled`
-or `one-stage` will still be accepted on the command line and then ignored.
-`lipdub` accepts `--low-ram` but the streaming path is not wired for it.
+mode. The five `generate` modes share one parser: a ❌ flag on one of them is either
+rejected up front with an explicit error (CFG, TeaCache and DFR-only flags) or accepted
+and ignored. ⚠️: `lipdub` routes `--low-ram` through the `ic-lora` streaming path, but
+that combination has not been validated end to end.
 
 ## Progress output (stderr)
 
@@ -312,11 +313,11 @@ All CLI progress goes to **stderr** so stdout stays clean for callers that pipe 
 
 ## Compatibility notes
 
-- `generate --lora <path>` (one-stage) is **incompatible with `--low-ram`** (LoRA pre-fuse happens before streaming setup). Use `ic-lora` or pre-fuse via mlx-forge.
+- `generate --lora` works with `--low-ram`: each LoRA is attached as a `BlockLoraSource` and fused at block bind time (slower per step than an in-place fuse).
 - `--low-ram` + custom `--distilled-lora-strength` (≠1.0) on two-stage uses bind-time LoRA fusion (slower per step but supports any strength). At strength=1.0, swaps to pre-fused `transformer-distilled.safetensors`.
 - TeaCache calibration is sampler-specific (Euler vs res_2s). Don't reuse coefficients across `--two-stage` and `--two-stages-hq`.
 - Modality tiling overhead dominates over memory benefit at default Nv (1650-3168). Use only when targeting 1080p / 8s+ on Mac Studio 64-128 GB; on 32 GB Mac, prefer `--low-ram` alone.
-- `generate` requires a mode flag (`--one-stage`, `--two-stage`, `--two-stages-hq`, or `--distilled`). There is **no implicit default** — every pipeline maps 1:1 to an upstream Lightricks/LTX-2 class.
+- `generate` requires a mode flag (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distilled`, or `--dfr` on 2.5 packs, experimental). There is **no implicit default** — every pipeline maps 1:1 to an upstream Lightricks/LTX-2 class.
 - `generate --one-stage` vs `generate --two-stage`: same dev model + CFG, but `--one-stage` runs **once at the target resolution** (no upscaler dependency, simpler latents for downstream). `--two-stage` runs at half-res then upscales 2× and refines (typically faster overall and better at large targets). Pick `--one-stage` for native res ≤ 704 × 480 or if you don't trust the upsampler; pick `--two-stage` for everything else.
 - `generate --distilled` vs `generate --two-stage`: same half-res + upscale structure, but `--distilled` skips CFG entirely (8 stage 1 steps × 1 forward instead of 30 × 2-4). Fastest mode; quality slightly below the dev+CFG variants.
 - `--video-decoder diffusion` (LTX 2.5 packs only, experimental) reproduces upstream's **default** `chunked_eager` stage-5 mode exactly: the neighborhood-attention stage runs on four width slabs with a halo, so the first/last ~20 px of each row are edge-replicated rather than attending over the full volume — identical to upstream's own default-mode output, not a port shortfall. Decodes above the memory budget are tiled automatically (`--diffvae-tile` to override); conv remains the default decoder.

@@ -1,5 +1,8 @@
 # Regression test suite — v0.11.0 (post-isomorphic refactor)
 
+> Historical snapshot (v0.11.0). `hdr-ic-lora` has since been replaced by the ACEScct
+> SDR-to-HDR pipeline (v0.16.0); the LogC3 / `.hdr.npz` rows below describe the removed one.
+
 Hardware: M2 Pro 32 GB · macOS Darwin 25.4.0 · MLX bf16/q8
 Date started: 2026-05-09
 Branch: `main` @ `d6cc3d1`
