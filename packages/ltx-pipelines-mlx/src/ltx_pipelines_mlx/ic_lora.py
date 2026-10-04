@@ -324,6 +324,8 @@ class ICLoraPipeline(BasePipeline):
                 img if isinstance(img, ImageConditioningInput) else ImageConditioningInput(*img) for img in images
             ]
             normalized = resolve_frame_indices(normalized, num_frames)
+            # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).
+            normalized = self.image_conditioner.resolve_crf(normalized)
             # Stage spatial latent dims (F, H, W) for keyframe positions
             F_lat, H_lat, W_lat = compute_video_latent_shape(num_frames, height, width)
             conditionings.extend(
@@ -583,6 +585,8 @@ class ICLoraPipeline(BasePipeline):
                 img if isinstance(img, ImageConditioningInput) else ImageConditioningInput(*img) for img in images
             ]
             normalized = resolve_frame_indices(normalized, num_frames)
+            # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).
+            normalized = self.image_conditioner.resolve_crf(normalized)
 
             F_full, H_full_lat, W_full_lat = compute_video_latent_shape(num_frames, enc_h_full, enc_w_full)
             conditionings_2.extend(

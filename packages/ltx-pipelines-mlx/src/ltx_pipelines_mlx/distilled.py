@@ -423,6 +423,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         num_frames, generated_keyframes, resolved_images = resolve_stage1_frames(
             num_frames, image, images, generated_keyframes, canvas_for
         )
+        # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``). Stage 2,
+        # the DFR temporal rounds and the spatial epilogue re-encode these same inputs.
+        resolved_images = self.image_conditioner.resolve_crf(resolved_images)
         if self.low_memory:
             self.prompt_encoder.free()
             aggressive_cleanup()

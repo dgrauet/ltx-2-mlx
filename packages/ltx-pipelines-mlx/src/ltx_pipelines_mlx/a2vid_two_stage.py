@@ -236,6 +236,8 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         if image is not None and not resolved_images:
             resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
         resolved_images = resolve_frame_indices(resolved_images, num_frames)
+        # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).
+        resolved_images = self.image_conditioner.resolve_crf(resolved_images)
         conditionings_1: list = []
         if resolved_images:
 

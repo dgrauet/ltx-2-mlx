@@ -283,6 +283,36 @@ def test_rounds_rebase_images_into_their_tiles(tmp_path, monkeypatch):
     assert [[i.frame_idx for i in s] for s in seen] == [[120], [0]]
 
 
+def test_rounds_carry_the_checkpoint_image_crf(tmp_path, monkeypatch):
+    """Unset CRFs are resolved once from the pack (2.5 -> 18) and reach every re-encode; explicit ones win."""
+    pipe, *_ = _make_rounds(tmp_path, monkeypatch, t=1)
+    mx.save_safetensors(
+        str(tmp_path / "vae_encoder.safetensors"), {"w": mx.zeros((1,))}, metadata={"model_version": "2.5.0"}
+    )
+    seen = []
+    import ltx_pipelines_mlx.utils._orchestration as orch
+
+    monkeypatch.setattr(orch, "combined_image_conditionings", lambda imgs, **kw: seen.append(list(imgs)) or [])
+    monkeypatch.setattr(dfr_mod, "combined_image_conditionings", lambda imgs, **kw: seen.append(list(imgs)) or [])
+    images = [ImageConditioningInput("a.png", 0, 1.0), ImageConditioningInput("b.png", 60, 1.0, 0)]
+    _run(pipe, num_frames=121, images=images)
+    assert len(seen) >= 3  # stage 1, stage 2, the round tiles
+    crfs = {(i.path, i.crf) for s in seen for i in s}
+    assert crfs == {("a.png", 18), ("b.png", 0)}
+
+
+def test_legacy_image_shorthand_gets_the_checkpoint_crf(tmp_path, monkeypatch):
+    """``image=`` (frame 0, strength 1.0) is resolved like ``images=``: unversioned pack -> 33."""
+    pipe, *_ = _make_rounds(tmp_path, monkeypatch, t=1)
+    seen = []
+    import ltx_pipelines_mlx.utils._orchestration as orch
+
+    monkeypatch.setattr(orch, "combined_image_conditionings", lambda imgs, **kw: seen.append(list(imgs)) or [])
+    monkeypatch.setattr(dfr_mod, "combined_image_conditionings", lambda imgs, **kw: seen.append(list(imgs)) or [])
+    _run(pipe, num_frames=121, image="a.png")
+    assert seen and {(i.path, i.frame_idx, i.crf) for s in seen for i in s} == {("a.png", 0, 33)}
+
+
 def test_rounds_refuse_modality_tiling_and_prompt_relay(tmp_path, monkeypatch):
     pipe, *_ = _make_rounds(tmp_path, monkeypatch, t=1)
     with pytest.raises(ValueError, match="Prompt Relay"):

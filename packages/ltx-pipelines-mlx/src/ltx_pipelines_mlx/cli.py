@@ -524,6 +524,7 @@ examples:
             "frame directly, others guide via VideoConditionByKeyframeIndex. "
             "FRAME_IDX may be 'last' or negative (counted from the end), so an end "
             "anchor follows the frame count --auto-duration picks. "
+            "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4. "
             "Mirrors upstream LTX_2_3 --image."
         ),
     )
@@ -695,7 +696,8 @@ examples:
         help=(
             "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. "
             "Repeatable to anchor multiple frames. PATH alone defaults to "
-            "FRAME_IDX=0 STRENGTH=1.0 (legacy single-image)."
+            "FRAME_IDX=0 STRENGTH=1.0 (legacy single-image). "
+            "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4."
         ),
     )
 
@@ -809,7 +811,10 @@ examples:
         dest="images",
         default=None,
         metavar="ARG",
-        help=("Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. Repeatable to anchor multiple frames."),
+        help=(
+            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. Repeatable to anchor multiple frames. "
+            "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4."
+        ),
     )
     ic.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
     ic.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
@@ -946,7 +951,10 @@ examples:
         dest="images",
         default=None,
         metavar="ARG",
-        help=("Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. Repeatable to anchor multiple frames."),
+        help=(
+            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. Repeatable to anchor multiple frames. "
+            "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4."
+        ),
     )
     hdr.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
     hdr.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")

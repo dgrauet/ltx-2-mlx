@@ -226,6 +226,8 @@ class LipDubPipeline(ICLoraPipeline):
                 img if isinstance(img, ImageConditioningInput) else ImageConditioningInput(*img) for img in images
             ]
             normalized = resolve_frame_indices(normalized, num_frames)
+            # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).
+            normalized = self.image_conditioner.resolve_crf(normalized)
             stage_1_conditionings.extend(
                 combined_image_conditionings(
                     normalized,
@@ -313,6 +315,8 @@ class LipDubPipeline(ICLoraPipeline):
                 img if isinstance(img, ImageConditioningInput) else ImageConditioningInput(*img) for img in images
             ]
             normalized = resolve_frame_indices(normalized, num_frames)
+            # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).
+            normalized = self.image_conditioner.resolve_crf(normalized)
             stage_2_conditionings.extend(
                 combined_image_conditionings(
                     normalized,
