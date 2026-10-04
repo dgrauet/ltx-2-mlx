@@ -201,7 +201,7 @@ Run `ltx-2-mlx <subcommand> --help` for the exact spelling of these options.
 
 | Flag or variable | Default | Effect | Applies to |
 |---|---|---|---|
-| `--low-ram` | off | Stream transformer blocks from mmap'd safetensors. Cuts transformer peak Metal memory by about 75%, at roughly 5% more time per step. Targets 16 GB Macs at q8 and 32 GB Macs at bf16. [Details](../CLAUDE.md#block-streaming---low-ram). | every generating pipeline (`lipdub`: accepted, not validated end to end) |
+| `--low-ram` | off | Stream transformer blocks from mmap'd safetensors. Cuts transformer peak Metal memory by about 75%, at roughly 5% more time per step. Targets 16 GB Macs at q8 and 32 GB Macs at bf16. [Details](../CLAUDE.md#block-streaming---low-ram). | every generating pipeline |
 | `--tile-frames N` | 1 | Split the video tokens into N temporal tiles, denoised independently and blended back. Caps the quadratic attention activation. [Details](../CLAUDE.md#modality-tiling---tile-frames-n---tile-spatial-m). | `generate` modes |
 | `--tile-spatial M` | 1 | Split into M × M spatial tiles. Total tiles are `tile-frames × M²`. | same as above |
 | `--tile-overlap K` | 2 | Token-grid overlap between adjacent tiles. More overlap means a smoother blend and more redundant compute. | when tiling is active |
@@ -270,7 +270,7 @@ are utilities and have no column.
 | `--spatial-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--temporal-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--temporal-upsampler-path` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--low-ram` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ |
+| `--low-ram` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `--tile-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--tile-spatial` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--tile-overlap` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -296,8 +296,7 @@ are utilities and have no column.
 A ❌ means the flag is either rejected by the parser or accepted and inert for that
 mode. The five `generate` modes share one parser: a ❌ flag on one of them is either
 rejected up front with an explicit error (CFG, TeaCache and DFR-only flags) or accepted
-and ignored. ⚠️: `lipdub` routes `--low-ram` through the `ic-lora` streaming path, but
-that combination has not been validated end to end.
+and ignored.
 
 ## Progress output (stderr)
 

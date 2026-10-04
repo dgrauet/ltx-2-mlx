@@ -456,7 +456,7 @@ ltx-2-mlx generate --distilled \
   --low-ram -f 97 --frame-rate 24 -o fox.mp4
 ```
 
-`--low-ram` is supported on every `generate` mode (incl. `--distilled` and `--dfr`), `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora`, `retake` and `extend`; `lipdub` accepts it and routes it through the `ic-lora` streaming path, but that is not validated end to end. Bind-time LoRA fusion handles ic-lora's control LoRAs, custom `--distilled-lora-strength`, and `generate --lora` (community LoRAs). See `## Block Streaming` below for details.
+`--low-ram` is supported on every `generate` mode (incl. `--distilled` and `--dfr`), `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora`, `lipdub`, `retake` and `extend`. Bind-time LoRA fusion handles ic-lora's control LoRAs, custom `--distilled-lora-strength`, and `generate --lora` (community LoRAs). See `## Block Streaming` below for details.
 
 ### IC-LoRA Example
 
@@ -886,7 +886,7 @@ LTX-2.3 bf16 distilled, 480x704x33: confirmed runs end-to-end on M2 Pro 32 GB. W
 - `hdr-ic-lora` (HDR LoRA as a `BlockLoraSource`)
 - `retake` / `extend` (dev model + CFG; mirrors upstream RetakePipeline's `offload_mode`)
 
-`lipdub` accepts `--low-ram` and inherits the `ic-lora` path (its LoRA attaches as a `BlockLoraSource`), but that combination has not been validated end to end.
+`lipdub` inherits the `ic-lora` path (its LoRA attaches as a `BlockLoraSource`). Validated on 2.3 q8 with the DubIt LoRA (576×320, 73-frame speaking reference, seed 5): 334 s streamed vs 305 s resident, 42.6 dB between the two outputs (the compiled-block ULP difference); at this small size the run's peak footprint (13.4 GB both) is set by text encoding, not the transformer.
 
 Validated runs on M2 Pro 32 GB:
 - bf16 HQ at 480x704x97 (4 sec): 49:38 — would OOM without streaming.

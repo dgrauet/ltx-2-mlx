@@ -19,7 +19,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **Negative prompt (`--negative-prompt`)** — custom CFG negative on every CFG pipeline (`--one-stage` / `--two-stage` / `--two-stages-hq` / a2v / keyframe / retake / extend); defaults to the upstream `DEFAULT_NEGATIVE_PROMPT`. Distilled modes have no CFG and reject it.
 - **Prompt enhancement** — Gemma 3 12B rewrites short prompts into detailed descriptions
 - **Training** — LoRA fine-tuning with flow matching (T2V and V2V strategies)
-- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers every `generate` mode including `--distilled` and `--dfr`, a2v / keyframe / ic-lora / hdr-ic-lora / retake / extend; `lipdub` accepts it but is not validated end to end; bind-time LoRA fusion supports custom distilled-lora-strength)
+- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers every `generate` mode including `--distilled` and `--dfr`, a2v / keyframe / ic-lora / hdr-ic-lora / lipdub / retake / extend; bind-time LoRA fusion supports custom distilled-lora-strength)
 - **Modality tiling (`--tile-frames N --tile-spatial M`)** — split video tokens into spatial+temporal tiles to cap O(N²) attention activations. Combined with `--low-ram`, unblocks long / HD / 4K generations on Mac Studio (64-128 GB) that would otherwise OOM.
 - **6 model packs** — bf16 / int8 / int4 for each of LTX-2.3 and LTX-2.5 (fits 16GB–64GB Macs)
 - **3 upsamplers** — spatial 2x, spatial 1.5x, temporal 2x
