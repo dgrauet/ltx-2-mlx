@@ -4,9 +4,9 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 
 ## Features
 
-- **LTX-2.5** — full pipeline coverage on 2.5 packs (`--distilled`, `--two-stage`, `--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend`), auto-detected from the pack (no new flag), plus **auto-predicted duration** via the DurationHead (omit `-f`, or clamp with `--auto-duration MIN:MAX`). Only the IC-LoRA family waits on official 2.5 task LoRAs. See [LTX-2.5 section](#ltx-25).
+- **LTX-2.5** — pipeline coverage on 2.5 packs (`--distilled`, `--two-stage`, `--two-stages-hq`, `--one-stage`, `--dfr`, `keyframe`, `a2v`, `retake`, `extend`, `hdr-ic-lora`), auto-detected from the pack (no new flag), plus **auto-predicted duration** via the DurationHead (omit `-f`, or clamp with `--auto-duration MIN:MAX`). Only `ic-lora` / `lipdub` wait on official 2.5 task LoRAs. See [LTX-2.5 section](#ltx-25).
 - **Text-to-Video** — generate video + stereo 48kHz audio from a text prompt
-- **Image-to-Video** — animate a reference image
+- **Image-to-Video** — animate a reference image; `--image PATH FRAME STRENGTH` is repeatable for multi-anchor I2V, and `FRAME` may be `last` or negative (counted from the end)
 - **Audio-to-Video** — generate video conditioned on an audio track
 - **Retake / Extend** — edit existing videos (regenerate segments, add frames)
 - **Keyframe interpolation** — smooth transition between reference images
@@ -19,7 +19,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **Negative prompt (`--negative-prompt`)** — custom CFG negative on every CFG pipeline (`--one-stage` / `--two-stage` / `--two-stages-hq` / a2v / keyframe / retake / extend); defaults to the upstream `DEFAULT_NEGATIVE_PROMPT`. Distilled modes have no CFG and reject it.
 - **Prompt enhancement** — Gemma 3 12B rewrites short prompts into detailed descriptions
 - **Training** — LoRA fine-tuning with flow matching (T2V and V2V strategies)
-- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers generate / `--two-stage` / `--two-stages-hq` / a2v / keyframe / ic-lora / retake / extend; bind-time LoRA fusion supports custom distilled-lora-strength)
+- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers every `generate` mode including `--distilled` and `--dfr`, a2v / keyframe / ic-lora / hdr-ic-lora / retake / extend; `lipdub` accepts it but is not validated end to end; bind-time LoRA fusion supports custom distilled-lora-strength)
 - **Modality tiling (`--tile-frames N --tile-spatial M`)** — split video tokens into spatial+temporal tiles to cap O(N²) attention activations. Combined with `--low-ram`, unblocks long / HD / 4K generations on Mac Studio (64-128 GB) that would otherwise OOM.
 - **6 model packs** — bf16 / int8 / int4 for each of LTX-2.3 and LTX-2.5 (fits 16GB–64GB Macs)
 - **3 upsamplers** — spatial 2x, spatial 1.5x, temporal 2x
@@ -36,6 +36,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - Python 3.11+
 - 32GB+ RAM recommended (int8) or 16GB+ with `--low-ram`. 16GB minimum (int4 without streaming)
 - ffmpeg (for video encoding)
+- HDR (`hdr-ic-lora` only): OpenEXR via the `hdr` extra (`uv sync --extra hdr` in this repo, or `pip install 'ltx-pipelines-mlx[hdr]'`) and an ffmpeg built with `libx265`
 
 ## Installation
 
@@ -95,7 +96,7 @@ ltx-2-mlx generate -p "A cat" --two-stage -f 97 --frame-rate 24 -o cat.mp4 --mod
 # Block streaming: q8 model on 16 GB Mac
 ltx-2-mlx generate -p "A cat" --distilled -f 97 --frame-rate 24 -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q8 --low-ram
 
-# Block streaming works on every generate mode + a2v / keyframe / ic-lora
+# Block streaming works on every generate mode + a2v / keyframe / ic-lora / hdr-ic-lora / retake / extend
 ltx-2-mlx generate -p "A cat" -f 97 --frame-rate 24 -o cat.mp4 --two-stage --low-ram
 ltx-2-mlx generate -p "A cat" -f 97 --frame-rate 24 -o cat.mp4 --two-stages-hq --low-ram
 ltx-2-mlx a2v -p "music video" --audio music.wav --frame-rate 24 -o a2v.mp4 --low-ram
@@ -112,7 +113,7 @@ ltx-2-mlx hdr-ic-lora --model dgrauet/ltx-2.5-mlx-q8 --input source_sdr.mp4 \
 ltx-2-mlx generate -p "long scene" --two-stage --low-ram -f 97 --frame-rate 24 \
     --tile-frames 2 --tile-overlap 4 -o long.mp4
 ltx-2-mlx generate -p "1080p scene" --two-stages-hq --low-ram -f 97 --frame-rate 24 \
-    --tile-spatial 2 --tile-overlap 4 -H 1080 -W 1920 -o hd.mp4
+    --tile-spatial 2 --tile-overlap 4 -H 1024 -W 1920 -o hd.mp4
 
 # Model info
 ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q8
@@ -130,9 +131,10 @@ ltx-2-mlx generate --distilled --model /path/to/ltx-2.5-mlx-q8 \
 ```
 
 The 2.5 generation is **auto-detected from the model pack** (no new CLI
-flag) — a local directory is required, since the pack bundles its own
-Gemma-4 text encoder (`text_encoder.safetensors`); no `mlx-community`
-Gemma download happens on this path. `--image` (I2V) works the same as on
+flag). A HuggingFace repo id (`dgrauet/ltx-2.5-mlx-q8`) or a local pack
+directory both work. The pack bundles its own Gemma-4 text encoder
+(`text_encoder.safetensors`), so no `mlx-community` Gemma download happens
+on this path. `--image` (I2V) works the same as on
 2.3.
 
 **`-f/--frames` is optional on 2.5 packs**: omit it and the pack's
@@ -144,10 +146,9 @@ range, or pass `-f` explicitly to bypass prediction entirely (explicit
 `DurationHead` to predict from, and omitting it now raises immediately
 (`ValueError: ... Pass num_frames explicitly.`) before any Gemma load.
 
-Sampling: stage 1 runs euler-ancestral (8 steps, SDE noise injection);
-stage 2 stays deterministic euler (3 steps) — upstream's rationale is that
-stage 2's short 3-step refinement schedule is too short to remove freshly
-injected noise.
+Sampling: both stages of `--distilled` run euler-ancestral on 2.5 packs
+(8 + 3 steps, SDE noise injection; stage-2 noise seeded from `seed + 20000`),
+as upstream since v1.4.0. 2.3 packs stay deterministic Euler on both stages.
 
 The dev model + CFG two-stage pipeline also works on 2.5 packs:
 
@@ -162,16 +163,17 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 |---|---|
 | `--two-stage` (dev + CFG) | supported (see above) |
 | `--two-stages-hq` (res_2s + CFG) | supported — validated e2e on 2.5 (deterministic, audio at healthy 2.3-level loudness) |
-| `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to an auto-predicted duration on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`; `--auto-duration MIN:MAX` overrides the clamp. Not available on 2.3 packs (no `DurationHead` weights); `-f` stays required there |
+| `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to an auto-predicted duration on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`/`--dfr`; `--auto-duration MIN:MAX` overrides the clamp. Not available on 2.3 packs (no `DurationHead` weights); `-f` stays required there |
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
 | `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB) |
 | `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames). `--low-ram` wired (mirrors upstream `offload_mode`): 49-frame retake that OOM'd now peaks at 13.8 GB |
 | `ic-lora`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
-| `hdr-ic-lora` | supported, 2.5 only (single-stage ACEScct SDR-to-HDR; Experimental) |
+| `hdr-ic-lora` | supported, 2.5 only (single-stage ACEScct SDR-to-HDR; Experimental, validated end to end on real weights) |
 | `enhance` / `--enhance-prompt` | raises a clear error (Gemma 3-only) |
 | `--enable-teacache` | raises a clear error (not calibrated for 2.5) |
-| Modality tiling, Prompt Relay | validated on 2.3 only |
-| Diffusion (`DiffVAEMode`) VAE decoder | not loaded — conv decoder used |
+| Prompt Relay | validated on 2.3 only |
+| Modality tiling | validated on 2.5 `--distilled` (`--tile-frames 2`, unconditioned and with an end anchor) |
+| Diffusion video decoder | opt-in `--video-decoder diffusion` (experimental; auto-tiled above the decode budget, `--diffvae-tile` override); conv stays the default |
 
 The IC-LoRA family (`ic-lora` / `lipdub`) lands once
 Lightricks publishes the official 2.5 task IC-LoRAs.
@@ -199,6 +201,7 @@ pipe.generate_and_save(
     height=480,
     width=704,
     num_frames=97,
+    frame_rate=24.0,
     seed=42,
     image="photo.jpg",  # optional I2V
 )
@@ -220,6 +223,7 @@ pipe.generate_and_save(
     prompt="A musician performing",
     output_path="a2v.mp4",
     audio_path="music.wav",
+    frame_rate=24.0,
 )
 ```
 
@@ -257,8 +261,8 @@ A generation is opaque until the final VAE decode, which for a long clip can be 
 minutes away. These flags decode a short window of latent frames from the in-progress
 prediction every N steps and write it as a self-contained animated WebP — a couple of
 seconds of real motion at the current denoise quality, so temporal problems show up at
-step 4 instead of minute 15. Available on every generating subcommand (`generate`, `a2v`,
-`retake`, `extend`, `keyframe`, `ic-lora`, `hdr-ic-lora`, `lipdub`).
+step 4 instead of minute 15. Available on every generating subcommand except `hdr-ic-lora`
+(`generate`, `a2v`, `retake`, `extend`, `keyframe`, `ic-lora`, `lipdub`).
 
 ```
 --stepwise-image-output-dir DIR   Write per-step preview clips here
@@ -324,9 +328,11 @@ Notes:
 
 See [docs/PIPELINES.md § Speed](docs/PIPELINES.md#speed) and [§ Memory](docs/PIPELINES.md#memory) for the watchdog / Gemma-length / low-RAM environment variables and their trade-offs.
 
+`LTX2_COMPUTE_DTYPE=float16` runs the DiT's attention and feed-forward in float16 (opt-in; on an M1 Max with the 2.5 q8 pack a 576×1024×241 `--distilled` I2V render went from 701 s to 563 s).
+
 ## Frame Count Reference
 
-The number of frames must be `8k + 1` (due to VAE temporal compression 8x). Common values at 24 fps:
+The number of frames lives on the `8k + 1` grid (VAE temporal compression 8x); an off-grid request is floored to it with a warning (e.g. 87 → 81). Common values at 24 fps:
 
 | Frames | Duration | Latent frames | Notes |
 |--------|----------|---------------|-------|
@@ -336,7 +342,7 @@ The number of frames must be `8k + 1` (due to VAE temporal compression 8x). Comm
 | 49 | 2.0s | 7 | |
 | 65 | 2.7s | 9 | |
 | 81 | 3.4s | 11 | |
-| 97 | 4.0s | 13 | **Default** |
+| 97 | 4.0s | 13 | **Default** for `keyframe` / `a2v` / `ic-lora` |
 | 121 | 5.0s | 16 | |
 | 145 | 6.0s | 19 | |
 | 161 | 6.7s | 21 | |
@@ -348,9 +354,15 @@ Higher frame counts require more RAM. With int4 on 32GB, 97 frames at 512x320 is
 
 | Variant | HuggingFace | Size | RAM |
 |---------|-------------|------|-----|
-| bf16 | [dgrauet/ltx-2.3-mlx](https://huggingface.co/dgrauet/ltx-2.3-mlx) | ~42 GB | 64 GB+ |
-| int8 | [dgrauet/ltx-2.3-mlx-q8](https://huggingface.co/dgrauet/ltx-2.3-mlx-q8) | ~21 GB | 32 GB+ |
+| bf16 | [dgrauet/ltx-2.3-mlx](https://huggingface.co/dgrauet/ltx-2.3-mlx) | ~42 GB | 64 GB+, or 32 GB with `--low-ram` |
+| int8 | [dgrauet/ltx-2.3-mlx-q8](https://huggingface.co/dgrauet/ltx-2.3-mlx-q8) | ~26 GB | 32 GB+, or 16 GB with `--low-ram` |
 | int4 | [dgrauet/ltx-2.3-mlx-q4](https://huggingface.co/dgrauet/ltx-2.3-mlx-q4) | ~12 GB | 16 GB+ |
+| bf16 (2.5) | [dgrauet/ltx-2.5-mlx](https://huggingface.co/dgrauet/ltx-2.5-mlx) | ~120 GB | `--low-ram` on 32 GB |
+| int8 (2.5) | [dgrauet/ltx-2.5-mlx-q8](https://huggingface.co/dgrauet/ltx-2.5-mlx-q8) | ~75 GB | recommended for 2.5 |
+| int4 (2.5) | [dgrauet/ltx-2.5-mlx-q4](https://huggingface.co/dgrauet/ltx-2.5-mlx-q4) | ~47 GB | lower quality |
+
+The 2.5 packs carry both the dev and the distilled transformer plus the Gemma-4 text tower, so
+their size is the download, not what one pipeline loads.
 
 Weights are pre-converted to MLX format by [mlx-forge](https://github.com/dgrauet/mlx-forge).
 
@@ -359,14 +371,14 @@ Weights are pre-converted to MLX format by [mlx-forge](https://github.com/dgraue
 | Package | Description |
 |---------|-------------|
 | `ltx-core-mlx` | Model library: DiT, VAE, audio, text encoder, conditioning, guidance |
-| `ltx-pipelines-mlx` | Generation pipelines: T2V, I2V, A2V, retake, extend, keyframe, two-stage |
+| `ltx-pipelines-mlx` | Generation pipelines: T2V, I2V, A2V, retake, extend, keyframe, two-stage, distilled, DFR, IC-LoRA, HDR IC-LoRA, LipDub |
 | `ltx-trainer-mlx` | Training: LoRA fine-tuning with flow matching |
 
 ## Resources
 
 - [LTX-2](https://github.com/Lightricks/LTX-2) — Lightricks reference (ltx-core + ltx-pipelines + ltx-trainer)
 - [mlx-forge](https://github.com/dgrauet/mlx-forge) — weight conversion tool
-- [Pre-converted weights](https://huggingface.co/collections/dgrauet/ltx-23) — HuggingFace collection
+- Pre-converted weights — HuggingFace collections for [LTX-2.3](https://huggingface.co/collections/dgrauet/ltx-23) and [LTX-2.5](https://huggingface.co/collections/dgrauet/ltx-25-6a90c410ff65a75f8aeae402)
 - [MLX](https://github.com/ml-explore/mlx) — Apple Silicon ML framework
 
 ## License
