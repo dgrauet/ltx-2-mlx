@@ -29,6 +29,16 @@ from ltx_pipelines_mlx.utils.blocks import ImageConditioner, VideoDecoder
 from ltx_pipelines_mlx.utils.hdr_media import VideoInput
 from ltx_pipelines_mlx.utils.samplers import DenoiseOutput
 
+# The real export-tool check (OpenEXR + an ffmpeg with libx265); the autouse fixture below stubs it.
+_REQUIRE_HDR_EXPORT_TOOLS = hdr_mod.require_hdr_export_tools
+
+
+@pytest.fixture(autouse=True)
+def _export_tools_present(monkeypatch):
+    """These weight-free tests never write EXR / HEVC: do not require the optional tools to construct
+    the pipeline. Tests of the check itself call ``_REQUIRE_HDR_EXPORT_TOOLS``."""
+    monkeypatch.setattr(hdr_mod, "require_hdr_export_tools", lambda: None)
+
 
 def _pack(tmp_path):
     (tmp_path / "embedded_config.json").write_text(json.dumps({"transformer": {"num_layers": 48, "ff_bias": False}}))
@@ -499,12 +509,14 @@ def test_missing_openexr_is_refused_up_front(tmp_path, monkeypatch):
         raise ImportError("EXR I/O needs the optional extra")
 
     monkeypatch.setattr(hdr_mod.hdr_media, "_openexr", _no_openexr)
+    monkeypatch.setattr(hdr_mod, "require_hdr_export_tools", _REQUIRE_HDR_EXPORT_TOOLS)
     with pytest.raises(ImportError, match="optional extra"):
         HDRICLoraPipeline("someone/ltx-2.5-pack", hdr_lora=str(emb), text_embeddings=str(emb))
     assert calls == []
 
 
 def test_ffmpeg_without_libx265_is_refused(monkeypatch):
+    monkeypatch.setattr(hdr_mod.hdr_media, "_openexr", lambda: None)  # isolate the ffmpeg half
     monkeypatch.setattr(
         hdr_mod.subprocess,
         "run",
@@ -513,7 +525,7 @@ def test_ffmpeg_without_libx265_is_refused(monkeypatch):
         ),
     )
     with pytest.raises(RuntimeError, match="libx265"):
-        hdr_mod.require_hdr_export_tools()
+        _REQUIRE_HDR_EXPORT_TOOLS()
 
 
 def test_odd_source_dims_are_refused_before_loading(tmp_path, monkeypatch):
