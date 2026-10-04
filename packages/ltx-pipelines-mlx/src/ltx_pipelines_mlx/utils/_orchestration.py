@@ -253,7 +253,8 @@ def combined_image_conditionings(
       entries appended at their respective frame indices.
 
     Args:
-        images: List of :class:`ImageConditioningInput`.
+        images: List of :class:`ImageConditioningInput` whose ``crf`` has
+            been resolved (``ImageConditioner.resolve_crf``).
         enc_h: Encoder spatial height (must be divisible by 32).
         enc_w: Encoder spatial width.
         spatial_dims: ``(F, H, W)`` latent shape of the target video.
@@ -266,15 +267,14 @@ def combined_image_conditionings(
     """
     from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
     from ltx_core_mlx.conditioning.types.latent_cond import VideoConditionByLatentIndex
-    from ltx_pipelines_mlx.utils.media_io import DEFAULT_IMAGE_CRF, load_image_and_preprocess
+    from ltx_pipelines_mlx.utils.media_io import load_image_and_preprocess
 
     conditionings: list = []
     for img in images:
-        # Forward the per-image CRF (upstream-iso). Falls back to the
-        # upstream default (33) if the image item doesn't expose a CRF
-        # field — preserves I2V quality alignment with training.
-        img_crf = getattr(img, "crf", DEFAULT_IMAGE_CRF)
-        img_tensor = load_image_and_preprocess(img.path, enc_h, enc_w, crf=img_crf)
+        # Forward the per-image CRF (upstream-iso). It must already be resolved
+        # against the checkpoint (``ImageConditioner.resolve_crf``); a ``None``
+        # CRF raises in ``preprocess`` rather than silently defaulting.
+        img_tensor = load_image_and_preprocess(img.path, enc_h, enc_w, crf=img.crf)
         img_tensor = img_tensor[:, :, None, :, :]  # add F=1 dim
         ref_latent = video_encoder.encode(img_tensor)  # (1, 128, 1, H', W')
         ref_tokens = ref_latent.transpose(0, 2, 3, 4, 1).reshape(1, -1, 128)

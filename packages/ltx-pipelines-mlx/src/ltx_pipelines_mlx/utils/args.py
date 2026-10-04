@@ -37,17 +37,60 @@ class ImageConditioningInput(NamedTuple):
         frame_idx: Target latent frame index. ``0`` replaces the first
             latent frame (``VideoConditionByLatentIndex``); any other
             value appends a keyframe at that pixel-frame position
-            (``VideoConditionByKeyframeIndex``).
+            (``VideoConditionByKeyframeIndex``). A negative value counts
+            back from the end (``-1`` is the last pixel frame) and is
+            resolved by :func:`resolve_frame_indices` once the frame count
+            is known, which is what makes an end anchor usable with an
+            auto-predicted duration.
         strength: Conditioning strength in ``[0, 1]``. ``1.0`` = fully
             preserved.
-        crf: Optional H.264 CRF for input degradation (default 33).
-            Currently accepted for API parity but not applied.
+        crf: H.264 CRF the image is re-compressed at before encoding.
+            ``None`` (the default) means "use what matches the model": the
+            pipeline fills it in from the checkpoint it runs
+            (``ImageConditioner.resolve_crf``; 33 before LTX-2.4, 18 from
+            2.4 on). Pass it explicitly to override, including ``0`` to skip
+            re-compression entirely.
     """
 
     path: str
     frame_idx: int
     strength: float
-    crf: int = DEFAULT_IMAGE_CRF
+    crf: int | None = None
+
+
+def resolve_frame_indices(images: list[ImageConditioningInput], num_frames: int) -> list[ImageConditioningInput]:
+    """Turn negative ``frame_idx`` values into pixel-frame positions counted from the end.
+
+    ``-1`` becomes ``num_frames - 1`` (the last pixel frame), ``-2`` the one
+    before it, and so on. Non-negative indices pass through unchanged.
+    ``-num_frames`` resolves to ``0``, so it gets the hard first-latent replace
+    (``VideoConditionByLatentIndex``) rather than a soft keyframe.
+
+    Args:
+        images: Conditioning inputs as parsed from ``--image``.
+        num_frames: Concrete pixel-frame count of the clip being generated.
+
+    Returns:
+        The inputs with every ``frame_idx`` in ``[0, num_frames)``.
+
+    Raises:
+        ValueError: If an index lies outside the clip, before its first frame or
+            past its last (upstream ``assert_image_frames_in_clip`` checks the
+            same range).
+    """
+    resolved = []
+    for image in images:
+        frame_idx = num_frames + image.frame_idx if image.frame_idx < 0 else image.frame_idx
+        if frame_idx < 0:
+            raise ValueError(
+                f"--image {image.path}: frame index {image.frame_idx} is before the first of {num_frames} frames"
+            )
+        if frame_idx >= num_frames:
+            raise ValueError(
+                f"--image {image.path}: frame index {image.frame_idx} is past the last of {num_frames} frames"
+            )
+        resolved.append(image._replace(frame_idx=frame_idx))
+    return resolved
 
 
 class ImageAction(argparse.Action):
@@ -57,9 +100,14 @@ class ImageAction(argparse.Action):
     :class:`ImageConditioningInput` to the namespace list.
 
     Backward-compat: ``--image PATH`` alone is accepted and defaults to
-    ``frame_idx=0, strength=1.0, crf=33`` — matches the prior single-arg
-    API. The strict upstream form is ``--image PATH FRAME_IDX STRENGTH
-    [CRF]`` (3 or 4 args).
+    ``frame_idx=0, strength=1.0`` — matches the prior single-arg API. The
+    strict upstream form is ``--image PATH FRAME_IDX STRENGTH [CRF]`` (3 or
+    4 args). An omitted CRF stays ``None``, which the pipeline resolves from
+    the checkpoint it runs (``ImageConditioner.resolve_crf``), as upstream.
+
+    ``FRAME_IDX`` may also be ``last`` (or ``end``), or a negative number
+    counting back from the end: ``--image end.png last 1.0`` anchors the
+    final frame even when ``--auto-duration`` picks the length.
     """
 
     def __call__(  # type: ignore[override]
@@ -79,13 +127,15 @@ class ImageAction(argparse.Action):
             )
 
         path = values[0]
+        crf: int | None = None
         if len(values) == 1:
-            frame_idx, strength, crf = 0, 1.0, DEFAULT_IMAGE_CRF
+            frame_idx, strength = 0, 1.0
         else:
             try:
-                frame_idx = int(values[1])
+                frame_idx = -1 if str(values[1]).lower() in ("last", "end") else int(values[1])
                 strength = float(values[2])
-                crf = int(values[3]) if len(values) == 4 else DEFAULT_IMAGE_CRF
+                if len(values) == 4:
+                    crf = int(values[3])
             except (ValueError, TypeError) as e:
                 parser.error(f"{option_string}: could not parse FRAME_IDX/STRENGTH/CRF from {values[1:]}: {e}")
 

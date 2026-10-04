@@ -41,6 +41,7 @@ from ltx_core_mlx.utils.positions import (
     compute_video_positions,
 )
 from ltx_pipelines_mlx._base import reject_negative_prompt
+from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 from ltx_pipelines_mlx.utils.helpers import generated_keyframe_conditionings
 
 from .scheduler import (
@@ -69,6 +70,9 @@ ANCESTRAL_S_NOISE = 1.0
 # pull mx.random.normal at the same shape/dtype from a freshly seeded
 # generator, so reusing the raw seed would correlate the two draws.
 ANCESTRAL_NOISE_SEED_OFFSET = 10000
+# Stage 2 draws from its own offset so it never reuses stage 1's noise
+# (upstream ``ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET``).
+ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET = 20000
 
 
 @dataclass
@@ -101,6 +105,39 @@ class Stage1Result:
     x0_model: X0Model | None
 
 
+def resolve_stage1_frames(
+    num_frames: int,
+    image: str | None,
+    images: Sequence[ImageConditioningInput] | None,
+    generated_keyframes: int | Sequence[int],
+    canvas_for: Callable[[int], tuple[int, list[int]]] | None,
+) -> tuple[int, int | Sequence[int], list[ImageConditioningInput]]:
+    """Resolve the I2V anchors on the requested clip, then let ``canvas_for`` pad it.
+
+    ``last`` and negative ``frame_idx`` values count back from the end of the clip that was
+    asked for. :class:`DFRPipeline`'s ``canvas_for`` pads that clip to whole keyframe segments
+    and the padding is trimmed off after stage 2, so resolving against the padded canvas would
+    put an end anchor on a frame that never reaches the output.
+
+    Args:
+        num_frames: Requested pixel-frame count, with any ``AutoDuration`` already resolved.
+        image: Legacy single-image shorthand, anchored on frame 0 when ``images`` is empty.
+        images: Multi-anchor I2V conditioning inputs.
+        generated_keyframes: Generated keyframe slots, as passed to ``_stage1``.
+        canvas_for: Optional canvas hook (see :meth:`DistilledPipeline._stage1`).
+
+    Returns:
+        Tuple of (stage 1 frame count, generated keyframe slots, resolved image inputs).
+    """
+    resolved_images = list(images) if images else []
+    if image is not None and not resolved_images:
+        resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
+    resolved_images = resolve_frame_indices(resolved_images, num_frames)
+    if canvas_for is not None:
+        num_frames, generated_keyframes = canvas_for(num_frames)
+    return num_frames, generated_keyframes, resolved_images
+
+
 class DistilledPipeline(TI2VidTwoStagesPipeline):
     """Distilled two-stage T2V/I2V pipeline (half-res → upscale → full-res refine).
 
@@ -114,9 +151,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
 
     On an LTX-2.5 pack (detected once at construction via
     :func:`~ltx_pipelines_mlx.utils.generation.is_ltx25_pack`) both stages run
-    on the ``LTX_2_5_*`` sigma tables, stage 1 switches to the ancestral (SDE)
-    Euler loop (stage 2 stays deterministic, as upstream), and stage 2 resolves
-    the ``spatial_upscaler_x2_v1_0`` upscaler.
+    on the ``LTX_2_5_*`` sigma tables, both stages switch to the ancestral (SDE)
+    Euler loop (as upstream v1.4.0, each on its own noise seed), and stage 2
+    resolves the ``spatial_upscaler_x2_v1_0`` upscaler.
 
     Args:
         model_dir: Path to model weights or HuggingFace repo ID. Must
@@ -183,22 +220,20 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         on_step,
         seed: int,
         ancestral: bool,
+        noise_seed_offset: int,
     ):
         """Dispatch one stage onto the deterministic or ancestral (SDE) loop.
 
         LTX-2.5 distilled checkpoints are trained for the ancestral (SDE) Euler
         sampler; 2.3 checkpoints keep the deterministic loop they were shipped
         with. Upstream makes the same choice through ``DiffusionStage``'s
-        ``stepper`` / ``loop`` overrides, and scopes them to stage 1 only
-        (``_stage_1_sampler_kwargs``) — quoting upstream ``distilled.py``:
+        ``loop`` override (``_sampler_kwargs(seed, noise_seed_offset)``) and,
+        since v1.4.0, applies it to both stages, each with its own noise-seed
+        offset (``ANCESTRAL_NOISE_SEED_OFFSET`` / ``ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET``)
+        so no two passes inject the same noise.
 
-            Stage 1 samples with the ancestral (SDE) Euler sampler or the
-            deterministic one according to ``self.use_ancestral_sampler``.
-            Stage 2 is always deterministic -- its 3-step refinement schedule
-            is too short to remove freshly injected noise.
-
-        Hence ``ancestral`` is passed per stage rather than read off
-        ``self._is_25``: only stage 1 of a 2.5 pack sets it.
+        ``ancestral`` and ``noise_seed_offset`` are passed per call so the DFR
+        stages can reuse this dispatcher with their own offsets.
 
         The two loops differ only in the model keyword (``model=`` vs upstream's
         ``transformer=``) and in the ancestral extras (``stepper`` /
@@ -226,7 +261,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             audio_text_embeds=audio_text_embeds,
             sigmas=sigmas,
             stepper=EulerAncestralDiffusionStep(eta=ANCESTRAL_ETA, s_noise=ANCESTRAL_S_NOISE),
-            noise_seed=seed + ANCESTRAL_NOISE_SEED_OFFSET,
+            noise_seed=seed + noise_seed_offset,
             video_cross_attention_mask=video_cross_attention_mask,
             on_step=on_step,
         )
@@ -348,7 +383,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
                 ``(canvas_frames, slot_pixel_indices)``. Used by :class:`DFRPipeline` to pad
                 the clip to whole keyframe segments and place one slot per boundary; the
                 returned canvas length replaces ``num_frames`` for the rest of stage 1 and is
-                what this method returns. ``None`` (every other caller) leaves both untouched.
+                what this method returns. ``--image`` frame indices are resolved against the
+                requested length before the hook runs (:func:`resolve_stage1_frames`). ``None``
+                (every other caller) leaves both untouched.
             video_fps: Transformer RoPE fps for the video-side positions and conditionings
                 (``compute_video_positions``, ``combined_image_conditionings``,
                 ``generated_keyframe_conditionings``). ``None`` (every caller except
@@ -383,8 +420,12 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         num_frames = self._resolve_num_frames(
             num_frames, video_encoding=video_embeds, audio_encoding=audio_embeds, frame_rate=frame_rate
         )
-        if canvas_for is not None:
-            num_frames, generated_keyframes = canvas_for(num_frames)
+        num_frames, generated_keyframes, resolved_images = resolve_stage1_frames(
+            num_frames, image, images, generated_keyframes, canvas_for
+        )
+        # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``). Stage 2,
+        # the DFR temporal rounds and the spatial epilogue re-encode these same inputs.
+        resolved_images = self.image_conditioner.resolve_crf(resolved_images)
         if self.low_memory:
             self.prompt_encoder.free()
             aggressive_cleanup()
@@ -413,15 +454,12 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         audio_positions = compute_audio_positions(audio_T)
 
         # I2V conditioning at half resolution. ``images`` is the upstream-iso
-        # multi-anchor list; ``image`` is the legacy single-image shorthand.
+        # multi-anchor list; ``image`` is the legacy single-image shorthand
+        # (both already resolved by ``resolve_stage1_frames``).
         from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
-        from ltx_pipelines_mlx.utils.args import ImageConditioningInput
 
         enc_h_half = H_half * 32
         enc_w_half = W_half * 32
-        resolved_images = list(images) if images else []
-        if image is not None and not resolved_images:
-            resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
         conditionings_1: list = []
         if resolved_images:
             conditionings_1 = combined_image_conditionings(
@@ -482,6 +520,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
             seed=seed,
             ancestral=self._is_25,
+            noise_seed_offset=ANCESTRAL_NOISE_SEED_OFFSET,
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -648,8 +687,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
             on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
             seed=seed,
-            # Deterministic on every pack, 2.5 included (see _run_denoise_loop).
-            ancestral=False,
+            ancestral=self._is_25,
+            noise_seed_offset=ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET,
         )
         if self.low_memory:
             aggressive_cleanup()

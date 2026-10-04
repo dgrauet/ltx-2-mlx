@@ -52,7 +52,7 @@ class DenoiseOutput:
     """Output of the denoising loop."""
 
     video_latent: mx.array  # (B, N_video, C)
-    audio_latent: mx.array  # (B, N_audio, C)
+    audio_latent: mx.array | None  # (B, N_audio, C); None for a video-only run
 
 
 def _is_uniform_mask(mask: mx.array) -> bool:
@@ -102,19 +102,19 @@ def _frozen_sigma_kwargs(video_state: LatentState, audio_state: LatentState, bat
     return kwargs
 
 
-def _step_timed(estimator: StepEstimator, step_idx: int, video_x: mx.array, audio_x: mx.array) -> None:
+def _step_timed(estimator: StepEstimator, step_idx: int, video_x: mx.array, audio_x: mx.array | None) -> None:
     """Feed one completed step to the estimator, syncing only for the step it times."""
     if estimator.wants_sync:
-        mx.eval(video_x, audio_x)
+        mx.eval(video_x) if audio_x is None else mx.eval(video_x, audio_x)
     estimator.step_done(step_idx)
 
 
 def denoise_loop(
     model: X0Model,
     video_state: LatentState,
-    audio_state: LatentState,
+    audio_state: LatentState | None,
     video_text_embeds: mx.array,
-    audio_text_embeds: mx.array,
+    audio_text_embeds: mx.array | None,
     sigmas: list[float] | None = None,
     video_positions: mx.array | None = None,
     audio_positions: mx.array | None = None,
@@ -129,7 +129,7 @@ def denoise_loop(
     Args:
         model: X0Model wrapping the LTXModel.
         video_state: Video latent state.
-        audio_state: Audio latent state.
+        audio_state: Audio latent state, or ``None`` for a video-only run.
         video_text_embeds: Text embeddings for video conditioning.
         audio_text_embeds: Text embeddings for audio conditioning.
         sigmas: Sigma schedule (defaults to DISTILLED_SIGMAS).
@@ -154,17 +154,18 @@ def denoise_loop(
     # Resolve positions: explicit params override, then fall back to state
     if video_positions is None and video_state.positions is not None:
         video_positions = video_state.positions
-    if audio_positions is None and audio_state.positions is not None:
+    has_audio = audio_state is not None
+    if has_audio and audio_positions is None and audio_state.positions is not None:
         audio_positions = audio_state.positions
 
     # Resolve attention masks from state
     if video_attention_mask is None and video_state.attention_mask is not None:
         video_attention_mask = video_state.attention_mask
-    if audio_attention_mask is None and audio_state.attention_mask is not None:
+    if has_audio and audio_attention_mask is None and audio_state.attention_mask is not None:
         audio_attention_mask = audio_state.attention_mask
 
     video_x = video_state.latent
-    audio_x = audio_state.latent
+    audio_x = audio_state.latent if has_audio else None
 
     # sigmas already includes the terminal value (e.g. 0.0), so iterate
     # consecutive pairs directly — no extra phantom step.
@@ -179,7 +180,7 @@ def denoise_loop(
 
     # Determine whether we need per-token timesteps (for conditioning masks).
     video_uniform = _is_uniform_mask(video_state.denoise_mask)
-    audio_uniform = _is_uniform_mask(audio_state.denoise_mask)
+    audio_uniform = _is_uniform_mask(audio_state.denoise_mask) if has_audio else True
 
     for step_idx, (sigma, sigma_next) in enumerate(iterator):
         # Build sigma / per-token timesteps
@@ -204,26 +205,31 @@ def denoise_loop(
         # Pass per-token timesteps when mask is not uniform
         if not video_uniform:
             call_kwargs["video_timesteps"] = _compute_per_token_timesteps(sigma, video_state.denoise_mask)
-        if not audio_uniform:
+        if has_audio and not audio_uniform:
             call_kwargs["audio_timesteps"] = _compute_per_token_timesteps(sigma, audio_state.denoise_mask)
-        call_kwargs.update(_frozen_sigma_kwargs(video_state, audio_state, B))
+        if has_audio:
+            call_kwargs.update(_frozen_sigma_kwargs(video_state, audio_state, B))
+        else:
+            call_kwargs.update(audio_timesteps=None, audio_sigma=None)
 
         # Predict x0
         video_x0, audio_x0 = model(**call_kwargs)
 
         # Apply denoise mask: blend with clean latent
         video_x0 = apply_denoise_mask(video_x0, video_state.clean_latent, video_state.denoise_mask)
-        audio_x0 = apply_denoise_mask(audio_x0, audio_state.clean_latent, audio_state.denoise_mask)
+        if has_audio:
+            audio_x0 = apply_denoise_mask(audio_x0, audio_state.clean_latent, audio_state.denoise_mask)
 
         if on_step is not None:
             on_step(step_idx, len(steps), video_x0, sigma)
 
         # Euler step
         video_x = euler_step(video_x, video_x0, sigma, sigma_next)
-        audio_x = euler_step(audio_x, audio_x0, sigma, sigma_next)
+        if has_audio:
+            audio_x = euler_step(audio_x, audio_x0, sigma, sigma_next)
 
         # Force computation for memory efficiency
-        mx.async_eval(video_x, audio_x)
+        mx.async_eval(video_x) if audio_x is None else mx.async_eval(video_x, audio_x)
         _step_timed(estimator, step_idx, video_x, audio_x)
 
     aggressive_cleanup()

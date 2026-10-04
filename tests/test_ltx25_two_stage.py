@@ -272,7 +272,7 @@ def _stub_generate(pipe, monkeypatch, mod, stage1_name: str) -> tuple[_EchoLoop,
     stage1 = _EchoLoop()
     stage2 = _EchoLoop()
     monkeypatch.setattr(mod, stage1_name, stage1)
-    monkeypatch.setattr(mod, "denoise_loop", stage2)
+    monkeypatch.setattr(mod, "denoise_loop", stage2, raising=False)  # HQ no longer imports it
     return stage1, stage2
 
 
@@ -286,13 +286,48 @@ def _assert_audio_is_stage1(pipe, stage1: _EchoLoop, stage2: _EchoLoop) -> None:
     assert not mx.array_equal(audio, stage2_audio), "stage-2 renoised audio must differ (guards the mutation)"
 
 
-def test_two_stage_returns_stage1_audio(tmp_path, monkeypatch):
-    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=False)
+@pytest.mark.parametrize("ltx25", [False, True])
+def test_two_stage_freezes_stage2_audio(tmp_path, monkeypatch, ltx25):
+    """Upstream v1.4.0 ``ti2vid_two_stages.py`` refines with ``freeze_audio=True``: stage 2
+    sees stage 1's audio as clean, frozen context (sigma 0, zero mask) instead of a
+    re-noised copy, and the shipped audio is stage 1's."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=ltx25)
     stage1, stage2 = _stub_generate(pipe, monkeypatch, _ts_mod, "guided_denoise_loop")
-    _assert_audio_is_stage1(pipe, stage1, stage2)
+    _video, audio = pipe.generate_two_stage(
+        prompt="a fox", height=128, width=128, num_frames=9, frame_rate=24.0, seed=7
+    )
+    stage1_tokens = stage1.calls[0]["audio_state"].latent
+    stage2_state = stage2.calls[0]["audio_state"]
+    assert stage2_state.frozen is True
+    assert mx.array_equal(stage2_state.denoise_mask, mx.zeros_like(stage2_state.denoise_mask)).item()
+    assert mx.array_equal(stage2_state.latent, stage1_tokens).item(), "frozen audio must not be re-noised"
+    assert stage2.calls[0]["video_state"].frozen is False
+    assert mx.array_equal(audio, pipe.audio_patchifier.unpatchify(stage1_tokens)).item()
 
 
 def test_two_stage_hq_returns_stage1_audio(tmp_path, monkeypatch):
     pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=False)
-    stage1, stage2 = _stub_generate(pipe, monkeypatch, _hq_mod, "res2s_denoise_loop")
-    _assert_audio_is_stage1(pipe, stage1, stage2)
+    res2s, _euler = _stub_generate(pipe, monkeypatch, _hq_mod, "res2s_denoise_loop")
+    _video, audio = pipe.generate_two_stage(
+        prompt="a fox", height=128, width=128, num_frames=9, frame_rate=24.0, seed=7
+    )
+    stage1_audio = pipe.audio_patchifier.unpatchify(res2s.calls[0]["audio_state"].latent)
+    stage2_audio = pipe.audio_patchifier.unpatchify(res2s.calls[1]["audio_state"].latent)
+    assert mx.array_equal(audio, stage1_audio), "returned audio must be stage 1's"
+    assert not mx.array_equal(audio, stage2_audio), "stage-2 renoised audio must differ (guards the mutation)"
+
+
+@pytest.mark.parametrize("ltx25", [False, True])
+def test_two_stage_hq_stage2_runs_res2s_without_guidance(tmp_path, monkeypatch, ltx25):
+    """Upstream ``ti2vid_two_stages_hq.py`` refines with ``res2s_audio_video_denoising_loop``
+    and a ``SimpleDenoiser`` (no CFG / STG), on the stage-2 distilled sigmas."""
+    pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=ltx25)
+    res2s, euler = _stub_generate(pipe, monkeypatch, _hq_mod, "res2s_denoise_loop")
+    pipe.generate_two_stage(prompt="a fox", height=128, width=128, num_frames=9, frame_rate=24.0, seed=7)
+    assert euler.calls == [], "HQ stage 2 must not fall back to the Euler loop"
+    assert len(res2s.calls) == 2
+    stage1, stage2 = res2s.calls
+    assert stage1.get("video_guider_factory") is not None
+    assert stage2.get("video_guider_factory") is None and stage2.get("audio_guider_factory") is None
+    assert stage2["sigmas"][-1] == 0.0
+    assert stage2["video_state"].latent.shape[1] == 4 * stage1["video_state"].latent.shape[1]
