@@ -52,3 +52,36 @@ def test_maturity_doc_lists_tiered_subcommands():
 @pytest.mark.parametrize("name, tier", sorted(_tiered_subcommands().items()))
 def test_non_stable_subcommand_help_carries_tier_tag(name: str, tier: str):
     assert _subcommand_help()[name].startswith(f"[{tier}] ")
+
+
+# --- examples in cli.py must run as written ---------------------------------------------------
+
+_GENERATE_MODES = ("one_stage", "two_stage", "two_stages_hq", "distilled", "dfr")
+
+
+def _examples() -> list[str]:
+    import ltx_pipelines_mlx.cli as cli
+
+    sources = [("epilog", _build_parser().epilog or ""), ("docstring", cli.__doc__ or "")]
+    found = []
+    for origin, text in sources:
+        for line in text.replace("\\\n", " ").splitlines():  # join shell line continuations
+            stripped = " ".join(line.split())
+            if stripped.startswith("ltx-2-mlx "):
+                found.append(pytest.param(stripped, id=f"{origin}:{stripped[10:50]}"))
+    return found
+
+
+def test_examples_are_found():
+    assert len(_examples()) >= 15
+
+
+@pytest.mark.parametrize("example", _examples())
+def test_cli_example_parses(example: str):
+    import shlex
+
+    argv = shlex.split(example)[1:]
+    args = _build_parser().parse_args(argv)
+    if args.command == "generate":
+        # generate refuses to run without exactly one mode flag (checked after parsing).
+        assert sum(bool(getattr(args, m)) for m in _GENERATE_MODES) == 1, example
