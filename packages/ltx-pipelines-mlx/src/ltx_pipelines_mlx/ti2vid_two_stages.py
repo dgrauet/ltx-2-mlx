@@ -206,7 +206,8 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         # evaluates the fused graph block by block, so each block's originals are freed as it goes.
         del fused, model_sd, flat_model, flat_params, lora_sd, lora_with_strength, lora_remapped, lora_raw
         aggressive_cleanup()
-        # The fusion re-quantizes from float32, so stage 2 would run float32 scales otherwise.
+        # Fused scales keep their pre-fusion dtype (#186); re-apply the compute dtype anyway as a
+        # safety net so stage 2 can never run float32 scales.
         self._recast_after_inplace_fusion(dit)
 
     def _swap_to_distilled_streamer(self) -> None:

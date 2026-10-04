@@ -542,9 +542,12 @@ class BasePipeline:
     def _recast_after_inplace_fusion(self, dit: LTXModel | None = None) -> None:
         """Re-apply the DiT's compute dtype after weights were fused in place.
 
-        LoRA fusion re-quantizes from a float32 weight, so the new scales/biases
-        come out float32; with a compute dtype set they must be cast again, or
-        every fused layer silently runs ``quantized_matmul`` in float32.
+        LoRA fusion re-quantizes from a float32 weight, but since #186
+        (``fuse_loras._fuse_delta_with_quantized``) the fused scales/biases, like
+        fused float weights, keep their pre-fusion dtype, so with a compute dtype
+        set they are already in it. The recast is kept as a cheap safety net: a
+        fusion path that ever returned float32 scales would otherwise silently
+        run every fused layer's ``quantized_matmul`` in float32.
 
         Args:
             dit: The transformer that was fused (defaults to ``self.dit``).
