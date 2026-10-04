@@ -946,7 +946,7 @@ examples:
     # --- hdr-ic-lora ---
     hdr = sub.add_parser(
         "hdr-ic-lora",
-        help="SDR-to-HDR IC-LoRA, single-stage ACEScct (LTX-2.5 packs only; HLG mp4 + EXR frames)",
+        help="[experimental] SDR-to-HDR IC-LoRA, single-stage ACEScct (LTX-2.5 packs only; HLG mp4 + EXR frames)",
     )
     hdr.add_argument(
         "--input",
