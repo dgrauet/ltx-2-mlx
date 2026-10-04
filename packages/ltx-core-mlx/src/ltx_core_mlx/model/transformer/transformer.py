@@ -26,6 +26,34 @@ from ltx_core_mlx.model.transformer.adaln import PerTokenAdaLNParams
 from ltx_core_mlx.model.transformer.attention import Attention
 from ltx_core_mlx.model.transformer.feed_forward import FeedForward
 
+_FLOAT_DTYPES = (mx.float16, mx.bfloat16, mx.float32)
+
+
+def cast_float_params(params: dict, dtype: mx.Dtype) -> dict:
+    """Cast every float array of a nested parameter dict to ``dtype``.
+
+    Packed quantized weights (uint32) are left alone; only their scales/biases,
+    Linear biases and norm weights change type.
+
+    Args:
+        params: Nested parameter dict, as returned by ``nn.Module.parameters()``.
+        dtype: Target float dtype.
+
+    Returns:
+        A dict of the same structure, ready for ``nn.Module.update``.
+    """
+
+    def _cast(value: object) -> object:
+        if isinstance(value, dict):
+            return {k: _cast(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_cast(v) for v in value]
+        if isinstance(value, mx.array) and value.dtype in _FLOAT_DTYPES and value.dtype != dtype:
+            return value.astype(dtype)
+        return value
+
+    return _cast(params)
+
 
 class BasicAVTransformerBlock(nn.Module):
     """Joint audio+video transformer block with adaptive layer norm.
@@ -157,6 +185,28 @@ class BasicAVTransformerBlock(nn.Module):
 
         self._norm_eps = norm_eps
 
+    def compute_modules(self) -> list[tuple[str, Attention | FeedForward]]:
+        """The attention and feed-forward children, by attribute name."""
+        return [(name, mod) for name, mod in self.children().items() if isinstance(mod, (Attention, FeedForward))]
+
+    def set_compute_dtype(self, dtype: mx.Dtype | None) -> None:
+        """Run attention and feed-forward internals in ``dtype`` (``None``: input dtype).
+
+        Only the inside of those modules changes: the residual stream and the
+        AdaLN modulation keep whatever dtype the block receives (float32 with the
+        shipped F32 ``scale_shift_table`` s), and every module output is promoted
+        back by the float32 gate multiply before it reaches the residual.
+
+        The modules' float parameters are cast to ``dtype`` as well, so quantized
+        matmuls take the matching kernel -- float16 activations against bfloat16
+        quantization scales would promote to float32 and gain nothing.
+        ``None`` stops casting activations; parameters already cast stay cast.
+        """
+        for _, module in self.compute_modules():
+            module.compute_dtype = dtype
+            if dtype is not None:
+                module.update(cast_float_params(module.parameters(), dtype))
+
     @staticmethod
     def _unpack_adaln(
         params: mx.array | PerTokenAdaLNParams,
@@ -223,15 +273,15 @@ class BasicAVTransformerBlock(nn.Module):
     def __call__(
         self,
         video_hidden: mx.array,
-        audio_hidden: mx.array,
+        audio_hidden: mx.array | None,
         video_adaln_params: mx.array | PerTokenAdaLNParams,
-        audio_adaln_params: mx.array | PerTokenAdaLNParams,
+        audio_adaln_params: mx.array | PerTokenAdaLNParams | None,
         video_prompt_adaln_params: mx.array,
-        audio_prompt_adaln_params: mx.array,
-        av_ca_video_params: mx.array | PerTokenAdaLNParams,
-        av_ca_audio_params: mx.array | PerTokenAdaLNParams,
-        av_ca_a2v_gate_params: mx.array,
-        av_ca_v2a_gate_params: mx.array,
+        audio_prompt_adaln_params: mx.array | None,
+        av_ca_video_params: mx.array | PerTokenAdaLNParams | None,
+        av_ca_audio_params: mx.array | PerTokenAdaLNParams | None,
+        av_ca_a2v_gate_params: mx.array | None,
+        av_ca_v2a_gate_params: mx.array | None,
         video_text_embeds: mx.array | None = None,
         audio_text_embeds: mx.array | None = None,
         video_rope_freqs: mx.array | None = None,
@@ -243,7 +293,7 @@ class BasicAVTransformerBlock(nn.Module):
         video_cross_attention_mask: mx.array | None = None,
         perturbations: BatchedPerturbationConfig | None = None,
         block_idx: int = 0,
-    ) -> tuple[mx.array, mx.array]:
+    ) -> tuple[mx.array, mx.array | None]:
         """Forward pass for joint audio+video block.
 
         Args:
@@ -277,34 +327,44 @@ class BasicAVTransformerBlock(nn.Module):
         # --- Compute block-level modulation by ADDING tables to timestep params ---
         # 9 params: [0-2]=self-attn, [3-5]=ff, [6-8]=text-xattn (reference ordering)
         vdim = video_hidden.shape[-1]
-        adim = audio_hidden.shape[-1]
+        run_audio = audio_hidden is not None
 
         (v_shift_sa, v_scale_sa, v_gate_sa, v_shift_ff, v_scale_ff, v_gate_ff, v_shift_ca, v_scale_ca, v_gate_ca) = (
             self._unpack_adaln(video_adaln_params, self.scale_shift_table, 9, vdim)
         )
 
-        (a_shift_sa, a_scale_sa, a_gate_sa, a_shift_ff, a_scale_ff, a_gate_ff, a_shift_ca, a_scale_ca, a_gate_ca) = (
-            self._unpack_adaln(audio_adaln_params, self.audio_scale_shift_table, 9, adim)
-        )
+        if run_audio:
+            adim = audio_hidden.shape[-1]
+            (
+                a_shift_sa,
+                a_scale_sa,
+                a_gate_sa,
+                a_shift_ff,
+                a_scale_ff,
+                a_gate_ff,
+                a_shift_ca,
+                a_scale_ca,
+                a_gate_ca,
+            ) = self._unpack_adaln(audio_adaln_params, self.audio_scale_shift_table, 9, adim)
 
-        # AV cross-attn tables: 4 scale/shift params + 1 gate per side
-        # Reference ordering: [0]=scale_a2v, [1]=shift_a2v, [2]=scale_v2a, [3]=shift_v2a, [4]=gate
-        (av_v_scale_a2v, av_v_shift_a2v, av_v_scale_v2a, av_v_shift_v2a) = self._unpack_adaln(
-            av_ca_video_params, self.scale_shift_table_a2v_ca_video, 4, vdim
-        )
-        # AV gate: scalar (B, dim) or per-token (B, N, dim)
-        if av_ca_a2v_gate_params.ndim == 2:
-            av_v_gate_a2v = (av_ca_a2v_gate_params + self.scale_shift_table_a2v_ca_video[4, :])[:, None, :]
-        else:
-            av_v_gate_a2v = av_ca_a2v_gate_params + self.scale_shift_table_a2v_ca_video[None, None, 4, :]
+            # AV cross-attn tables: 4 scale/shift params + 1 gate per side
+            # Reference ordering: [0]=scale_a2v, [1]=shift_a2v, [2]=scale_v2a, [3]=shift_v2a, [4]=gate
+            (av_v_scale_a2v, av_v_shift_a2v, av_v_scale_v2a, av_v_shift_v2a) = self._unpack_adaln(
+                av_ca_video_params, self.scale_shift_table_a2v_ca_video, 4, vdim
+            )
+            # AV gate: scalar (B, dim) or per-token (B, N, dim)
+            if av_ca_a2v_gate_params.ndim == 2:
+                av_v_gate_a2v = (av_ca_a2v_gate_params + self.scale_shift_table_a2v_ca_video[4, :])[:, None, :]
+            else:
+                av_v_gate_a2v = av_ca_a2v_gate_params + self.scale_shift_table_a2v_ca_video[None, None, 4, :]
 
-        (av_a_scale_a2v, av_a_shift_a2v, av_a_scale_v2a, av_a_shift_v2a) = self._unpack_adaln(
-            av_ca_audio_params, self.scale_shift_table_a2v_ca_audio, 4, adim
-        )
-        if av_ca_v2a_gate_params.ndim == 2:
-            av_a_gate_v2a = (av_ca_v2a_gate_params + self.scale_shift_table_a2v_ca_audio[4, :])[:, None, :]
-        else:
-            av_a_gate_v2a = av_ca_v2a_gate_params + self.scale_shift_table_a2v_ca_audio[None, None, 4, :]
+            (av_a_scale_a2v, av_a_shift_a2v, av_a_scale_v2a, av_a_shift_v2a) = self._unpack_adaln(
+                av_ca_audio_params, self.scale_shift_table_a2v_ca_audio, 4, adim
+            )
+            if av_ca_v2a_gate_params.ndim == 2:
+                av_a_gate_v2a = (av_ca_v2a_gate_params + self.scale_shift_table_a2v_ca_audio[4, :])[:, None, :]
+            else:
+                av_a_gate_v2a = av_ca_v2a_gate_params + self.scale_shift_table_a2v_ca_audio[None, None, 4, :]
 
         # --- 1. Video self-attention ---
         video_normed = self._rms_norm(video_hidden) * (1.0 + v_scale_sa) + v_shift_sa
@@ -322,20 +382,23 @@ class BasicAVTransformerBlock(nn.Module):
         )
         video_hidden = video_hidden + video_sa_out * v_gate_sa
 
-        # --- 2. Audio self-attention ---
-        audio_normed = self._rms_norm(audio_hidden) * (1.0 + a_scale_sa) + a_shift_sa
-        a_ptb_mask = None
-        if perturbations is not None and perturbations.any_in_batch(PerturbationType.SKIP_AUDIO_SELF_ATTN, block_idx):
-            a_ptb_mask = perturbations.mask_like(
-                PerturbationType.SKIP_AUDIO_SELF_ATTN, block_idx, audio_hidden[:, :1, :1, None]
+        if run_audio:
+            # --- 2. Audio self-attention ---
+            audio_normed = self._rms_norm(audio_hidden) * (1.0 + a_scale_sa) + a_shift_sa
+            a_ptb_mask = None
+            if perturbations is not None and perturbations.any_in_batch(
+                PerturbationType.SKIP_AUDIO_SELF_ATTN, block_idx
+            ):
+                a_ptb_mask = perturbations.mask_like(
+                    PerturbationType.SKIP_AUDIO_SELF_ATTN, block_idx, audio_hidden[:, :1, :1, None]
+                )
+            audio_sa_out = self.audio_attn1(
+                audio_normed,
+                rope_freqs=audio_rope_freqs,
+                attention_mask=audio_attention_mask,
+                perturbation_mask=a_ptb_mask,
             )
-        audio_sa_out = self.audio_attn1(
-            audio_normed,
-            rope_freqs=audio_rope_freqs,
-            attention_mask=audio_attention_mask,
-            perturbation_mask=a_ptb_mask,
-        )
-        audio_hidden = audio_hidden + audio_sa_out * a_gate_sa
+            audio_hidden = audio_hidden + audio_sa_out * a_gate_sa
 
         # --- 3. Video text cross-attention (AdaLN indices 6-8 + prompt table for KV) ---
         if video_text_embeds is not None:
@@ -353,7 +416,7 @@ class BasicAVTransformerBlock(nn.Module):
             )
 
         # --- 4. Audio text cross-attention ---
-        if audio_text_embeds is not None:
+        if run_audio and audio_text_embeds is not None:
             audio_normed = self._rms_norm(audio_hidden) * (1.0 + a_scale_ca) + a_shift_ca
             ap_shift, ap_scale = self._unpack_adaln(
                 audio_prompt_adaln_params, self.audio_prompt_scale_shift_table, 2, adim
@@ -361,53 +424,59 @@ class BasicAVTransformerBlock(nn.Module):
             text_scaled = audio_text_embeds * (1.0 + ap_scale) + ap_shift
             audio_hidden = audio_hidden + self.audio_attn2(audio_normed, encoder_hidden_states=text_scaled) * a_gate_ca
 
-        # --- 5-6. Audio-Video cross-modal attention ---
-        # Reference: norm both modalities ONCE, shared by both A2V and V2A
-        video_norm3 = self._rms_norm(video_hidden)
-        audio_norm3 = self._rms_norm(audio_hidden)
+        if run_audio:
+            # --- 5-6. Audio-Video cross-modal attention ---
+            # Reference: norm both modalities ONCE, shared by both A2V and V2A
+            video_norm3 = self._rms_norm(video_hidden)
+            audio_norm3 = self._rms_norm(audio_hidden)
 
-        # A2V: Q from video, KV from audio
-        # Reference applies perturbation mask OUTSIDE attention (attn * gate * mask),
-        # not inside (unlike self-attention which blends with values).
-        video_q_a2v = video_norm3 * (1.0 + av_v_scale_a2v) + av_v_shift_a2v
-        audio_kv_a2v = audio_norm3 * (1.0 + av_a_scale_a2v) + av_a_shift_a2v
-        a2v_out = (
-            self.audio_to_video_attn(
-                video_q_a2v,
-                encoder_hidden_states=audio_kv_a2v,
-                rope_freqs=video_cross_rope_freqs,
-                rope_freqs_k=audio_cross_rope_freqs,
+            # A2V: Q from video, KV from audio
+            # Reference applies perturbation mask OUTSIDE attention (attn * gate * mask),
+            # not inside (unlike self-attention which blends with values).
+            video_q_a2v = video_norm3 * (1.0 + av_v_scale_a2v) + av_v_shift_a2v
+            audio_kv_a2v = audio_norm3 * (1.0 + av_a_scale_a2v) + av_a_shift_a2v
+            a2v_out = (
+                self.audio_to_video_attn(
+                    video_q_a2v,
+                    encoder_hidden_states=audio_kv_a2v,
+                    rope_freqs=video_cross_rope_freqs,
+                    rope_freqs_k=audio_cross_rope_freqs,
+                )
+                * av_v_gate_a2v
             )
-            * av_v_gate_a2v
-        )
-        if perturbations is not None and perturbations.any_in_batch(PerturbationType.SKIP_A2V_CROSS_ATTN, block_idx):
-            a2v_mask = perturbations.mask_like(PerturbationType.SKIP_A2V_CROSS_ATTN, block_idx, video_hidden)
-            a2v_out = a2v_out * a2v_mask
-        video_hidden = video_hidden + a2v_out
+            if perturbations is not None and perturbations.any_in_batch(
+                PerturbationType.SKIP_A2V_CROSS_ATTN, block_idx
+            ):
+                a2v_mask = perturbations.mask_like(PerturbationType.SKIP_A2V_CROSS_ATTN, block_idx, video_hidden)
+                a2v_out = a2v_out * a2v_mask
+            video_hidden = video_hidden + a2v_out
 
-        # V2A: Q from audio, KV from video (using pre-A2V norms)
-        audio_q_v2a = audio_norm3 * (1.0 + av_a_scale_v2a) + av_a_shift_v2a
-        video_kv_v2a = video_norm3 * (1.0 + av_v_scale_v2a) + av_v_shift_v2a
-        v2a_out = (
-            self.video_to_audio_attn(
-                audio_q_v2a,
-                encoder_hidden_states=video_kv_v2a,
-                rope_freqs=audio_cross_rope_freqs,
-                rope_freqs_k=video_cross_rope_freqs,
+            # V2A: Q from audio, KV from video (using pre-A2V norms)
+            audio_q_v2a = audio_norm3 * (1.0 + av_a_scale_v2a) + av_a_shift_v2a
+            video_kv_v2a = video_norm3 * (1.0 + av_v_scale_v2a) + av_v_shift_v2a
+            v2a_out = (
+                self.video_to_audio_attn(
+                    audio_q_v2a,
+                    encoder_hidden_states=video_kv_v2a,
+                    rope_freqs=audio_cross_rope_freqs,
+                    rope_freqs_k=video_cross_rope_freqs,
+                )
+                * av_a_gate_v2a
             )
-            * av_a_gate_v2a
-        )
-        if perturbations is not None and perturbations.any_in_batch(PerturbationType.SKIP_V2A_CROSS_ATTN, block_idx):
-            v2a_mask = perturbations.mask_like(PerturbationType.SKIP_V2A_CROSS_ATTN, block_idx, audio_hidden)
-            v2a_out = v2a_out * v2a_mask
-        audio_hidden = audio_hidden + v2a_out
+            if perturbations is not None and perturbations.any_in_batch(
+                PerturbationType.SKIP_V2A_CROSS_ATTN, block_idx
+            ):
+                v2a_mask = perturbations.mask_like(PerturbationType.SKIP_V2A_CROSS_ATTN, block_idx, audio_hidden)
+                v2a_out = v2a_out * v2a_mask
+            audio_hidden = audio_hidden + v2a_out
 
         # --- 7. Video feed-forward (uses indices 3-5) ---
         video_normed = self._rms_norm(video_hidden) * (1.0 + v_scale_ff) + v_shift_ff
         video_hidden = video_hidden + self.ff(video_normed) * v_gate_ff
 
-        # --- 8. Audio feed-forward (uses indices 3-5) ---
-        audio_normed = self._rms_norm(audio_hidden) * (1.0 + a_scale_ff) + a_shift_ff
-        audio_hidden = audio_hidden + self.audio_ff(audio_normed) * a_gate_ff
+        if run_audio:
+            # --- 8. Audio feed-forward (uses indices 3-5) ---
+            audio_normed = self._rms_norm(audio_hidden) * (1.0 + a_scale_ff) + a_shift_ff
+            audio_hidden = audio_hidden + self.audio_ff(audio_normed) * a_gate_ff
 
         return video_hidden, audio_hidden

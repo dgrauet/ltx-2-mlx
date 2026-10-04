@@ -90,8 +90,10 @@ class TestStrategyFactory:
 class TestLoraCheckpointFormat:
     """Tests that the LoRA checkpoint save logic produces the correct format.
 
-    Simulates the save logic from trainer.py _save_checkpoint by creating
-    a small nn.Module with LoRALinear layers and running the same conversion.
+    The fixture-based tests simulate the save logic from trainer.py
+    _save_checkpoint by creating a small nn.Module with LoRALinear layers and
+    running the same conversion. test_save_checkpoint_round_trip goes through
+    the real LtxvTrainer._setup_lora + _save_checkpoint path.
     """
 
     @pytest.fixture()
@@ -161,6 +163,92 @@ class TestLoraCheckpointFormat:
         tensors = load_safetensors(str(path))
         for key, tensor in tensors.items():
             assert tensor.dtype == np.float32, f"{key} has dtype {tensor.dtype}"
+
+    def test_save_checkpoint_round_trip(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The real _save_checkpoint writes C-contiguous factors that reload exactly.
+
+        safetensors >= 0.8.0 serializes a numpy array's raw buffer and ignores
+        its strides, so a transposed (non-C-contiguous) factor is saved
+        scrambled. The lock pins 0.7.0, which still round-trips such arrays
+        correctly, so the value check alone passes without the fix: the
+        contiguity check on what reaches save_file is what catches it.
+        """
+        from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
+        from ltx_trainer_mlx import trainer as trainer_module
+        from ltx_trainer_mlx.config import LtxTrainerConfig
+        from ltx_trainer_mlx.trainer import LtxvTrainer
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        (model_dir / "transformer.safetensors").touch()
+        config = LtxTrainerConfig(
+            model={"model_path": str(model_dir)},
+            lora={"rank": 4, "alpha": 4},
+            data={"preprocessed_data_root": str(tmp_path / "data")},
+            output_dir=str(tmp_path / "out"),
+        )
+
+        # Tiny DiT, no weights: its to_q/to_k/to_v layers are 16x16, 32x32 and 16x32.
+        mx.random.seed(0)
+        model_config = LTXModelConfig(
+            num_layers=1,
+            video_dim=32,
+            audio_dim=16,
+            video_num_heads=4,
+            audio_num_heads=4,
+            video_head_dim=8,
+            audio_head_dim=4,
+            av_cross_num_heads=4,
+            av_cross_head_dim=4,
+            video_patch_channels=8,
+            audio_patch_channels=8,
+            ff_mult=2.0,
+            timestep_embedding_dim=32,
+        )
+
+        # Bypass __init__, which loads the text encoder and model weights.
+        trainer = LtxvTrainer.__new__(LtxvTrainer)
+        trainer._config = config
+        trainer._transformer = LTXModel(model_config)
+        trainer._global_step = 1
+        trainer._checkpoint_paths = []
+        trainer._setup_lora()
+
+        # LoRALinear zero-initializes lora_b; randomize both factors so a
+        # scrambled save cannot compare equal by accident.
+        trained = [
+            (k, mx.random.normal(v.shape))
+            for k, v in nn.utils.tree_flatten(trainer._transformer.trainable_parameters())
+        ]
+        trainer._transformer.load_weights(trained, strict=False)
+        in_memory = {k: np.array(v) for k, v in nn.utils.tree_flatten(trainer._transformer.trainable_parameters())}
+        assert in_memory, "_setup_lora attached no LoRA layers"
+
+        contiguous: dict[str, bool] = {}
+        real_save = trainer_module.save_safetensors
+
+        def recording_save(tensors: dict[str, np.ndarray], filename: str) -> None:
+            contiguous.update({k: bool(v.flags["C_CONTIGUOUS"]) for k, v in tensors.items()})
+            real_save(tensors, filename)
+
+        monkeypatch.setattr(trainer_module, "save_safetensors", recording_save)
+
+        saved = load_safetensors(str(trainer._save_checkpoint()))
+
+        assert set(contiguous) == set(saved), "_save_checkpoint did not save through save_safetensors"
+        not_contiguous = sorted(k for k, ok in contiguous.items() if not ok)
+        assert not not_contiguous, f"non-C-contiguous arrays passed to save_file: {not_contiguous}"
+
+        expected: dict[str, np.ndarray] = {}
+        for name, value in in_memory.items():
+            if name.endswith(".lora_a"):
+                expected[f"diffusion_model.{name[: -len('.lora_a')]}.lora_A.weight"] = value.T
+            else:
+                assert name.endswith(".lora_b"), f"unexpected trainable parameter: {name}"
+                expected[f"diffusion_model.{name[: -len('.lora_b')]}.lora_B.weight"] = value.T
+        assert set(saved) == set(expected)
+        for key, value in expected.items():
+            np.testing.assert_array_equal(saved[key], value, err_msg=key)
 
 
 # ---------------------------------------------------------------------------

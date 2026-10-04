@@ -7,7 +7,8 @@ runtime dependency.
 
 Public names match upstream verbatim:
 
-- ``DEFAULT_IMAGE_CRF`` — default H.264 CRF for I2V image preprocessing.
+- ``DEFAULT_IMAGE_CRF`` — H.264 CRF of the pre-2.4 model generations (re-exported
+  from :mod:`ltx_pipelines_mlx.utils.constants`, with ``LTX_2_4_IMAGE_CRF``).
 - ``decode_image`` — load an image file as ``numpy.ndarray`` (HWC, uint8).
 - ``encode_single_frame`` — encode one RGB frame to H.264 mp4 bytes.
 - ``decode_single_frame`` — decode the first frame of a buffer back to RGB.
@@ -35,13 +36,12 @@ from PIL import Image
 
 from ltx_core_mlx.utils.ffmpeg import find_ffmpeg
 
-# Upstream-verbatim default. Used by ``ImageConditioningInput.crf`` and by
-# ``load_image_and_preprocess``. Round-tripping the input image through
-# libx264 at this CRF brings it close to the LTX-2 training distribution
-# (which is built from real video frames carrying H.264 compression
-# artefacts), preventing the model from over-reacting to pristine
-# PNG/JPEG textures during I2V conditioning.
-DEFAULT_IMAGE_CRF = 33
+# Re-exported for upstream-iso import paths. ``DEFAULT_IMAGE_CRF`` is the CRF of the
+# pre-2.4 model generations (``LTX_2_4_IMAGE_CRF`` from 2.4 on); the value a run uses
+# comes from the checkpoint (``ImageConditioner.resolve_crf``), never from a default here.
+# Round-tripping the input image through libx264 brings it close to the LTX-2 training
+# distribution (real video frames carrying H.264 compression artefacts).
+from ltx_pipelines_mlx.utils.constants import DEFAULT_IMAGE_CRF, LTX_2_4_IMAGE_CRF
 
 
 def to_vae_range(x: mx.array) -> mx.array:
@@ -200,12 +200,23 @@ def _parse_size_from_stderr(stderr: str) -> tuple[int, int] | None:
     return None
 
 
-def preprocess(image: np.ndarray, crf: float = DEFAULT_IMAGE_CRF) -> np.ndarray:
+def preprocess(image: np.ndarray, crf: int | None) -> np.ndarray:
     """Round-trip an ``HxWx3`` uint8 RGB array through libx264 at the given CRF.
 
     Mirrors upstream verbatim: encode → decode → return decoded RGB.
-    ``crf == 0`` is a passthrough.
+    ``crf == 0`` is a passthrough. ``crf`` is required: the correct value is a
+    property of the model generation, so a code-level default here would
+    silently condition on the wrong compression.
+
+    Raises:
+        ValueError: If ``crf`` is ``None`` — a conditioning skipped resolution
+            (see ``ImageConditioner.resolve_crf``).
     """
+    if crf is None:
+        raise ValueError(
+            "Image conditioning CRF is unresolved (crf=None). Resolve it against the checkpoint "
+            "first -- ImageConditioner.resolve_crf(images), or detect_params(checkpoint_path).default_image_crf."
+        )
     if crf == 0:
         return image
     h, w, _ = image.shape
@@ -249,7 +260,7 @@ def load_image_and_preprocess(
     image_path: str | Path,
     height: int,
     width: int,
-    crf: int = DEFAULT_IMAGE_CRF,
+    crf: int | None,
 ) -> mx.array:
     """Full I2V image pipeline (upstream-iso).
 
@@ -261,7 +272,8 @@ def load_image_and_preprocess(
 
     Mirrors upstream's ``load_image_and_preprocess`` signature; the upstream
     ``dtype`` / ``device`` arguments are dropped (MLX uses bfloat16 + unified
-    memory, no device choice).
+    memory, no device choice). ``crf`` is required, as upstream: ``None``
+    raises in :func:`preprocess`.
 
     Returns:
         ``mx.array`` of shape ``(1, 3, H, W)`` in ``[-1, 1]``, bfloat16.
@@ -269,8 +281,7 @@ def load_image_and_preprocess(
     if isinstance(image_path, Path):
         image_path = str(image_path)
     arr = decode_image(image_path)
-    if crf and crf > 0:
-        arr = preprocess(arr, crf=crf)
+    arr = preprocess(arr, crf=crf)
     image = resize_and_center_crop(arr, height, width)
 
     # HWC uint8 → float32 → [-1, 1]
@@ -283,6 +294,7 @@ def load_image_and_preprocess(
 
 __all__ = [
     "DEFAULT_IMAGE_CRF",
+    "LTX_2_4_IMAGE_CRF",
     "decode_image",
     "decode_single_frame",
     "encode_single_frame",

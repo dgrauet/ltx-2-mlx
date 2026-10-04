@@ -312,7 +312,8 @@ When conditioning (I2V, retake, extend), use per-token timesteps `sigma * denois
 - `attention_mask`: (B, N, N) optional self-attention mask [0,1]
 - `frozen`: `True` marks a stream that is conditioning only (upstream `LatentState.frozen`); it always carries an
   all-zero `denoise_mask`. `create_noised_state(..., frozen=True)` builds one. Set where upstream sets
-  `frozen=True`: a2v audio (both stages), lipdub stage-2 audio, retake audio with `--no-regen-audio`.
+  `frozen=True`: a2v audio (both stages), lipdub stage-2 audio, `--two-stage` stage-2 audio (upstream v1.4.0
+  `freeze_audio=True`), retake audio with `--no-regen-audio`.
 
 ### Frozen streams and per-modality sigma
 Upstream gives each modality its own `Modality.sigma` and forces it to 0 for a frozen stream
@@ -529,6 +530,8 @@ All `generate` modes (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distil
 
 - `frame_idx=0` → `VideoConditionByLatentIndex`: hard-replaces the first latent frame (strongly preserved)
 - `frame_idx>0` → `VideoConditionByKeyframeIndex`: appends soft reference tokens at that temporal position
+- Optional 4th value `CRF`: the H.264 CRF the image is re-compressed at before encoding (`0` = none). Omitted, it resolves from the checkpoint like upstream (`ImageConditioner.resolve_crf`, reading `model_version` from the VAE encoder's safetensors metadata): **33** before LTX-2.4 (2.3 packs carry no version → 33), **18** from 2.4 on (2.5 packs). Applies to every pipeline that takes images, `keyframe` included; an explicit CRF always wins.
+- `FRAME_IDX` can also be `last` (or `end`) or a negative number counted back from the end (`-1` = last frame). `resolve_frame_indices` (`utils/args.py`) turns it into a pixel index once the pipeline knows the frame count, so an end anchor stays on the final frame when `--auto-duration` picks the length (a fixed `96` would not). Resolved in every pipeline that takes `--image`, before the keyframe-token bookkeeping that tests `frame_idx > 0`. On `--dfr` it is resolved against the requested length before the clip is padded to whole keyframe segments (`resolve_stage1_frames`, `distilled.py`), so `last` lands on the final frame of the trimmed output. `-num_frames` resolves to `0` and therefore gets the hard first-latent replace above, not a soft keyframe. An index outside the clip (before frame 0, or `>= num_frames`) raises a `ValueError` that names the image.
 
 ```bash
 # Anchor both ends — model animates the transition
@@ -547,6 +550,14 @@ ltx-2-mlx generate \
   --image frame.jpg 0 1.0 \
   --image frame.jpg 96 1.0 \
   -f 97 --frame-rate 24 -o loop.mp4
+
+# End anchor with a predicted length (2.5 packs): `last` follows the frame count
+ltx-2-mlx generate \
+  --prompt "a door slowly swings shut" \
+  --distilled \
+  --image open.jpg 0 1.0 \
+  --image closed.jpg last 1.0 \
+  --auto-duration 2:6 -o door.mp4
 ```
 
 **Mode recommendations for multi-anchor:** `--two-stage` or `--two-stages-hq` (dev model + CFG) respects anchors most faithfully. `--distilled` (8 steps, no CFG) also honors them — soft keyframe anchors are hints, not law, so the model may drift from them at longer durations, but a distilled start+end smoke test (512×512×25) tracked both anchors cleanly. `--one-stage` works but is slower than `--two-stage` at large resolutions.
@@ -985,8 +996,8 @@ that path. 2.3 packs are byte-identical to before.
 ### Sampler
 
 - Stage 1: `euler_ancestral_denoising_loop` (`EulerAncestralDiffusionStep(eta=ANCESTRAL_ETA, s_noise=ANCESTRAL_S_NOISE)`, 8 steps) on `LTX_2_5_DISTILLED_SIGMAS`.
-- Stage 2: stays the deterministic Euler loop (`STAGE_2` renoise) on `LTX_2_5_STAGE_2_DISTILLED_SIGMAS`, matching upstream: *"Stage 2 is always deterministic — its 3-step refinement schedule is too short to remove freshly injected noise."*
-- Ancestral noise is seeded from `seed + ANCESTRAL_NOISE_SEED_OFFSET` (10000) to decorrelate from the initial-latent draw.
+- Stage 2: also `euler_ancestral_denoising_loop` (same eta / s_noise, `STAGE_2` renoise) on `LTX_2_5_STAGE_2_DISTILLED_SIGMAS`, as upstream since v1.4.0 (it used to keep stage 2 deterministic). This also covers DFR's stage 2, which reuses `_stage2`.
+- Ancestral noise is seeded from `seed + ANCESTRAL_NOISE_SEED_OFFSET` (10000) for stage 1 and `seed + ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET` (20000) for stage 2, to decorrelate both from the initial-latent draw and from each other. 2.3 packs stay deterministic on both stages.
 - Stage 2 upscaler resolves to `spatial_upscaler_x2_v1_0.safetensors` (vs `v1_1` on 2.3), falling back to the 2.3 stems; hard error only when none exists (#42 style).
 
 ### Auto-Duration (`DurationHead`, `-f` optional on 2.5)
@@ -1132,7 +1143,7 @@ is the identity, so nothing changes numerically; `--distilled` (outside DFR) is 
   ([Generated keyframe slots](#generated-keyframe-slots---num-generated-keyframes-n-25-packs)),
   driven internally rather than by the CLI flag (`--num-generated-keyframes` is refused on
   `--dfr`). Optional I2V anchors (`--image`) apply as usual.
-- **Stage 2** (`_stage2`, full resolution, deterministic): the stage-1 video latent and its
+- **Stage 2** (`_stage2`, full resolution, ancestral on 2.5 like `--distilled`): the stage-1 video latent and its
   extracted keyframe-slot latents are each upsampled once (2× spatial, matching upstream's
   single-call-per-tensor shape), then denoised with two extra conditionings appended:
   `VideoGeneratedKeyframeSlots` (the upsampled slots, at the same canvas pixel-frame positions)
@@ -1173,25 +1184,32 @@ stage-2 video latent with the temporal latent upsampler (pack `temporal_upscaler
 resolved by `_resolve_temporal_upsampler_path` — a local `--temporal-upsampler-path` override skips
 that lookup), then cuts the doubled timeline into `2**round` keyframe-seam tiles (`TemporalTilePlan`,
 `dfr_layout.py`) at the carried keyframe positions (`seams = [2 * p for p in carry_positions]`) —
-tiling is a hard split, not a blend: the lead-in before a seam is dropped and the earlier tile keeps
-the seam frame. Each tile is re-denoised independently with the **distilled transformer, detailing
+tiling is a hard split with **no overlap** (kept runs are disjoint), not a blend. A non-first tile
+**starts on a keyframe plane with a pinned prefix** (upstream v1.4.0 `TilePrefix` / `tile_prefix` /
+`lead_in_carryover`, ours in `dfr_layout.py` / `dfr.py::lead_in_latent`): cell 0 is the plane at the
+last plane position before its seam (usually the previous tile's fresh mid-segment slot), cells
+`1 .. (seam - plane) / 8` are the previous tile's finished output up to the seam, pinned by a
+strength-1 `VideoConditionByLatentIndex` at index 0 (mask 0, so they *are* that output at every
+step), and only the cells after the seam are kept. A tile is denoised as its own clip, whose cell 0
+the model reads as one pixel frame: starting on a plane keeps content, shape and RoPE time in
+agreement (the old mid-canvas lead-in ran 7 frames ahead). Each tile is re-denoised independently with the **distilled transformer, detailing
 LoRA detached** (`_detach_detailing_lora`, run once before round 1: under `--low-ram` this drops the
 `BlockLoraSource` from the streamer, otherwise it reloads a clean transformer) on the last 4 denoising
 steps of the distilled sigma schedule (`TEMPORAL_SIGMAS = LTX_2_5_DISTILLED_SIGMAS[4:]`, 5 sigma
 entries bracketing 4 steps) via ancestral Euler
 (`EulerAncestralDiffusionStep(eta=TEMPORAL_ANCESTRAL_ETA=0.5)`, noise seed `seed + 1000*round + tile`).
-Conditioning per tile: the carried keyframes anchor the tile at `ANCHOR_KEYFRAME_STRENGTH = 0.95`
-(soft, not a hard replace), plus fresh mid-segment generated-keyframe slots on the doubled
-timeline. Audio is **frozen**, not re-denoised: stage 1's audio latent is windowed to the tile's
+Conditioning per tile: the carried keyframes after the tile's resume point (seam + 1) anchor it at
+`ANCHOR_KEYFRAME_STRENGTH = 0.95` (soft, not a hard replace; anchors inside the pinned prefix are
+dropped), plus fresh generated-keyframe slots at the *canvas* segment midpoints that fall in the tile,
+and user images rebased on the tile window (prefix included). Audio is **frozen**, not re-denoised: stage 1's audio latent is windowed to the tile's
 time range and resampled to the tile's new token count (`resample_audio_time`,
 `audio_latent_for_tile`) as a `frozen` state (all-zero `denoise_mask`, sigma 0 for the audio prompt
 AdaLN and the A→V gate — see "Frozen streams and per-modality sigma"), as upstream. The
 transformer's conditioning fps is snapped by
 `conditioning_fps()` — RoPE fps above 30 snaps to 60 (`_MAX_CONDITIONING_FPS = 60.0`); the actual
 playback fps (`frame_rate * 2**temporal_upscalings`) is unchanged. After each round,
-`merge_carry_forward_keyframes` folds the round's new slots (lead-in duplicates: the earlier tile
-wins) and the seam anchors into one carry bag (`generated_keyframes` / `generated_keyframe_positions`)
-on that round's grid; the last round's bag
+the carry bag (`generated_keyframes` / `generated_keyframe_positions`) is every plane on that round's
+grid: the scaled anchors plus each tile's new slots, added as the tile finishes (existing planes win); the last round's bag
 is what the keyframe-aware decode (`--video-decoder diffusion`) consumes instead of the stage-2 slots
 — the conv decoder ignores it exactly as it ignores the stage-2 slots. Output frame count is
 `(requested - 1) * 2**T + 1` at `frame_rate * 2**T` fps. Rounds refuse `--segment` (Prompt Relay) and
@@ -1216,16 +1234,26 @@ The first diffusion-decoder and T=2 attempts were killed by the macOS GPU watchd
 warning when this changes the requested size), stage 1 runs at H/4 and stage 2 plus every temporal
 round run at H/2 instead of the default H/2 / full res split — one extra spatial halving deferred
 to a final epilogue. After stage 2 (and any temporal rounds) finish, `_run_spatial_epilogue`
-details the H/2 latent up to full resolution: the carry keyframe bag is decoded one plane at a
-time with the render's own decoder (conv or diffusion, seeded `seed + 4000 + i`), Lanczos-upsampled
-×2 in RGB, and re-encoded as strength-1.0 keyframe conditionings at full resolution; the H/2 video
-latent is spatially upsampled once more (same latent upsampler as stage 2) and re-denoised with the
-distilled transformer + detailing LoRA (0.5), conditioned on the re-encoded keyframes plus an
-IC-LoRA reference built from the pre-upsample H/2 latent, on the stage-2 sigma table (3-step
-deterministic Euler) with stage 1's audio carried through frozen. Every model call in the epilogue
-goes through `X0Model(TiledLTXModel(..., normalize_positions=True))`: 2×2 spatial tiles (overlap
-12) and `2**temporal_upscalings` temporal tiles cut on the last round's seams, since the full-res
-token count would otherwise be too large for one forward. The re-encoded keyframes (not the
+details the H/2 latent up to full resolution (upstream v1.4.0 `run_spatial_epilogue`): the carry
+keyframe bag is decoded one plane at a time with the render's own decoder (conv or diffusion, seeded
+`seed + 4000 + i`), Lanczos-upsampled ×2 in RGB, and re-encoded as strength-1.0 keyframe
+conditionings at full resolution. When no user image sits at frame 0 of the final grid, the H/2
+latent's first frame is decoded the same way (next seed) as an **opening plane** that anchors frame
+0 of the first window and is not shipped. The H/2 video latent is spatially upsampled once more and
+re-denoised **window by window** (`plan_epilogue_windows`): one window per last-round temporal tile
+(the whole canvas without rounds), run sequentially, each non-first window starting on the last carry
+plane before its seam with its lead-in pinned to the previous window's finished output, exactly as in
+the temporal rounds. Per window: the carry planes after its resume point, the opening plane (first
+window), user images on the final grid, an IC-LoRA reference built from the pre-upsample H/2 latent
+cropped to the window, and stage 1's audio windowed and frozen. Each window runs the stage-2 sigma
+table with the distilled transformer + detailing LoRA (0.5) in two phases (`epilogue_sigma_phases`):
+one ancestral step on a **2×2** spatial grid, then the same conditionings re-applied to that output
+(no new noise) and the remaining steps on a **4×4** grid (a one-step table stays 2×2); spatial
+tiles overlap 10 cells and blend after every step through
+`X0Model(TiledLTXModel(..., normalize_positions=True))`, windows are never blended. Seeds: initial
+noise `seed + 2000 + 100 * window`, ancestral `seed + 30000 + pass` (window i: coarse 2i, fine
+2i + 1). Upstream's own T=0 path builds `TemporalTilePlan([])`, whose seam split refuses an empty
+boundary list; we treat it as one window. The re-encoded keyframes (not the
 pre-epilogue slots) become the decoder keyframes for the final keyframe-aware decode. `--dfr
 --spatial-upscalings 2` refuses `--tile-frames` / `--tile-spatial` (modality tiling collides with
 the epilogue's own tiling) and `--segment` (Prompt Relay), both up front in the CLI before any
@@ -1411,6 +1439,59 @@ blocks. Both are on by default and bit-identical by construction:
 - `LTX2_ADALN_DEDUPE_MIN_ROWS` (default 1024), `LTX2_ADALN_DEDUPE_MAX_FRAC`
   (default 0.5) — thresholds below/above which the dedupe is not attempted.
 - `LTX2_ADALN_DEDUPE_DEBUG=1` — log calibration verdicts.
+
+### DiT compute dtype (`LTX2_COMPUTE_DTYPE`)
+
+The DiT runs in float32 by default, although its weights are bf16: the `scale_shift_table`s are
+stored F32 and the per-token AdaLN parameters are F32 (the sinusoidal timestep embedding is
+float32), so `rms(x) * (1 + scale) + shift` promotes the modulated activations, the residual stream
+becomes float32 after block 0, and every projection and attention call follows. Upstream PyTorch
+casts the tables to the timestep dtype and runs the whole block in bf16.
+
+`LTX2_COMPUTE_DTYPE=float16` (Python: `LTXModel.set_compute_dtype(mx.float16)`; pipelines apply the
+variable when they load a DiT, including `--low-ram`, where `BlockStreamer.bind` casts each block as
+it is bound) runs the inside of every attention and feed-forward module in float16: projections,
+q/k norms, RoPE and the attention kernel. The residual stream and the AdaLN modulation stay float32,
+and the float32 gate multiply promotes each module output back before the residual add. The modules'
+float parameters (quantization scales/biases, Linear biases, q/k norm weights) are cast at load:
+float16 activations against bf16 scales would promote to float32 inside `quantized_matmul` and gain
+nothing. The AdaLN tables keep their F32 dtype. `bfloat16` gives the upstream precision; unset or
+`float32` is today's path, untouched. In-place LoRA fusion (`dfr`'s detailing LoRA, `ic-lora`, and the
+distilled-LoRA fusion that starts stage 2 of `--two-stage`, `--two-stages-hq`, `a2v` and `keyframe`
+in `TI2VidTwoStagesPipeline._fuse_distilled_lora`) re-quantizes from a float32 weight; `fuse_loras`
+gives the new scales/biases the dtype the old ones had (until that fix they came out float32 on every
+path). Every such call site also calls `BasePipeline._recast_after_inplace_fusion()` afterwards, so a
+compute dtype set before the fusion is re-applied to whatever the fusion replaced. (`--low-ram` swaps
+the streamer to the pre-fused distilled transformer instead and keeps casting at bind time.)
+
+Why float16: on an M1 GPU (no native bf16), int8 `quantized_matmul` at the stage-2 shapes
+(17,856 tokens × 4096) runs at 6.6 TFLOPS with float32 activations, 5.8 with bf16 and 8.1 with
+float16, and `mx.fast.scaled_dot_product_attention` (32 × 17,856 × 128) at 4.5 / 6.0 / 7.6 TFLOPS.
+Measured on an M1 Max 64 GB, 2.5 q8 pack, `--distilled` I2V 576×1024×241, seed 7:
+
+| | stage-2 step | whole render | output vs float32 (one stage-2 forward) |
+|---|---:|---:|---|
+| float32 (default) | 141 s | 701 s | — |
+| `bfloat16` | 136 s | 698 s | rel. L2 6.4e-2, cos 0.99796 |
+| `float16` | 107 s | 563 s | rel. L2 1.7e-2, cos 0.99985 |
+
+Float16 margin: on every forward of two full renders (I2V 576×1024×121 and a flat-sky T2V
+1024×576×97, all 11 forwards each) the largest value inside any attention/FF op was 2,512, against
+float16's 65,504; the residual stream reaches ~14,000, which is why it stays float32. As a guard,
+`LTXModel.__call__` checks the output when a compute dtype is set and, if it is not finite, prints
+a warning, drops the setting for the rest of the run and recomputes that forward. On a resident model
+the recompute is **not** the float32 path: the parameters already cast stay float16-rounded, only the
+activations are no longer cast. Under `--low-ram` the `StreamingLTXModel` wrapper owns the setting (the
+inner model holds a weak reference to it), so the guard drops it there: later binds stop casting, the
+compiled block is retraced, and the recompute rebinds the stored weights, i.e. it is the default path.
+0.48 % of the q8 pack's quantization scales are below float16's normal range (they belong to
+near-zero weight groups) and lose precision in the cast.
+
+Tests: `tests/test_compute_dtype.py` (tiny int8 model with F32 tables and per-token timesteps, the
+production dtype layout): default untouched, which parameters are cast, module output dtypes,
+closeness to float32 with float16 closer than bf16, the overflow guard (resident and streamed), streaming
+parity, the recast after in-place LoRA fusion (including the two-stage distilled-LoRA call site), env
+parsing.
 
 ### `LTX2_GEMMA_MAX_LENGTH`
 

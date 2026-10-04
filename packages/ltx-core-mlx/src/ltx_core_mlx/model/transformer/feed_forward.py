@@ -33,6 +33,11 @@ class FeedForward(nn.Module):
         inner_dim = int(dim * mult)
         self.proj_in = nn.Linear(dim, inner_dim, bias=bias)
         self.proj_out = nn.Linear(inner_dim, dim_out, bias=bias)
+        # Optional dtype for both projections and the activation; None keeps the
+        # input dtype. Set through LTXModel.set_compute_dtype.
+        self.compute_dtype: mx.Dtype | None = None
 
     def __call__(self, x: mx.array) -> mx.array:
+        if self.compute_dtype is not None:
+            x = x.astype(self.compute_dtype)
         return self.proj_out(nn.gelu_approx(self.proj_in(x)))
