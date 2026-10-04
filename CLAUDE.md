@@ -1257,19 +1257,21 @@ is what the keyframe-aware decode (`--video-decoder diffusion`) consumes instead
 `(requested - 1) * 2**T + 1` at `frame_rate * 2**T` fps. Rounds refuse `--segment` (Prompt Relay) and
 `--tile-frames` / `--tile-spatial` (modality tiling) up front, before any Gemma load.
 
-**Temporal rounds validated** (M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5, 512×768, `-f 121`):
-`--dfr` without rounds is byte-identical (sha256) to `main`. `--temporal-upscalings 1`: 241 frames at
-48 fps, 1735 s total (round 1 = 2 tiles in 1073 s, ~135 s per ancestral step on a 145-frame tile),
-max RSS 11.8 GB. `--temporal-upscalings 2`: 481 frames at 96 fps, 4173 s (round 2 = 4 tiles in 2393 s),
-max RSS 11.1 GB. Round 1 with `--video-decoder diffusion`: the 10-plane carry bag reaches the decoder
-(auto-tiled 3×1×3), 3382 s, 13.8 GB peak Metal. Tile seams show no visible cut (the round-1 seam's
-frame-to-frame change is at the clip's 99th percentile; round-2 seams are ordinary). One isolated stall-
-then-jump at a latent border inside a round-2 tile (frames 248→250 of the 96 fps render, once in 480
-transitions) comes from the model's temporal upsampler itself: it is already there when round 2 skips
-denoising (upsample only), and our temporal `LatentUpsampler` matches upstream torch to 1.6e-5 on the
+**Temporal rounds validated** (M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5, 512×768, `-f 121`,
+pinned-prefix / no-overlap plan with global slots, #179): `--temporal-upscalings 1`: 241 frames at 48 fps in
+1599 s; frames 0–79 are bit-identical to the pre-#179 render (the first tile is unchanged); the seam at
+144→145 has a frame-to-frame change of 5.48 against the clip's 99th percentile of 6.09.
+`--temporal-upscalings 2`: 481 frames at 96 fps in 4028 s; seam changes 3.31 / 3.08 / 3.42 against a 99th
+percentile of 3.92. One isolated stall-then-jump at a latent border inside a round-2 tile (around frame 249
+of the 96 fps render) comes from the model's temporal upsampler itself: it is already there when round 2
+skips denoising (upsample only), and our temporal `LatentUpsampler` matches upstream torch to 1.6e-5 on the
 pack weights — model-authentic, not a port bug; the round-2 tile denoise neither creates nor removes it.
-The first diffusion-decoder and T=2 attempts were killed by the macOS GPU watchdog
-(display active) and passed with `AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1`.
+Measured before #179/#180 (old overlapping lead-in tiles): `--dfr` without rounds byte-identical (sha256) to
+`main`; T=1 round 1 = 2 tiles in 1073 s (~135 s per ancestral step on a 145-frame tile), max RSS 11.8 GB; T=2
+round 2 = 4 tiles in 2393 s, max RSS 11.1 GB; round 1 with `--video-decoder diffusion`: the 10-plane carry
+bag reaches the decoder (auto-tiled 3×1×3), 3382 s, 13.8 GB peak Metal. The first diffusion-decoder and
+T=2 attempts were killed by the macOS GPU watchdog (display active) and passed with
+`AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1`.
 
 **Spatial epilogue (`--spatial-upscalings 2`).** With `spatial_upscalings=2` (the CLI's
 `--spatial-upscalings {1,2}`, default 1) the dims are floored to multiples of 128 px (a stderr
@@ -1301,13 +1303,14 @@ pre-epilogue slots) become the decoder keyframes for the final keyframe-aware de
 the epilogue's own tiling) and `--segment` (Prompt Relay), both up front in the CLI before any
 Gemma load, mirroring the temporal-rounds refusals above.
 
-**Spatial epilogue validated** (M2 Pro 32 GB, LTX-2.5 q8, `--dfr --low-ram --no-audio`, seed 5, `-f 49`):
-`--spatial-upscalings 1` is byte-identical (sha256) to main. `--spatial-upscalings 2` at 1536×1024: 1482 s total,
-epilogue 1158 s (3 steps × 4 tiles, ~95 s per tile forward), max RSS 12.6 GB, decode peak Metal 11.2 GB; with
-`--temporal-upscalings 1` (97 frames @ 48 fps): 4524 s, epilogue 3657 s over 8 tiles (seams [6, 12]), decode peak
-16.9 GB. No visible spatial seam (gradients at the 12-cell blend ramps stay at the frame's ordinary level) and the
-temporal cut at 48→49 is within the range of the rounds' seams; mean |Laplacian| 1.268 vs 1.202 for a direct
-`--spatial-upscalings 1` render at 1536×1024 (1190 s).
+**Spatial epilogue validated** (M2 Pro 32 GB, LTX-2.5 q8, `--dfr --low-ram --no-audio`, seed 5, `-f 49`;
+per-window pinned passes, 2×2 coarse then 4×4, overlap 10, ancestral, #180): `--spatial-upscalings 2` at
+1536×1024: 2272 s total, epilogue 1941 s, peak Metal 11.2 GB; with `--temporal-upscalings 1` (97 frames @
+48 fps): 5015 s total, epilogue 4251 s, peak Metal 16.8 GB. No visible tile seam; the temporal seam's
+frame-to-frame change is 1.20 against the clip's 99th percentile of 1.50. Measured before #179/#180 (single
+2×2 window, overlap 12): `--spatial-upscalings 1` byte-identical (sha256) to main; max RSS 12.6 GB at
+`--spatial-upscalings 2`; mean |Laplacian| 1.268 vs 1.202 for a direct `--spatial-upscalings 1` render at
+1536×1024 (1190 s).
 
 **Keyframe decode validated** (M2 Pro 32 GB, LTX-2.5 q8, `--low-ram --no-audio`, seed 5, 512×768×49,
 baselines at the pre-keyframe base): `--dfr` (conv) and `--distilled --video-decoder diffusion` are
