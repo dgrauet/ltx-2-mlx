@@ -957,7 +957,20 @@ The EXR writer needs the optional `hdr` extra: `pip install 'ltx-pipelines-mlx[h
 
 ### Status
 
-Experimental until validated on real weights (see docs/PIPELINE_MATURITY.md). Unit tests run without weights (`tests/test_hdr_ic_lora.py`, `tests/test_hdr_media.py`).
+Experimental (see docs/PIPELINE_MATURITY.md). Unit tests run without weights (`tests/test_hdr_ic_lora.py`, `tests/test_hdr_media.py`).
+
+**Validated** on real weights (M2 Pro 32 GB, LTX-2.5 q8, `--low-ram`, seed 5, LoRA `ltx-2.5-22b-ic-lora-sdr-to-hdr-1.0` + its scene-emb file, a sunlit-kitchen SDR clip at 768×512, 24 fps):
+
+| run | wall-clock | denoise | decode (fp32 diffusion) | peak footprint |
+|---|---:|---:|---:|---:|
+| 49 frames, seam keyframes (default; 6912 tokens) | 1097 s | 8 × 83 s | 419 s | 13.4 GB |
+| 49 frames, `--no-keyframes` (5376 tokens) | 761 s | | | |
+| 25 frames, `--high-quality` (49 generated, 6144 tokens; 25 written) | 1013 s | | 412 s | 13.4 GB |
+
+- HLG master: HEVC `yuv420p10le`, `bt2020` / `arib-std-b67` / `bt2020nc`, every frame. Its inverse-OETF luminance correlates 0.98 with the EXR frame (converted to Rec.2020).
+- EXR (ACEScg): no NaN, min ≥ 0. Default run: max 13.0, 15 % of pixels above 1.0. The source's near-white areas (the window) average 3.25 against 0.42 elsewhere: real highlights. `--no-keyframes`: max 10.1, window 1.86. `--high-quality`: max 23.1, window 4.16.
+- Same picture as the SDR source. The LoRA lifts mid-tones by ~1.3× against the source's sRGB-EOTF linear (median ratio 1.36 default, 1.25 without keyframes); with that gain compensated, clipped mid-tones sit at 22.9 dB / 25.1 dB PSNR.
+- The official scene-emb file stores `video_context` as `(1024, 4096)` with no batch axis; `load_video_context` adds it.
 
 ### Key Files
 
