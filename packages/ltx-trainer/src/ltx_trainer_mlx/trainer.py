@@ -938,7 +938,7 @@ class LtxvTrainer:
                 elif key.endswith(".lora_b"):
                     key = key[: -len(".lora_b")] + ".lora_B.weight"
                     param = mx.transpose(param)
-                state_dict[key] = np.array(param.astype(mx.float32))
+                state_dict[key] = np.ascontiguousarray(np.array(param.astype(mx.float32)))
             save_safetensors(state_dict, str(saved_path))
         else:
             state_dict = {}

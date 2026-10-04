@@ -1,6 +1,7 @@
 """Loader utilities for model weights, LoRAs, and safetensor operations."""
 
 from ltx_core_mlx.loader.fuse_loras import apply_loras
+from ltx_core_mlx.loader.helpers import parse_model_version
 from ltx_core_mlx.loader.primitives import (
     LoraPathStrengthAndSDOps,
     LoraStateDictWithStrength,
@@ -34,4 +35,5 @@ __all__ = [
     "SafetensorsStateDictLoader",
     "StateDict",
     "apply_loras",
+    "parse_model_version",
 ]

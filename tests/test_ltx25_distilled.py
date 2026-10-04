@@ -16,6 +16,7 @@ from ltx_pipelines_mlx.distilled import (
     ANCESTRAL_ETA,
     ANCESTRAL_NOISE_SEED_OFFSET,
     ANCESTRAL_S_NOISE,
+    ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET,
 )
 from ltx_pipelines_mlx.utils.generation import is_ltx25_pack
 from tests.conftest import LTX25_Q8_DIR, MODEL_DIR
@@ -28,6 +29,7 @@ def test_ancestral_constants_exact_values():
     assert ANCESTRAL_ETA == 1.0
     assert ANCESTRAL_S_NOISE == 1.0
     assert ANCESTRAL_NOISE_SEED_OFFSET == 10000
+    assert ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET == 20000
 
 
 @pytest.mark.slow
@@ -169,7 +171,7 @@ def test_25_pack_routes_stage1_through_ancestral_loop(tmp_path, monkeypatch):
 
     _run(pipe)
 
-    assert len(ancestral.calls) == 1
+    assert len(ancestral.calls) == 2
     stage_1 = ancestral.calls[0]
     assert stage_1["sigmas"] is LTX_2_5_DISTILLED_SIGMAS, (
         "2.3/2.5 tables are value-identical; identity proves the 2.5 selection ran"
@@ -177,28 +179,28 @@ def test_25_pack_routes_stage1_through_ancestral_loop(tmp_path, monkeypatch):
     assert stage_1["noise_seed"] == 7 + ANCESTRAL_NOISE_SEED_OFFSET
     assert stage_1["stepper"].eta == ANCESTRAL_ETA
     assert stage_1["stepper"].s_noise == ANCESTRAL_S_NOISE
-    assert len(euler.calls) == 1
+    assert len(euler.calls) == 0
 
 
-def test_25_pack_stage2_stays_deterministic(tmp_path, monkeypatch):
-    """Upstream: "Stage 2 is always deterministic -- its 3-step refinement
-    schedule is too short to remove freshly injected noise." The ancestral
-    override is scoped to stage 1 (``_stage_1_sampler_kwargs``), so a 2.5 pack
-    must run its stage 2 on the plain Euler loop with the 2.5 stage-2 table.
+def test_25_pack_stage2_routes_through_ancestral_loop(tmp_path, monkeypatch):
+    """Upstream v1.4.0 samples stage 2 of a 2.5 pack with ancestral Euler too
+    (``_sampler_kwargs(seed, ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET)``), on its own
+    noise seed so it never reuses stage 1's draws.
     """
     pipe, euler, ancestral, _ = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
 
     _run(pipe)
 
-    assert len(euler.calls) == 1
-    stage_2 = euler.calls[0]
+    assert euler.calls == []
+    assert len(ancestral.calls) == 2
+    stage_2 = ancestral.calls[1]
     assert stage_2["sigmas"] is LTX_2_5_STAGE_2_DISTILLED_SIGMAS, (
         "identity, not equality: the 2.3 table is value-identical"
     )
-    # The load-bearing assertion: no ancestral machinery reaches stage 2.
-    assert "stepper" not in stage_2
-    assert "noise_seed" not in stage_2
-    assert all(call["sigmas"] is not LTX_2_5_STAGE_2_DISTILLED_SIGMAS for call in ancestral.calls)
+    assert stage_2["noise_seed"] == 7 + ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET
+    assert stage_2["noise_seed"] != ancestral.calls[0]["noise_seed"]
+    assert stage_2["stepper"].eta == ANCESTRAL_ETA
+    assert stage_2["stepper"].s_noise == ANCESTRAL_S_NOISE
 
 
 def test_25_pack_stage2_renoises_at_first_stage2_sigma(tmp_path, monkeypatch):
@@ -256,8 +258,8 @@ def test_stage_step_truncation_applies_to_the_25_tables(tmp_path, monkeypatch):
     # Stage 1 starts from pure noise, so it pins sigma 1.0 and then takes the
     # table's last steps; stage 2 takes the tail. Both end at 0.0.
     assert ancestral.calls[0]["sigmas"] == [LTX_2_5_DISTILLED_SIGMAS[0], *LTX_2_5_DISTILLED_SIGMAS[-3:]]
-    assert euler.calls[0]["sigmas"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS[1:]
-    for call in (ancestral.calls[0], euler.calls[0]):
+    assert ancestral.calls[1]["sigmas"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS[1:]
+    for call in ancestral.calls:
         assert call["sigmas"][-1] == 0.0
     assert [c["sigma"] for c in noised_calls[2:]] == [LTX_2_5_STAGE_2_DISTILLED_SIGMAS[1]] * 2
 
@@ -362,7 +364,7 @@ def test_auto_duration_resolves_after_encode_on_25(tmp_path, monkeypatch):
     # Stage 1 video/audio noised-state calls carry the resolved latent F.
     assert noised_calls[0]["spatial_dims"][0] == expected_f
     assert noised_calls[1]["spatial_dims"][0] == expected_f
-    assert len(ancestral.calls) == 1
+    assert len(ancestral.calls) == 2
 
 
 def test_auto_duration_raises_early_on_23(tmp_path, monkeypatch):
@@ -386,7 +388,7 @@ def test_generate_two_stage_is_composed_of_stage1_upsample_stage2(tmp_path, monk
     """The split must keep the exact collaborator call order and shapes of the monolithic version."""
     pipe, euler, ancestral, noised_calls = _make_stubbed_pipeline(tmp_path, monkeypatch, ltx25=True)
     video, audio = _run(pipe)
-    assert len(ancestral.calls) == 1 and len(euler.calls) == 1
+    assert len(ancestral.calls) == 2 and euler.calls == []
     # 128x128 -> half 64x64 -> latent (2, 2, 2) at 9 frames; stage 2 at (2, 4, 4)
     assert video.shape == (1, 128, 2, 4, 4)
     assert [c["sigma"] for c in noised_calls] == [
