@@ -5,7 +5,7 @@
 Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2/) (Lightricks) for Apple Silicon. Three-package monorepo mirroring the reference structure:
 
 - **ltx-core-mlx** (`ltx_core_mlx`) — model library: DiT, VAE, audio, text encoder, conditioning
-- **ltx-pipelines-mlx** (`ltx_pipelines_mlx`) — generation pipelines: T2V, I2V, retake, extend, keyframe, IC-LoRA, two-stage
+- **ltx-pipelines-mlx** (`ltx_pipelines_mlx`) — generation pipelines: T2V, I2V, A2V, retake, extend, keyframe, IC-LoRA, HDR IC-LoRA, LipDub, one-stage, two-stage, distilled, DFR
 - **ltx-trainer** (`ltx_trainer_mlx`) - ltx-2 training, democratized.
 
 Loads pre-converted MLX weights from the [LTX-2.3](https://huggingface.co/collections/dgrauet/ltx-23) and [LTX 2.5](https://huggingface.co/collections/dgrauet/ltx-25-6a90c410ff65a75f8aeae402) MLX collections on HuggingFace. Weight conversion is handled by [mlx-forge](https://github.com/dgrauet/mlx-forge).
@@ -28,22 +28,33 @@ Loads pre-converted MLX weights from the [LTX-2.3](https://huggingface.co/collec
 packages/
 ├── ltx-core-mlx/                          # ltx_core_mlx
 │   └── src/ltx_core_mlx/
+│       ├── color/                         # HDR colour science: hlg.py, primaries.py, yuv.py
+│       ├── hdr.py                         # ACEScct working space + sRGB EOTF (HDR IC-LoRA)
+│       ├── duration_head/                 # DurationHead (2.5 auto-duration)
+│       │
 │       ├── components/                    # Shared pipeline components
 │       │   ├── guiders.py                 # Guidance strategies
+│       │   ├── diffusion_steps.py         # Euler / res_2s / Euler-ancestral / CFG++ step primitives
+│       │   ├── modality_tiling.py         # VideoModalityTiler, TiledLTXModel
 │       │   └── patchifiers.py             # VideoLatentPatchifier, AudioPatchifier
 │       │
 │       ├── conditioning/                  # Latent conditioning system
 │       │   ├── mask_utils.py              # build/update/resolve attention masks
+│       │   ├── prompt_relay.py            # Prompt Relay (--segment) cross-attention mask
 │       │   └── types/
 │       │       ├── attention_strength_wrapper.py # Attention strength wrapping
 │       │       ├── latent_cond.py         # LatentState, VideoConditionByLatentIndex
 │       │       ├── keyframe_cond.py       # VideoConditionByKeyframeIndex
+│       │       ├── keyframe_slots.py      # VideoGeneratedKeyframeSlots (2.5)
+│       │       ├── reference_audio_cond.py # Audio reference conditioning (LipDub)
 │       │       └── reference_video_cond.py # VideoConditionByReferenceLatent (IC-LoRA)
 │       │
 │       ├── guidance/                      # Guidance utilities
 │       │   └── perturbations.py           # Noise perturbation strategies
 │       │
 │       ├── loader/                        # Weight loading & LoRA fusion
+│       │   ├── block_streaming.py         # BlockStreamer, StreamingLTXModel (--low-ram)
+│       │   ├── helpers.py                 # Checkpoint metadata (version parser)
 │       │   ├── fuse_loras.py              # LoRA weight fusion
 │       │   ├── primitives.py              # Loading primitives
 │       │   ├── sd_ops.py                  # Safetensors loading operations
@@ -59,6 +70,7 @@ packages/
 │       │   │
 │       │   ├── transformer/               # Diffusion Transformer (DiT)
 │       │   │   ├── model.py               # LTXModel, X0Model, LTXModelConfig
+│       │   │   ├── modality.py            # Modality dataclass (tiling I/O)
 │       │   │   ├── transformer.py         # BasicAVTransformerBlock (joint audio+video)
 │       │   │   ├── attention.py           # Multi-head attention + RoPE + per-head gating
 │       │   │   ├── feed_forward.py        # Gated MLP blocks
@@ -71,6 +83,7 @@ packages/
 │       │   │
 │       │   └── video_vae/                 # Video VAE
 │       │       ├── video_vae.py           # VideoDecoder (streaming), VideoEncoder
+│       │       ├── diffusion_decoder/     # NADiffusionDecoder (2.5 --video-decoder diffusion)
 │       │       ├── convolution.py         # Conv3dBlock (causal + reflect padding)
 │       │       ├── resnet.py              # ResBlock3d, ResBlockStage
 │       │       ├── sampling.py            # DepthToSpaceUpsample, pixel_shuffle_3d
@@ -78,17 +91,21 @@ packages/
 │       │       ├── normalization.py       # pixel_norm (RMS)
 │       │       └── ops.py                 # PerChannelStatistics
 │       │
-│       ├── text_encoders/                 # Text encoding (Gemma 3)
+│       ├── text_encoders/                 # Text encoding (Gemma 3 on 2.3, Gemma 4 on 2.5)
 │       │   └── gemma/
 │       │       ├── embeddings_connector.py  # Embeddings1DConnector (RoPE + registers)
 │       │       ├── feature_extractor.py     # GemmaFeaturesExtractorV2 (video/audio projections)
+│       │       ├── gemma4.py, gemma4_config.py # Gemma 4 text tower (2.5 packs)
 │       │       └── encoders/
 │       │           ├── base_encoder.py      # Gemma 3 12B wrapper via mlx-lm
+│       │           ├── gemma4_encoder.py    # Gemma 4 encoder (2.5 packs)
+│       │           ├── encoder_configurator.py # select_text_encoder (Gemma 3 vs 4)
 │       │           └── prompts/             # System prompt templates
 │       │               ├── gemma_t2v_system_prompt.txt
 │       │               └── gemma_i2v_system_prompt.txt
 │       │
 │       └── utils/
+│           ├── diffusion.py   # to_velocity / to_denoised
 │           ├── positions.py   # compute_video_positions, compute_audio_positions
 │           ├── weights.py     # load_split_safetensors, apply_quantization
 │           ├── memory.py      # aggressive_cleanup, get_memory_stats
@@ -99,20 +116,38 @@ packages/
 │
 ├── ltx-pipelines-mlx/                    # ltx_pipelines_mlx
 │   └── src/ltx_pipelines_mlx/
-│       ├── _base.py                       # BasePipeline + ImageToVideoPipeline (private base classes)
+│       ├── _base.py                       # BasePipeline (private composition facade)
 │       ├── ti2vid_one_stage.py            # TI2VidOneStagePipeline (dev one-stage + CFG, full target res)
 │       ├── ti2vid_two_stages.py           # Two-stage: half res → upscale → refine
 │       ├── ti2vid_two_stages_hq.py        # Two-stage HQ variant
+│       ├── distilled.py                   # DistilledPipeline (2.3 / 2.5 dispatch, _stage1 / _stage2)
+│       ├── dfr.py                         # DFRPipeline (generate --dfr, 2.5)
+│       ├── dfr_layout.py                  # DFR canvas + temporal tile plan
 │       ├── a2vid_two_stage.py             # Audio-to-video two-stage pipeline
 │       ├── retake.py                      # RetakePipeline: regenerate a time segment + extend (append/prepend)
 │       ├── keyframe_interpolation.py      # Keyframe interpolation
 │       ├── ic_lora.py                     # IC-LoRA reference-based generation
+│       ├── iclora_utils.py                # Shared IC-LoRA helpers (metadata, reference conditioning)
+│       ├── hdr_ic_lora.py                 # HDRICLoraPipeline (ACEScct SDR-to-HDR, 2.5)
+│       ├── lipdub.py                      # LipDubPipeline
 │       ├── scheduler.py                   # DISTILLED_SIGMAS, STAGE_2_SIGMAS
 │       ├── cli.py                         # CLI entry point
+│       ├── scripts/                       # TeaCache calibration + polyfit
 │       └── utils/
-│           ├── samplers.py                # Sampling utilities (Euler denoising)
-│           ├── constants.py               # Pipeline constants
-│           └── res2s.py                   # Second-stage resolution utilities
+│           ├── samplers.py                # Sampling loops (Euler, ancestral, res_2s, guided)
+│           ├── constants.py               # Pipeline constants (guidance params)
+│           ├── res2s.py                   # res_2s second-order solver coefficients (phi functions)
+│           ├── blocks.py                  # Model-component blocks (encoders, decoders, DurationPredictor)
+│           ├── _orchestration.py          # Multi-component flows shared across pipelines
+│           ├── helpers.py, types.py       # Upstream-named orchestration helpers + types
+│           ├── args.py                    # Multi-image I2V input parsing
+│           ├── generation.py              # is_ltx25_pack
+│           ├── media_io.py                # Image / video / audio I/O
+│           ├── hdr_media.py               # HDR input / EXR / HLG I/O
+│           ├── estimate.py                # [estimate] cost lines
+│           ├── progress.py                # [phase] markers
+│           ├── stepwise.py                # Stepwise previews
+│           └── watchdog.py                # macOS GPU-watchdog failure recognition
 │
 └── ltx-trainer/                           # ltx_trainer_mlx
     └── src/ltx_trainer_mlx/
@@ -141,7 +176,7 @@ packages/
 
 ## LTX-2.3 Model Architecture
 
-- **Type**: Diffusion Transformer (DiT), 19B params, joint audio+video single-pass
+- **Type**: Diffusion Transformer (DiT), ~22B params (upstream naming `ltx-2.3-22b-*`), joint audio+video single-pass
 - **Transformer**: 48 layers × 32 heads × 128-dim = 4096-dim (video), 32 heads × 64-dim = 2048-dim (audio)
 - **VAE**: Temporal 8×, Spatial 32× compression → 128-channel latent
 - **Text encoder**: Gemma 3 12B → dual projections (video 4096-dim, audio 2048-dim) via Embeddings1DConnector
@@ -161,6 +196,8 @@ packages/
 | Vocoder | mel (B, 2, T', 64) | waveform (B, 2, T_audio) @ 16kHz |
 | BWE | waveform 16kHz | waveform 48kHz |
 | Upsampler | latent (B, 128, F, H, W) | latent (B, 128, F, 2H, 2W) |
+
+The DiT also runs video-only: `LTXModel` / `X0Model` and the Euler loop accept `audio_state=None` (#181), which `hdr-ic-lora` uses.
 
 ### Audio Token Count
 
@@ -227,6 +264,12 @@ LTX-2.5 packs (same variant semantics; carry the Gemma-4 text tower, conv VAE pa
 | `spatial_upscaler_x2_v1_1.safetensors` | N/A | 2x spatial upsampler |
 | `spatial_upscaler_x1_5_v1_0.safetensors` | N/A | 1.5x spatial upsampler |
 | `temporal_upscaler_x2_v1_0.safetensors` | N/A | 2x temporal upsampler |
+| `transformer-dev.safetensors` / `transformer-distilled.safetensors` | `transformer.` | Dev and pre-fused distilled DiT (two-stage, `--low-ram` stage swap; possibly versioned, e.g. `-1.1`) |
+| `text_encoder.safetensors` (+ `text_encoder_config.json`) | `text_encoder.` | Gemma-4 text tower (2.5 only) |
+| `duration_head.safetensors` | `duration_head.` | DurationHead (2.5 only) |
+| `vae_decoder_conv.safetensors` / `vae_encoder_conv.safetensors` | `vae_decoder_conv.` / `vae_encoder_conv.` | Conv video VAE (2.5 only; replaces `vae_decoder` / `vae_encoder`) |
+| `vae_decoder_av.safetensors` | `vae_decoder_av.` | Diffusion video decoder (2.5 only) |
+| `spatial_upscaler_x2_v1_0.safetensors` | N/A | 2x spatial upsampler (2.5 packs) |
 
 ### Key Remapping (mlx-forge)
 
@@ -380,39 +423,40 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 
 | Command | Pipeline | Tier | Description |
 |---------|----------|------|-------------|
-| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. `-f/--frames` defaults to auto-predicted duration on 2.5 packs (via `DurationHead`) and is **required** on 2.3 packs (immediate `ValueError` before any Gemma load if omitted). `--auto-duration MIN:MAX` overrides the predictor's clamp range on 2.5 packs. `--no-audio` skips audio decode + mux (mp4 with no audio track; video unchanged, audio latents still generated jointly). `--num-generated-keyframes N` (2.5 packs) adds N generated keyframe slots to stage 1 for fast motion. `--dfr` (2.5 packs) adds `--temporal-upscalings {0,1,2}` for post-hoc temporal x2 refine rounds (default 0) and `--spatial-upscalings {1,2}` for a full-res spatial detailing epilogue (default 1). |
+| `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest), `--dfr` (2.5 packs, experimental; distilled + detailing IC-LoRA). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. `-f/--frames` defaults to auto-predicted duration on 2.5 packs (via `DurationHead`) and is **required** on 2.3 packs (immediate `ValueError` before any Gemma load if omitted). `--auto-duration MIN:MAX` overrides the predictor's clamp range on 2.5 packs. `--no-audio` skips audio decode + mux (mp4 with no audio track; video unchanged, audio latents still generated jointly). `--num-generated-keyframes N` (2.5 packs) adds N generated keyframe slots to stage 1 for fast motion. `--dfr` (2.5 packs) adds `--temporal-upscalings {0,1,2}` for post-hoc temporal x2 refine rounds (default 0) and `--spatial-upscalings {1,2}` for a full-res spatial detailing epilogue (default 1). |
 | `keyframe` | Keyframe interpolation | Stable | Two-stage interpolation between start/end frames |
 | `ic-lora` | IC-LoRA | Stable | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
 | `hdr-ic-lora` | HDR IC-LoRA | Experimental | Single-stage ACEScct SDR-to-HDR IC-LoRA (LTX-2.5 packs only): HLG BT.2020 10-bit mp4 + ACEScg EXR frames. Takes `--input`, `--hdr-lora`, `--text-embeddings` (no prompt) |
 | `a2v` | Audio-to-video | Beta | Two-stage audio-conditioned generation (Euler + CFG). Sync quality depends on prompt-audio alignment. |
 | `retake` | Retake | Beta | Regenerate a time segment of an existing video (dev model + CFG) |
 | `extend` | Extend | Beta | Add frames before or after an existing video (dev model + CFG) |
-| `lipdub` | LipDub | Experimental | Lip-dub a reference video → re-sync visuals to source audio. Output audio is a VAE+vocoder reconstruction (audible artifacts on rich music). Uses pre-1.0 LipDub IC-LoRA. |
+| `lipdub` | LipDub | Experimental | Lip-dub a reference video → re-sync visuals to source audio. Output audio is a VAE+vocoder reconstruction (audible artifacts on rich music). Uses pre-1.0 LipDub IC-LoRA. Stage 2 uses stage 1's generated audio as its reference (upstream Dub-It); the stage-1 reference is the source audio sliced or zero-padded to the clip window (#174). |
 | `enhance` | Prompt enhancement | Stable | Enhance a text prompt using Gemma (no video generation) |
-| `info` | Model info | Stable | Show model configuration and memory estimates |
+| `info` | Model info | Stable | Lists the pack's safetensors files and a naive RAM estimate (total weights × 1.3; ignores `--low-ram` and which transformer a mode loads, so it overstates 2.5 packs) |
 | `train` | Training | Stable | Train a LoRA or full model from YAML config (requires ltx-trainer-mlx) |
 | `preprocess` | Data preprocessing | Stable | Encode raw videos into latents + conditions for training |
+| `slice` | Training data | Stable | Slice long videos into normalized training clips (audio retained) |
 
-All pipelines except one-stage T2V/I2V use the dev model with CFG guidance. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet` (`hdr-ic-lora` has its own set: no `--prompt`). CFG modes (`generate --one-stage/--two-stage/--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend`) take `--negative-prompt TEXT` (default: upstream `DEFAULT_NEGATIVE_PROMPT`; `""` is encoded verbatim; always one global prompt, even with `--segment`); `--distilled` / `--dfr` reject it (no CFG), and the distilled-sampler IC-LoRA family (`ic-lora`, `hdr-ic-lora`, `lipdub`) does not expose it. Every denoising stage prints an `[estimate]` work line (steps × passes × tokens = forwards) on stderr before step 1 and a time projection after the first computed step, refined once after the second (`utils/estimate.py`; retake/extend note that cost follows total clip length). Tier semantics + promotion criteria live in [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md).
+`generate --one-stage/--two-stage/--two-stages-hq`, `keyframe`, `a2v`, `retake` and `extend` use the dev model with CFG; `generate --distilled/--dfr`, `ic-lora` (unless `--dev-transformer`), `hdr-ic-lora` and `lipdub` use the distilled model without CFG. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet` (`hdr-ic-lora` has its own set: no `--prompt`). CFG modes (`generate --one-stage/--two-stage/--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend`) take `--negative-prompt TEXT` (default: upstream `DEFAULT_NEGATIVE_PROMPT`; `""` is encoded verbatim; always one global prompt, even with `--segment`); `--distilled` / `--dfr` reject it (no CFG), and the distilled-sampler IC-LoRA family (`ic-lora`, `hdr-ic-lora`, `lipdub`) does not expose it. Every denoising stage prints an `[estimate]` work line (steps × passes × tokens = forwards) on stderr before step 1 and a time projection after the first computed step, refined once after the second (`utils/estimate.py`; retake/extend note that cost follows total clip length). Tier semantics + promotion criteria live in [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md).
 
 ### Low-RAM Example
 
 ```bash
 # bf16 inference on a 32 GB Mac via block streaming
-ltx-2-mlx generate \
+ltx-2-mlx generate --two-stage \
   --model dgrauet/ltx-2.3-mlx \
   --prompt "a fox in the forest" \
   --low-ram \
-  -H 480 -W 704 -f 33 -o fox.mp4
+  -H 480 -W 704 -f 33 --frame-rate 24 -o fox.mp4
 
 # q8 inference fits 16 GB Macs (2.3 packs require -f explicitly — no DurationHead)
-ltx-2-mlx generate \
+ltx-2-mlx generate --distilled \
   --model dgrauet/ltx-2.3-mlx-q8 \
   --prompt "a fox in the forest" \
-  --low-ram -f 97 -o fox.mp4
+  --low-ram -f 97 --frame-rate 24 -o fox.mp4
 ```
 
-`--low-ram` is supported on `generate` (one-stage / `--two-stage` / `--two-stages-hq`), `a2v`, `keyframe`, and `ic-lora`. Bind-time LoRA fusion handles ic-lora's control LoRAs, custom `--distilled-lora-strength`, and `generate --lora` (community LoRAs). See `## Block Streaming` below for details.
+`--low-ram` is supported on every `generate` mode (incl. `--distilled` and `--dfr`), `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora`, `retake` and `extend`; `lipdub` accepts it and routes it through the `ic-lora` streaming path, but that is not validated end to end. Bind-time LoRA fusion handles ic-lora's control LoRAs, custom `--distilled-lora-strength`, and `generate --lora` (community LoRAs). See `## Block Streaming` below for details.
 
 ### IC-LoRA Example
 
@@ -422,14 +466,14 @@ ltx-2-mlx ic-lora \
   --prompt "a person walking" \
   --lora Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control 1.0 \
   --video-conditioning depth_map.mp4 1.0 \
-  -o output.mp4
+  --frame-rate 24 -o output.mp4
 
 # Motion Track Control
 ltx-2-mlx ic-lora \
   --prompt "particles moving" \
   --lora Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control 1.0 \
   --video-conditioning tracks.mp4 1.0 \
-  -o output.mp4
+  --frame-rate 24 -o output.mp4
 ```
 
 Flags: `--lora PATH STRENGTH` (repeatable, supports HF repo IDs), `--video-conditioning PATH STRENGTH` (repeatable), `--conditioning-strength`, `--skip-stage-2`, `--image`.
@@ -457,7 +501,7 @@ ltx-2-mlx ic-lora \
   --lora Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control 1.0 \
   --video-conditioning control_canny.mp4 1.0 \
   --image input_image.jpg \
-  --low-ram -W W -H H -f N --seed ... \
+  --low-ram -W W -H H -f N --frame-rate 24 --seed ... \
   -o output.mp4
 ```
 
@@ -490,27 +534,27 @@ Flags: `--input PATH` (MP4/MOV, or a directory of `*.exr` frames), `--output-pat
 # Two-stage with Euler sampler (auto-selects q8 model; -f required on 2.3 packs)
 ltx-2-mlx generate \
   --prompt "a scene description" \
-  --two-stage -f 97 -o output.mp4
+  --two-stage -f 97 --frame-rate 24 -o output.mp4
 
 # HQ with res_2s second-order sampler (higher quality, ~2x slower)
 ltx-2-mlx generate \
   --prompt "a scene description" \
-  --two-stages-hq -f 97 -o output.mp4
+  --two-stages-hq -f 97 --frame-rate 24 -o output.mp4
 
 # With I2V conditioning
 ltx-2-mlx generate \
   --prompt "animate this" \
-  --two-stage --image photo.jpg -f 97 -o output.mp4
+  --two-stage --image photo.jpg -f 97 --frame-rate 24 -o output.mp4
 
 # On a 2.5 pack, -f can be omitted — duration is auto-predicted from the prompt/image
 # via the DurationHead (see "LTX-2.5" section below), or clamped with --auto-duration MIN:MAX
 ltx-2-mlx generate \
   --model /path/to/ltx-2.5-mlx-q8 \
   --prompt "a scene description" \
-  --distilled --auto-duration 2:6 -o output.mp4
+  --distilled --auto-duration 2:6 --frame-rate 24 -o output.mp4
 ```
 
-Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3; a shorter count takes the **last** N sigmas of the stage-2 table via `scheduler.shorten_schedule(..., keep="tail")`, so it always ends at σ=0 — a stage 1 on the fixed distilled table uses `keep="start"`: σ=1.0 then the last N sigmas), `--image`, `-f/--frames` (required on 2.3 packs; optional on 2.5 packs — auto-predicted when omitted), `--auto-duration MIN:MAX` (2.5 packs only — overrides the predictor's clamp range; explicit `-f` wins over `--auto-duration` if both are given, with a warning).
+Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 1.0; 0.0 on `--two-stages-hq`), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3; a shorter count takes the **last** N sigmas of the stage-2 table via `scheduler.shorten_schedule(..., keep="tail")`, so it always ends at σ=0 — a stage 1 on the fixed distilled table uses `keep="start"`: σ=1.0 then the last N sigmas), `--image`, `-f/--frames` (required on 2.3 packs; optional on 2.5 packs — auto-predicted when omitted), `--auto-duration MIN:MAX` (2.5 packs only — overrides the predictor's clamp range; explicit `-f` wins over `--auto-duration` if both are given, with a warning).
 
 ### Prompt Relay (`--segment`)
 
@@ -519,14 +563,14 @@ Community port (WhatDreamsCost/Kijai) — sequence local prompts over time withi
 ```bash
 ltx-2-mlx generate --distilled --prompt "cinematic, a woman in a bedroom" \
   --segment "sitting on the bed" \
-  --segment "standing and turning to the window" -o out.mp4
+  --segment "standing and turning to the window" --frame-rate 24 -o out.mp4
 ```
 
 Flags: `--segment "TEXT" [LEN_FRAMES]` (repeatable, timeline order; omit LEN to auto-distribute), `--relay-epsilon` (default 1e-3, smaller = sharper), `--relay-strength` (default 1.0). Works on all `generate` modes; on CFG modes the mask applies to the **conditional pass only** (never the negative). **Not compatible with modality tiling** (raises). Correctness hinges on the Gemma connector front-packing valid tokens to column *i* (`_replace_padding_with_registers`) — token *i* in encode order → column *i* in the `Nk` axis. Inert on the default path (no `--segment` → `video_cross_attention_mask=None`, byte-identical output). Key files: `conditioning/prompt_relay.py`; `video_cross_attention_mask` kwarg threaded `LTXModel → BasicAVTransformerBlock → attn2`.
 
 ### Multi-Anchor I2V (`--image` repeatable)
 
-All `generate` modes (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distilled`) support multiple `--image` flags. Each anchor takes `PATH FRAME_IDX STRENGTH` where `FRAME_IDX` is the **pixel frame index** (0-based; for a 97-frame video the last frame is 96).
+All `generate` modes (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distilled`, `--dfr`) support multiple `--image` flags. Each anchor takes `PATH FRAME_IDX STRENGTH` where `FRAME_IDX` is the **pixel frame index** (0-based; for a 97-frame video the last frame is 96).
 
 - `frame_idx=0` → `VideoConditionByLatentIndex`: hard-replaces the first latent frame (strongly preserved)
 - `frame_idx>0` → `VideoConditionByKeyframeIndex`: appends soft reference tokens at that temporal position
@@ -557,12 +601,12 @@ ltx-2-mlx generate \
   --distilled \
   --image open.jpg 0 1.0 \
   --image closed.jpg last 1.0 \
-  --auto-duration 2:6 -o door.mp4
+  --auto-duration 2:6 --frame-rate 24 -o door.mp4
 ```
 
 **Mode recommendations for multi-anchor:** `--two-stage` or `--two-stages-hq` (dev model + CFG) respects anchors most faithfully. `--distilled` (8 steps, no CFG) also honors them — soft keyframe anchors are hints, not law, so the model may drift from them at longer durations, but a distilled start+end smoke test (512×512×25) tracked both anchors cleanly. `--one-stage` works but is slower than `--two-stage` at large resolutions.
 
-**Frame count constraint:** `(num_frames - 1) % 8 == 0`. Valid counts: 9, 17, 25, 33, 41, 49, 57, 65, 73, 81, 89, 97, 105, 113, 121, 129, 137, …
+**Frame count grid:** frame counts live on the 8k+1 grid; an off-grid request is floored to it with a warning before any latent is sized (`snap_num_frames`, #177; e.g. 87 → 81). `hdr-ic-lora` instead rejects an off-grid source. Valid counts: 9, 17, 25, 33, 41, 49, 57, 65, 73, 81, 89, 97, 105, 113, 121, 129, 137, …
 
 ### Audio-to-Video Example
 
@@ -570,15 +614,10 @@ ltx-2-mlx generate \
 # A2V with reference image
 ltx-2-mlx a2v \
   --prompt "a singer performing" \
-  --audio music.wav --image photo.jpg -o output.mp4
-
-# A2V HQ (res_2s sampler)
-ltx-2-mlx a2v \
-  --prompt "a singer performing" \
-  --audio music.wav --two-stages-hq -o output.mp4
+  --audio music.wav --image photo.jpg --frame-rate 24 -o output.mp4
 ```
 
-Flags: `--audio` (required), `--frame-rate` (required, mirrors upstream `frame_rate=`), `--image` (optional I2V), `--two-stages-hq` (res_2s), `--cfg-scale`, `--stg-scale`, `--stage1-steps` (default 30 standard, 15 HQ), `--enable-teacache` / `--teacache-thresh` (LTX-2.3 packs).
+Flags: `--audio` (required), `--audio-start` (default 0 s), `--frame-rate` (required, mirrors upstream `frame_rate=`), `--image` (optional I2V), `--cfg-scale` (default 3.0), `--stg-scale` (default 1.0), `--negative-prompt`, `--stage1-steps` (default 30), `--stage2-steps` (default 3), `--enable-teacache` / `--teacache-thresh` (LTX-2.3 packs).
 
 ### Retake / Extend Example
 
@@ -594,7 +633,7 @@ ltx-2-mlx extend \
   --video source.mp4 --extend-frames 4 -o extended.mp4
 ```
 
-Flags: `--steps` (default 30), `--cfg-scale` (default 3.0), `--stg-scale` (default 0.0), `--no-regen-audio` (retake only).
+Flags: `--steps` (default 30), `--cfg-scale` (default 3.0), `--stg-scale` (default 1.0), `--no-regen-audio` (retake only).
 
 ### Training Example
 
@@ -610,9 +649,9 @@ ltx-2-mlx preprocess \
 ltx-2-mlx train --config packages/ltx-trainer/configs/lora_t2v.yaml
 ```
 
-Flags for `preprocess`: `--height`, `--width` (resize, must be divisible by 32), `--max-frames` (default 97), `--captions` (directory with .txt files matching video stems), `--caption-ext`.
+Flags for `preprocess`: `--height`, `--width` (resize, must be divisible by 32), `--max-frames` (default 97), `--captions` (directory with .txt files matching video stems), `--caption-ext`, `--with-audio` (also encode audio latents for joint audio-video training), `--frame-rate` (override the fps probed per clip), `--gemma`.
 
-Flags for `train`: `--config` (required, path to YAML config). See `packages/ltx-trainer/configs/` for examples.
+Flags for `train`: `--config` (required, path to YAML config), `--low-ram` (gradient checkpointing; fits the dev model on 64 GB). See `packages/ltx-trainer/configs/` for examples.
 
 **Programmatic hooks** (`LtxvTrainer(cfg).train(...)`, `ltx_trainer_mlx/trainer.py`):
 
@@ -635,7 +674,7 @@ The non-distilled (dev) model uses multi-modal guidance with up to 4 forward pas
 Default reference params (LTX_2_3_PARAMS): `cfg_scale=3.0`, `stg_scale=1.0`, `stg_blocks=[28]`, `rescale_scale=0.7`, `modality_scale=3.0`. Audio: `cfg_scale=7.0`.
 HQ params (LTX_2_3_HQ_PARAMS): `cfg_scale=3.0`, `stg_scale=0.0`, `stg_blocks=[]`, `rescale_scale=0.45`. Audio: `cfg_scale=7.0`, `rescale_scale=1.0`.
 
-**`stg_scale` defaults differ by pipeline**: the dev + CFG pipelines (`--two-stage`, `--one-stage`, `a2v`, `keyframe`, `retake`/`extend`) default to `stg_scale=1.0` (`utils/constants.py`, `ti2vid_two_stages.py:377`); `--two-stages-hq` defaults to `stg_scale=0.0` (`ti2vid_two_stages_hq.py:103`). STG requires a 3rd forward pass per step. On 32GB Mac, this causes OOM for videos longer than ~33 frames at 480x704. Pass `--stg-scale 0` on 32GB machines for long clips.
+**`stg_scale` defaults differ by pipeline**: the dev + CFG pipelines (`--two-stage`, `--one-stage`, `a2v`, `keyframe`, `retake`/`extend`) default to `stg_scale=1.0` (`ti2vid_two_stages.py:408`, `retake.py:54` `DEFAULT_STG_SCALE`; guidance params in `utils/constants.py`); `--two-stages-hq` defaults to `stg_scale=0.0` (`ti2vid_two_stages_hq.py:113`). STG requires a 3rd forward pass per step. On 32GB Mac, this causes OOM for videos longer than ~33 frames at 480x704. Pass `--stg-scale 0` on 32GB machines for long clips.
 
 **Memory impact**: Each extra pass doubles/triples/quadruples memory. On 32GB Mac with dev model at 480x704: CFG-only supports ~97 frames at half-res (two-stage), full guidance (4 passes) supports ~17 frames.
 
@@ -681,6 +720,7 @@ Two-stage pipeline for higher-resolution generation. Requires the dev model + di
   - `STAGE_2_SIGMAS` (default 3 steps)
   - I2V conditioning re-encoded at full resolution
   - Denormalize → neural upsampler 2x → re-normalize before Stage 2
+  - Audio: on `--two-stage`, stage 2 keeps stage 1's audio as a frozen conditioning stream (upstream v1.4.0 `freeze_audio=True`, #173); on `--two-stages-hq` stage 2 re-noises the stage-1 audio and refines it with the video, as upstream does
 
 ### Critical Implementation Details
 
@@ -713,8 +753,8 @@ pipeline.generate_and_save(
 Equivalent CLI flag (works on `--two-stage`, `--two-stages-hq` and `a2v`, whose stage 1 is the same Euler + CFG loop and reuses the Euler coefficients via `TI2VidTwoStagesPipeline._make_stage1_teacache`; ~1.30× at 30 steps on a2v, where the default `stg_scale=1.0` also caches the STG pass; refused on LTX-2.5 packs):
 
 ```bash
-ltx-2-mlx generate --prompt "..." --two-stage -f 97 --enable-teacache -o out.mp4
-ltx-2-mlx generate --prompt "..." --two-stages-hq -f 97 --enable-teacache --teacache-thresh 1.0 -o out.mp4
+ltx-2-mlx generate --prompt "..." --two-stage -f 97 --frame-rate 24 --enable-teacache -o out.mp4
+ltx-2-mlx generate --prompt "..." --two-stages-hq -f 97 --frame-rate 24 --enable-teacache --teacache-thresh 1.0 -o out.mp4
 ```
 
 The HQ path uses the res_2s sampler, which does two model evaluations per outer step (stage 1 at `sigma`, stage 2 at the substep after SDE noise injection). The TeaCache decision is made **once per outer step** on stage 1's gate signal; on skip both stages reuse cached residuals via `block_stack_override`. Cache payload shape: `{"stage1": {cond: (v,a), uncond: (v,a), ...}, "stage2": {...}}`.
@@ -839,10 +879,14 @@ LTX-2.3 bf16 distilled, 480x704x33: confirmed runs end-to-end on M2 Pro 32 GB. W
 - `generate` (one-stage T2V/I2V)
 - `generate --two-stage` (Euler + CFG)
 - `generate --two-stages-hq` (res_2s + CFG)
+- `generate --distilled` and `generate --dfr` (the DFR detailing LoRA attaches as a `BlockLoraSource`)
 - `a2v` (audio-to-video)
 - `keyframe` (interpolation)
 - `ic-lora` (control video conditioning, via bind-time LoRA fusion)
+- `hdr-ic-lora` (HDR LoRA as a `BlockLoraSource`)
 - `retake` / `extend` (dev model + CFG; mirrors upstream RetakePipeline's `offload_mode`)
+
+`lipdub` accepts `--low-ram` and inherits the `ic-lora` path (its LoRA attaches as a `BlockLoraSource`), but that combination has not been validated end to end.
 
 Validated runs on M2 Pro 32 GB:
 - bf16 HQ at 480x704x97 (4 sec): 49:38 — would OOM without streaming.
@@ -902,7 +946,7 @@ Mirrors upstream ``ltx_core.modality_tiling.VideoModalityTilingHelper`` API verb
 
 ### Position layout divergence (documented)
 
-Upstream uses ``(B, num_axes, T, 2)`` interval positions per token; we use ``(B, T, num_axes)`` midpoints (consistent with the rest of our codebase). A conditioning token is kept by a tile iff its midpoint lies in the **closed** extent of the tile's exact generated intervals (temporal ``[max(0, 8f0−7), 8(f1−1)+1)/fps`` with the causal fix, fps from the frame-0 midpoint ``0.5/fps``; spatial 32-px cells), or its time is negative. For every token lattice we append — 1-frame keyframes / slots, 32-px cells, ×2 reference cells, 8-frame reference latents — this equals upstream's ``start < tile_end and end > tile_start`` exactly; it would differ for a reference ``downscale_factor >= 3`` or multi-frame keyframe tokens (no current caller). Before the fix the test used the generated tokens' midpoints as the extent, which dropped keyframe tokens on a tile's last seam and on the canvas's last frame, so conditioned ``--tile-*`` renders (keyframe anchors, IC-LoRA / HDR / lipdub references) change; unconditioned ones are byte-identical (e2e, 2.5 q8 `--distilled --tile-frames 2` 512×768×49: sha identical to main; with `--image … 48 1.0` — an anchor on the last frame — frame 48 matches the anchor at 38.4 dB vs 23.6 dB on main, where the tiler had dropped it). ``split_by_count`` now raises when the tile size is ``<= overlap`` (upstream guard): very small latents with ``--tile-*`` error instead of silently running untiled.
+Upstream uses ``(B, num_axes, T, 2)`` interval positions per token; we use ``(B, T, num_axes)`` midpoints (consistent with the rest of our codebase). A conditioning token is kept by a tile iff its midpoint lies in the **closed** extent of the tile's exact generated intervals (temporal ``[max(0, 8f0−7), 8(f1−1)+1)/fps`` with the causal fix, fps from the frame-0 midpoint ``0.5/fps``; spatial 32-px cells), or its time is negative. For every token lattice we append — 1-frame keyframes / slots, 32-px cells, ×2 reference cells, 8-frame reference latents — this equals upstream's ``start < tile_end and end > tile_start`` exactly; it would differ for a reference ``downscale_factor >= 3`` or multi-frame keyframe tokens (no current caller). Before the fix the test used the generated tokens' midpoints as the extent, which dropped keyframe tokens on a tile's last seam and on the canvas's last frame, so conditioned ``generate --tile-*`` renders (keyframe anchors / slots, DFR references) change; unconditioned ones are byte-identical (e2e, 2.5 q8 `--distilled --tile-frames 2` 512×768×49: sha identical to main; with `--image … 48 1.0` — an anchor on the last frame — frame 48 matches the anchor at 38.4 dB vs 23.6 dB on main, where the tiler had dropped it). ``split_by_count`` now raises when the tile size is ``<= overlap`` (upstream guard): very small latents with ``--tile-*`` error instead of silently running untiled.
 
 ### CLI
 
@@ -1005,10 +1049,10 @@ that path. 2.3 packs are byte-identical to before.
 that predicts a clip length in seconds from the encoded prompt (+ image,
 when present). `generate`'s `-f/--frames` default changed from a hardcoded
 `97` to `AutoDuration()` (`DEFAULT_AUTO_DURATION`, clamp `[1.0, 20.0]`
-seconds) across the four `generate` modes (`--one-stage`, `--distilled`,
-`--two-stage`, `--two-stages-hq`) — **only** those; `keyframe`, `a2v`,
-`ic-lora`, `retake`, `extend` keep their existing explicit `-f 97` default
-untouched.
+seconds) across the five `generate` modes (`--one-stage`, `--distilled`,
+`--two-stage`, `--two-stages-hq`, `--dfr`). `keyframe`, `a2v` and `ic-lora`
+keep `-f 97`. `retake`, `extend`, `lipdub` and `hdr-ic-lora` take their
+length from the source video and have no `-f`.
 
 - **On 2.5 packs**: omitting `-f` predicts the duration right after prompt
   encoding (`DurationPredictor.from_checkpoint(self.model_dir)`, built once
@@ -1108,8 +1152,7 @@ time ranges when the model does not cut where you want.
 two-stage pipeline (half-res Stage 1 → upsample → distilled Stage 2 refine)
 end-to-end on a local LTX-2.5 pack, same `is_ltx25_pack()` auto-detection as
 the distilled path. T2V and I2V (`--image`) both work. `--two-stages-hq`
-(res_2s sampler) stays unvalidated on 2.5 packs — its TeaCache guard exists,
-but the HQ pipeline itself hasn't been exercised end-to-end yet.
+also runs on 2.5 packs (validated end to end; since #175 its stage 2 also runs res_2s).
 
 ```bash
 ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage --low-ram \
@@ -1298,16 +1341,17 @@ dtype on entry (like the conv decoder) and the same decode peaks at ~12 GB (5.8 
 |---|---|
 | `--two-stage` (dev model + CFG) | supported (see above) |
 | `--two-stages-hq` (res_2s + CFG) | supported — validated e2e on 2.5 (deterministic, audio at healthy 2.3-level loudness) |
-| `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to `AutoDuration()` on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`; `--auto-duration MIN:MAX` overrides the clamp. Absent on 2.3 packs, where omitting `-f` now raises immediately (see "Auto-Duration" above) |
+| `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to `AutoDuration()` on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`/`--dfr`; `--auto-duration MIN:MAX` overrides the clamp. Absent on 2.3 packs, where omitting `-f` now raises immediately (see "Auto-Duration" above) |
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
 | `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB) |
 | `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames). `--low-ram` wired (mirrors upstream `offload_mode`): 49-frame retake that OOM'd now peaks at 13.8 GB |
 | `ic-lora`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
-| `hdr-ic-lora` | supported, **2.5 only** (upstream v1.4 SDR-to-HDR IC-LoRA, ACEScct); Experimental until validated on real weights |
+| `hdr-ic-lora` | supported, **2.5 only** (upstream v1.4 SDR-to-HDR IC-LoRA, ACEScct); Experimental, validated end to end on real weights (see "HDR IC-LoRA Pipeline" › Status) |
 | `enhance` / `--enhance-prompt` | raises `NotImplementedError` (`_guard_enhance_not_gemma4`) — Gemma 3 only |
 | `--enable-teacache` | raises `ValueError` — 2.3 polynomial isn't calibrated for 2.5 |
-| Modality tiling, Prompt Relay | validated on 2.3 only |
-| Generated keyframe slots (`--num-generated-keyframes N`) | supported on `generate` (all four modes, stage 1 only); refused up front on 2.3 packs (no `use_keyframes_abs_pos_embedding`) |
+| Prompt Relay | validated on 2.3 only |
+| Modality tiling | validated on 2.5 `--distilled` (see "Position layout divergence" under Modality Tiling) |
+| Generated keyframe slots (`--num-generated-keyframes N`) | supported on `generate` (the four non-DFR modes, stage 1 only; `--dfr` places its own); refused up front on 2.3 packs (no `use_keyframes_abs_pos_embedding`) |
 | DFR (`DFRPipeline`) | complete — shipped as `generate --dfr`: base path (spatial detailing with the official 2.5 detailing IC-LoRA), keyframe-aware decode on `--video-decoder diffusion`, temporal rounds (`--temporal-upscalings {1,2}`), and the spatial epilogue (`--spatial-upscalings {1,2}`) |
 | Diffusion video decoder | opt-in `--video-decoder diffusion` (experimental; tiled automatically above the decode budget, `--diffvae-tile` override); conv remains default |
 
@@ -1498,7 +1542,7 @@ parsing.
 Caps the padded Gemma sequence length (default `1024`). Reducing to `512` halves Gemma forward time but **shifts left-padded RoPE positions away from the LTX training distribution** — quality risk. Use only as a last resort on heavily contended systems.
 
 ```bash
-LTX2_GEMMA_MAX_LENGTH=512 ltx-2-mlx hdr-ic-lora ...
+LTX2_GEMMA_MAX_LENGTH=512 ltx-2-mlx generate --two-stage ...
 ```
 
 ### Pipeline-load ordering
@@ -1623,4 +1667,4 @@ upgrades, etc., is not done from this repo.
 - **ltx-pipelines**: [GitHub](https://github.com/Lightricks/LTX-2/tree/main/packages/ltx-pipelines)
 - **MLX**: [Docs](https://ml-explore.github.io/mlx/) · [GitHub](https://github.com/ml-explore/mlx)
 - **mlx-forge**: [GitHub](https://github.com/dgrauet/mlx-forge) — weight conversion
-- **Pre-converted weights**: [HuggingFace collection](https://huggingface.co/collections/dgrauet/ltx-23)
+- **Pre-converted weights**: HuggingFace collections for [LTX-2.3](https://huggingface.co/collections/dgrauet/ltx-23) and [LTX-2.5](https://huggingface.co/collections/dgrauet/ltx-25-6a90c410ff65a75f8aeae402)
