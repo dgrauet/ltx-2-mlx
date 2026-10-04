@@ -10,6 +10,43 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.16.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.12...v0.16.0) (2026-10-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* hdr-ic-lora is now upstream v1.4's single-stage ACEScct SDR-to-HDR IC-LoRA on LTX-2.5 packs (HLG mp4 + EXR frames). It no longer accepts --prompt, -H/-W/-f, --lora, --video-conditioning, --stage1-steps/--stage2-steps, --skip-stage-2, --image or --tile-*; the .hdr.npz output and LTX-2.3 (LogC3) HDR are gone.
+
+### Features
+
+* acescct colour, hlg and exr media for hdr ([#182](https://github.com/dgrauet/ltx-2-mlx/issues/182)) ([e4bf87d](https://github.com/dgrauet/ltx-2-mlx/commit/e4bf87db55185a70602ad4ca31b2a8418fd5eb3b))
+* **core:** opt-in float16 compute for DiT attention and feed-forward (LTX2_COMPUTE_DTYPE) ([#171](https://github.com/dgrauet/ltx-2-mlx/issues/171)) ([b2b813d](https://github.com/dgrauet/ltx-2-mlx/commit/b2b813df18a58dcd11c7d38df399cb92cdc7f395))
+* **core:** run the DiT without an audio stream ([#181](https://github.com/dgrauet/ltx-2-mlx/issues/181)) ([2131415](https://github.com/dgrauet/ltx-2-mlx/commit/213141573e3f017c511d0d2de1fe6c79a381e616))
+* **pipelines:** accept `last` and negative FRAME_IDX in --image ([#167](https://github.com/dgrauet/ltx-2-mlx/issues/167)) ([d3785c5](https://github.com/dgrauet/ltx-2-mlx/commit/d3785c54e68fd456bb8cf79a3e4e58ef981e130e))
+* replace hdr-ic-lora with the upstream ACEScct SDR-to-HDR pipeline ([#183](https://github.com/dgrauet/ltx-2-mlx/issues/183)) ([0e9f642](https://github.com/dgrauet/ltx-2-mlx/commit/0e9f64223557b44c67c9db5456c8b5d6882ee5c3))
+
+
+### Bug Fixes
+
+* **cli:** stop accepting --tile-* on pipelines that ignore it ([#178](https://github.com/dgrauet/ltx-2-mlx/issues/178)) ([08facfe](https://github.com/dgrauet/ltx-2-mlx/commit/08facfe67d0d2305342ae351d1d970573bb95ca3))
+* **loader:** keep the scales/biases dtype when fusing a LoRA into a quantized weight ([#186](https://github.com/dgrauet/ltx-2-mlx/issues/186)) ([f3c5bad](https://github.com/dgrauet/ltx-2-mlx/commit/f3c5bad7d559aa26843f873a10aa1b730691e8ab))
+* **pipelines:** floor off-grid frame counts before sizing the audio ([#177](https://github.com/dgrauet/ltx-2-mlx/issues/177)) ([ee1d585](https://github.com/dgrauet/ltx-2-mlx/commit/ee1d585222c28336a5d900d903274f9f0c9c1c0a))
+* **pipelines:** freeze the stage-2 audio of the two-stage pipeline ([#173](https://github.com/dgrauet/ltx-2-mlx/issues/173)) ([6f05eaa](https://github.com/dgrauet/ltx-2-mlx/commit/6f05eaaa3094989c8d1c0f65a9be4f953b2b82c0))
+* **pipelines:** honour --frame-rate in a2v positions and keyframe audio length ([#176](https://github.com/dgrauet/ltx-2-mlx/issues/176)) ([4254a8f](https://github.com/dgrauet/ltx-2-mlx/commit/4254a8f5e77145027647b4c0af3bf693bcbb7a8e))
+* **pipelines:** rebuild the LipDub stage-2 audio reference from stage 1 ([#174](https://github.com/dgrauet/ltx-2-mlx/issues/174)) ([e3d0275](https://github.com/dgrauet/ltx-2-mlx/commit/e3d02756119e525d12108e76e65a611478c7b48b))
+* **pipelines:** resolve the image conditioning CRF from the model generation ([#187](https://github.com/dgrauet/ltx-2-mlx/issues/187)) ([2524595](https://github.com/dgrauet/ltx-2-mlx/commit/2524595c8c9b34c02aae8dcb23ccab238b47381a))
+* **pipelines:** run the DFR spatial epilogue as pinned windows, 2x2 then 4x4 ([#180](https://github.com/dgrauet/ltx-2-mlx/issues/180)) ([8de47e1](https://github.com/dgrauet/ltx-2-mlx/commit/8de47e183dc7ad40ea22f50c0b476ea2198afbf5))
+* **pipelines:** run the HQ two-stage refine with the res_2s sampler ([#175](https://github.com/dgrauet/ltx-2-mlx/issues/175)) ([d612feb](https://github.com/dgrauet/ltx-2-mlx/commit/d612febe00fe7014e85eece848503543479c4999))
+* **pipelines:** sample LTX-2.5 distilled stage 2 with ancestral Euler ([#172](https://github.com/dgrauet/ltx-2-mlx/issues/172)) ([5c1ca4a](https://github.com/dgrauet/ltx-2-mlx/commit/5c1ca4a3f416751149be572cdcff34b72f260852))
+* **pipelines:** start DFR temporal tiles on a keyframe plane with a pinned prefix ([#179](https://github.com/dgrauet/ltx-2-mlx/issues/179)) ([57794bb](https://github.com/dgrauet/ltx-2-mlx/commit/57794bb08ddd38443806865a5421b2addffcbcc5))
+* stop hdr-ic-lora crashing under LTX2_COMPUTE_DTYPE, plus pre-release audit fixes ([#189](https://github.com/dgrauet/ltx-2-mlx/issues/189)) ([552b512](https://github.com/dgrauet/ltx-2-mlx/commit/552b5129b3887870231c75a735d8ddcb13aca877))
+* **trainer:** save LoRA factors C-contiguous ([#169](https://github.com/dgrauet/ltx-2-mlx/issues/169)) ([4b18bc6](https://github.com/dgrauet/ltx-2-mlx/commit/4b18bc6828e0a57e7b77e70848ca2b1bfcf06201))
+
+
+### Documentation
+
+* align readme, claude.md and docs with the code before 0.16.0 ([#190](https://github.com/dgrauet/ltx-2-mlx/issues/190)) ([75c463e](https://github.com/dgrauet/ltx-2-mlx/commit/75c463ea0289f1e392ca523405162c2eb2d9c45f))
+
 ## [0.15.12](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.11...v0.15.12) (2026-09-27)
 
 
