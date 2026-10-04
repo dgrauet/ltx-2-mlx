@@ -193,13 +193,16 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         # I2V conditioning at target resolution. ``images`` is the upstream-iso
         # multi-anchor list; ``image`` is the legacy single-image shorthand.
         from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
-        from ltx_pipelines_mlx.utils.args import ImageConditioningInput
+        from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 
         enc_h = H * 32
         enc_w = W * 32
         resolved_images = list(images) if images else []
         if image is not None and not resolved_images:
             resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
+        resolved_images = resolve_frame_indices(resolved_images, num_frames)
+        # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).
+        resolved_images = self.image_conditioner.resolve_crf(resolved_images)
         conditionings: list = []
         if resolved_images:
             conditionings = combined_image_conditionings(

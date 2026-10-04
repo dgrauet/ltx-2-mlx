@@ -28,7 +28,7 @@ def prepare_image_for_encoding(
     image: Image.Image | str,
     height: int,
     width: int,
-    crf: int = 33,
+    crf: int | None = 33,
 ) -> mx.array:
     """Legacy alias for :func:`ltx_pipelines_mlx.utils.media_io.load_image_and_preprocess`.
 
@@ -40,7 +40,11 @@ def prepare_image_for_encoding(
 
     1. (str path) decode → uint8 RGB array.
        (PIL.Image input) bypass decode, use directly.
-    2. H.264 round-trip at ``crf`` (default 33; pass ``crf=0`` to skip).
+    2. H.264 round-trip at ``crf`` (pass ``crf=0`` to skip). The default 33
+       is the pre-2.4 value and is kept only for import-stable callers that
+       have no checkpoint to resolve against (the trainer's validation
+       sampler); pipelines pass the CRF resolved from the checkpoint
+       (``ImageConditioner.resolve_crf``). ``None`` raises, as upstream.
     3. Aspect-preserving resize + center crop to ``(height, width)``.
     4. Normalize ``[0, 1] → [-1, 1]``, ``HWC → BCHW``, bfloat16.
 
@@ -64,8 +68,7 @@ def prepare_image_for_encoding(
     if image.mode != "RGB":
         image = image.convert("RGB")
     arr = np.asarray(image, dtype=np.uint8)
-    if crf and crf > 0:
-        arr = preprocess(arr, crf=crf)
+    arr = preprocess(arr, crf=crf)
     cropped = resize_and_center_crop(arr, height, width)
 
     f = np.asarray(cropped, dtype=np.float32) / 255.0

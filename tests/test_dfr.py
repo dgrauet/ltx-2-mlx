@@ -88,7 +88,7 @@ def test_stage1_runs_on_the_canvas_with_segment_slots(tmp_path, monkeypatch):
     assert pipe.canvas_frames == 49 and pipe.generated_keyframe_positions == [24, 48]
     slots = [c for c in noised[0]["conditionings"] if isinstance(c, VideoGeneratedKeyframeSlots)]
     assert len(slots) == 1 and slots[0].pixel_frame_indices == (24, 48) and slots[0].initial_keyframes is None
-    assert len(ancestral.calls) == 1
+    assert len(ancestral.calls) == 2  # stage 1 + stage 2, both ancestral on 2.5
 
 
 def test_stage2_gets_upsampled_slots_reference_and_detailing_lora(tmp_path, monkeypatch):
@@ -104,7 +104,9 @@ def test_stage2_gets_upsampled_slots_reference_and_detailing_lora(tmp_path, monk
     assert refs[0].reference_latent.shape == (1, 7 * 2 * 2, 128)
     assert attached == [("attach", pipe.dit)]  # attached once, after stage 1 (dit still the stage-1 object)
     assert noised[2]["sigma"] == LTX_2_5_STAGE_2_DISTILLED_SIGMAS[0]
-    assert len(euler.calls) == 1
+    assert (
+        euler.calls == [] and ancestral.calls[1]["noise_seed"] == 7 + distilled_mod.ANCESTRAL_STAGE_2_NOISE_SEED_OFFSET
+    )
 
 
 def test_stage_positions_use_the_snapped_conditioning_fps(tmp_path, monkeypatch):

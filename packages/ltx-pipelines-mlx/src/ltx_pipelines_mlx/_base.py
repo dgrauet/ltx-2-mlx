@@ -21,7 +21,7 @@ from ltx_core_mlx.components.patchifiers import AudioPatchifier, VideoLatentPatc
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState
 from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
-from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
+from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig, compute_dtype_from_env
 from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
@@ -48,6 +48,21 @@ if TYPE_CHECKING:
     from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
     from ltx_pipelines_mlx.utils.samplers import OnStepFn
     from ltx_pipelines_mlx.utils.stepwise import StepwisePreview
+
+
+def apply_compute_dtype_from_env(dit: LTXModel) -> LTXModel:
+    """Apply ``LTX2_COMPUTE_DTYPE`` to a freshly loaded DiT (unset: no change).
+
+    Args:
+        dit: The loaded ``LTXModel`` or ``StreamingLTXModel``.
+
+    Returns:
+        ``dit``, with its compute dtype set when the variable asks for one.
+    """
+    dtype = compute_dtype_from_env()
+    if dtype is not None:
+        dit.set_compute_dtype(dtype)
+    return dit
 
 
 def reject_negative_prompt(negative_prompt: str | None, pipeline_name: str) -> None:
@@ -479,7 +494,7 @@ class BasePipeline:
             if not pending_loras:
                 from ltx_pipelines_mlx.utils._orchestration import load_transformer as _impl
 
-                return _impl(transformer_path, low_ram_streaming=self.low_ram_streaming)
+                return apply_compute_dtype_from_env(_impl(transformer_path, low_ram_streaming=self.low_ram_streaming))
 
             if self.low_ram_streaming:
                 from ltx_core_mlx.loader.block_streaming import BlockLoraSource
@@ -503,7 +518,7 @@ class BasePipeline:
                         )
                     )
                 object.__setattr__(model, "_lora_sources", sources)
-                return model
+                return apply_compute_dtype_from_env(model)
 
             transformer_weights = load_split_safetensors(transformer_path, prefix="transformer.")
             transformer_weights = self._fuse_pending_loras(transformer_weights, pending_loras)
@@ -518,7 +533,22 @@ class BasePipeline:
             _materialize = getattr(mx, "eval")  # noqa: B009 -- mx.eval is the MLX graph materialiser
             _materialize(dit.parameters())
             aggressive_cleanup()
-            return dit
+            return apply_compute_dtype_from_env(dit)
+
+    def _recast_after_inplace_fusion(self, dit: LTXModel | None = None) -> None:
+        """Re-apply the DiT's compute dtype after weights were fused in place.
+
+        LoRA fusion re-quantizes from a float32 weight, so the new scales/biases
+        come out float32; with a compute dtype set they must be cast again, or
+        every fused layer silently runs ``quantized_matmul`` in float32.
+
+        Args:
+            dit: The transformer that was fused (defaults to ``self.dit``).
+        """
+        dit = self.dit if dit is None else dit
+        dtype = getattr(dit, "compute_dtype", None)
+        if dit is not None and dtype is not None:
+            dit.set_compute_dtype(dtype)
 
     def _stepwise_hook(
         self,
