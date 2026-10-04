@@ -41,6 +41,8 @@ def _encode_keyframe(
     image: Image.Image | str,
     height: int,
     width: int,
+    *,
+    crf: int,
 ) -> mx.array:
     """Encode a keyframe image at a specific resolution.
 
@@ -49,11 +51,13 @@ def _encode_keyframe(
         image: PIL Image or path.
         height: Target pixel height.
         width: Target pixel width.
+        crf: H.264 CRF the image is re-compressed at first, resolved from the
+            checkpoint (``ImageConditioner.default_image_crf``).
 
     Returns:
         Patchified keyframe tokens (1, H*W, 128).
     """
-    img_tensor = prepare_image_for_encoding(image, height, width)
+    img_tensor = prepare_image_for_encoding(image, height, width, crf=crf)
     # (1, 3, H, W) -> (1, 3, 1, H, W) for single-frame video encoding
     latent = vae_encoder.encode(img_tensor[:, :, None, :, :])
     mx.eval(latent)  # Force evaluation to avoid graph buildup
@@ -184,8 +188,11 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         _materialize = getattr(mx, "eval")  # noqa: B009
 
         def _encode_all_keyframes(encoder) -> tuple[list, list]:
-            half = [_encode_keyframe(encoder, img, enc_h_half, enc_w_half) for img in keyframe_images]
-            full = [_encode_keyframe(encoder, img, up_h, up_w) for img in keyframe_images]
+            # The keyframe CLI takes no per-image CRF, so every keyframe uses the checkpoint
+            # generation's value (upstream resolves unset ``ImageConditioningInput.crf`` the same way).
+            crf = self.image_conditioner.default_image_crf
+            half = [_encode_keyframe(encoder, img, enc_h_half, enc_w_half, crf=crf) for img in keyframe_images]
+            full = [_encode_keyframe(encoder, img, up_h, up_w, crf=crf) for img in keyframe_images]
             _materialize(*(half + full))  # materialize before encoder is freed
             return half, full
 
@@ -232,7 +239,7 @@ class KeyframeInterpolationPipeline(TI2VidTwoStagesPipeline):
         # --- Stage 1: Half resolution with keyframe conditioning ---
         F = F_half  # already computed above
         video_shape_1 = (1, F * H_half * W_half, 128)
-        audio_T = compute_audio_token_count(num_frames)
+        audio_T = compute_audio_token_count(num_frames, frame_rate=frame_rate)
         audio_shape = (1, audio_T, 128)
 
         video_positions_1 = compute_video_positions(F, H_half, W_half, frame_rate=frame_rate)

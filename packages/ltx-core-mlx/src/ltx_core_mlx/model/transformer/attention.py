@@ -17,6 +17,29 @@ import mlx.nn as nn
 from ltx_core_mlx.model.transformer.rope import apply_rope_interleaved, apply_rope_split
 
 
+def _cast_inputs(
+    dtype: mx.Dtype,
+    x: mx.array,
+    encoder_hidden_states: mx.array | None,
+    attention_mask: mx.array | None,
+    perturbation_mask: mx.array | None,
+) -> tuple[mx.array, mx.array | None, mx.array | None, mx.array | None]:
+    """Cast the attention inputs to ``dtype``.
+
+    An additive mask is clamped to the dtype's finite range first, so a large
+    negative bias (e.g. -1e9) becomes the dtype minimum rather than -inf: a row
+    that is fully masked then still softmaxes to a finite result, as in float32.
+    """
+    if encoder_hidden_states is not None:
+        encoder_hidden_states = encoder_hidden_states.astype(dtype)
+    if attention_mask is not None and attention_mask.dtype != mx.bool_:
+        info = mx.finfo(dtype)
+        attention_mask = mx.clip(attention_mask, info.min, info.max).astype(dtype)
+    if perturbation_mask is not None:
+        perturbation_mask = perturbation_mask.astype(dtype)
+    return x.astype(dtype), encoder_hidden_states, attention_mask, perturbation_mask
+
+
 class Attention(nn.Module):
     """Multi-head attention with optional RoPE and per-head gating.
 
@@ -74,6 +97,11 @@ class Attention(nn.Module):
         self.q_norm = nn.RMSNorm(inner_dim, eps=norm_eps)
         self.k_norm = nn.RMSNorm(inner_dim, eps=norm_eps)
 
+        # Optional dtype for everything inside this module (projections, q/k norms,
+        # RoPE, the attention kernel). None keeps the input dtype. Set through
+        # LTXModel.set_compute_dtype, which also casts the parameters to match.
+        self.compute_dtype: mx.Dtype | None = None
+
     def __call__(
         self,
         x: mx.array,
@@ -96,6 +124,10 @@ class Attention(nn.Module):
             Output of shape (B, N, out_dim).
         """
         B, N, _ = x.shape
+        if self.compute_dtype is not None:
+            x, encoder_hidden_states, attention_mask, perturbation_mask = _cast_inputs(
+                self.compute_dtype, x, encoder_hidden_states, attention_mask, perturbation_mask
+            )
         kv_input = encoder_hidden_states if encoder_hidden_states is not None else x
 
         q = self.to_q(x)

@@ -202,7 +202,12 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         fused = apply_loras(model_sd, [lora_with_strength])
         dit.load_weights(list(fused.sd.items()))
+        # Drop every reference to the pre-fusion weights and the LoRA before the recast below
+        # evaluates the fused graph block by block, so each block's originals are freed as it goes.
+        del fused, model_sd, flat_model, flat_params, lora_sd, lora_with_strength, lora_remapped, lora_raw
         aggressive_cleanup()
+        # The fusion re-quantizes from float32, so stage 2 would run float32 scales otherwise.
+        self._recast_after_inplace_fusion(dit)
 
     def _swap_to_distilled_streamer(self) -> None:
         """Switch the streamer to a distilled-LoRA-fused dev model.
@@ -493,13 +498,16 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         # multi-anchor list; ``image`` is the legacy single-image shorthand
         # (frame_idx=0, strength=1.0).
         from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
-        from ltx_pipelines_mlx.utils.args import ImageConditioningInput
+        from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 
         enc_h_half = H_half * 32
         enc_w_half = W_half * 32
         resolved_images = list(images) if images else []
         if image is not None and not resolved_images:
             resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
+        resolved_images = resolve_frame_indices(resolved_images, num_frames)
+        # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).
+        resolved_images = self.image_conditioner.resolve_crf(resolved_images)
         conditionings_1: list = []
         if resolved_images:
             conditionings_1 = combined_image_conditionings(
@@ -665,8 +673,11 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             legacy_scalar_blend=True,
         )
 
-        # Stage 2 audio: legacy used noise_latent_state (bf16 mask path),
-        # so leave legacy_scalar_blend=False (default) to preserve bit-equivalence.
+        # Stage 2 audio: frozen conditioning, as upstream v1.4.0
+        # (``denoise_chunks(..., freeze_audio=True)``). The model sees stage 1's
+        # audio clean (sigma 0 for the audio prompt AdaLN and the A->V gate)
+        # instead of a copy re-noised at ``start_sigma``; ``frozen=True`` forces
+        # the zero noise scale and the all-zero denoise mask.
         audio_tokens_1 = output_1.audio_latent
         audio_state_2 = create_noised_state(
             base_shape=audio_tokens_1.shape,
@@ -676,6 +687,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             seed=seed + 2,
             sigma=start_sigma,
             initial_latent=audio_tokens_1,
+            frozen=True,
         )
 
         # Stage 2 reuses the same x0_model as stage 1 by default. With
@@ -704,10 +716,9 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         gen_tokens_2 = output_2.video_latent[:, : F * H_full * W_full, :]
         video_latent = self.video_patchifier.unpatchify(gen_tokens_2, (F, H_full, W_full))
-        # Stage 2 refines video only; discard its audio and keep stage 1's
-        # (upstream ti2vid_two_stages.py: ``video_state, _ = self.stage_2(...)``
-        # then decodes the stage-1 ``audio_state``). Stage 2 still runs the
-        # audio modality as model context for the joint forward.
+        # Stage 2 refines video only; its audio is frozen context, so keep
+        # stage 1's latent rather than the loop's copy of it (upstream keeps
+        # ``chunk.audio`` for a frozen modality).
         audio_latent = self.audio_patchifier.unpatchify(audio_tokens_1)
 
         return video_latent, audio_latent

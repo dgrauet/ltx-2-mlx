@@ -295,6 +295,35 @@ class TestQuantizedLoraFusion:
         # int8 requant error is well within 0.05.
         assert mx.allclose(fused, orig + delta, atol=0.05).item()
 
+    @pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16, mx.float32])
+    def test_keeps_the_scales_and_biases_dtype(self, dtype: mx.Dtype) -> None:
+        """The re-quantization runs in float32, but the fused scales/biases keep the original dtype.
+
+        Before, they came back float32, so a fused layer fed float32 scales to quantized_matmul and
+        its activations and output were promoted to float32.
+        """
+        mx.random.seed(2)
+        weight = mx.random.normal((64, 128))
+        q, scales, biases = mx.quantize(weight, bits=8, group_size=64)
+        model_sd = StateDict(
+            sd={"layer.weight": q, "layer.scales": scales.astype(dtype), "layer.biases": biases.astype(dtype)},
+            size=0,
+            dtype=set(),
+        )
+        a = mx.random.normal((4, 128)) * 0.05
+        b = mx.random.normal((64, 4)) * 0.05
+        result = apply_loras(model_sd, [LoraStateDictWithStrength(self._lora(a, b), 1.0)])
+
+        assert result.sd["layer.weight"].dtype == mx.uint32
+        assert result.sd["layer.scales"].dtype == dtype
+        assert result.sd["layer.biases"].dtype == dtype
+        x = mx.random.normal((3, 128)).astype(dtype)
+        out = mx.quantized_matmul(
+            x, result.sd["layer.weight"], result.sd["layer.scales"], result.sd["layer.biases"],
+            transpose=True, group_size=64, bits=8,
+        )  # fmt: skip
+        assert out.dtype == dtype  # with float32 scales a bfloat16/float16 input came out float32
+
 
 # ---------------------------------------------------------------------------
 # _load_weights — extensionless HF cache blob fallback

@@ -224,19 +224,22 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         F, H_half, W_half = compute_video_latent_shape(num_frames, half_h, half_w)
         video_shape = (1, F * H_half * W_half, 128)
 
-        video_positions_1 = compute_video_positions(F, H_half, W_half)
+        video_positions_1 = compute_video_positions(F, H_half, W_half, frame_rate=frame_rate)
         audio_positions = compute_audio_positions(audio_T)
 
         # I2V conditioning at half resolution. ``images`` is the upstream-iso
         # multi-anchor list; ``image`` is the legacy single-image shorthand.
         from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
-        from ltx_pipelines_mlx.utils.args import ImageConditioningInput
+        from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 
         enc_h_half = H_half * 32
         enc_w_half = W_half * 32
         resolved_images = list(images) if images else []
         if image is not None and not resolved_images:
             resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
+        resolved_images = resolve_frame_indices(resolved_images, num_frames)
+        # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).
+        resolved_images = self.image_conditioner.resolve_crf(resolved_images)
         conditionings_1: list = []
         if resolved_images:
 
@@ -350,7 +353,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         sigmas_2 = shorten_schedule(STAGE_2_SIGMAS, stage2_steps, keep="tail")
         start_sigma = sigmas_2[0]
 
-        video_positions_2 = compute_video_positions(F, H_full, W_full)
+        video_positions_2 = compute_video_positions(F, H_full, W_full, frame_rate=frame_rate)
 
         # Stage 2 video: scalar-blend bit-matches legacy inline arithmetic.
         video_state_2 = create_noised_state(

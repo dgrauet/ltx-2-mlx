@@ -28,6 +28,9 @@ dependencies = [
     "tqdm>=4.66.0",
 ]
 
+[project.optional-dependencies]
+hdr = ["OpenEXR>=3.3"]
+
 [project.scripts]
 ltx-2-mlx = "ltx_pipelines_mlx.cli:main"
 

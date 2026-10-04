@@ -213,11 +213,14 @@ def _fuse_delta_with_quantized(
 
     new_quantized, new_scales, new_biases = mx.quantize(new_weight, group_size=group_size, bits=bits)
 
+    # mx.quantize takes its scales/biases dtype from the float32 input. Keep the original dtype
+    # (bfloat16 in the q8/q4 packs), or every fused layer feeds float32 scales to quantized_matmul,
+    # which then promotes its activations and output to float32.
     result = {key: new_quantized}
     if scales_key:
-        result[scales_key] = new_scales
+        result[scales_key] = new_scales.astype(scales.dtype) if scales is not None else new_scales
     if biases_key:
-        result[biases_key] = new_biases
+        result[biases_key] = new_biases.astype(biases.dtype) if biases is not None else new_biases
     return result
 
 

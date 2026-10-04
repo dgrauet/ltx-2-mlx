@@ -110,7 +110,7 @@ def describe_work(
         steps=len(step_sigmas),
         forwards=sum(passes) + extra_forwards,
         video_tokens=int(video_state.latent.shape[1]),
-        audio_tokens=int(audio_state.latent.shape[1]),
+        audio_tokens=0 if audio_state is None else int(audio_state.latent.shape[1]),
         passes_per_step=passes,
         note=None if uniform else RETAKE_COST_NOTE,
     )
