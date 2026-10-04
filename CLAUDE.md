@@ -1458,10 +1458,11 @@ float16 activations against bf16 scales would promote to float32 inside `quantiz
 nothing. The AdaLN tables keep their F32 dtype. `bfloat16` gives the upstream precision; unset or
 `float32` is today's path, untouched. In-place LoRA fusion (`dfr`'s detailing LoRA, `ic-lora`, and the
 distilled-LoRA fusion that starts stage 2 of `--two-stage`, `--two-stages-hq`, `a2v` and `keyframe`
-in `TI2VidTwoStagesPipeline._fuse_distilled_lora`) re-quantizes from a float32 weight, so its new scales
-come out float32; every such call site calls `BasePipeline._recast_after_inplace_fusion()` afterwards,
-otherwise every fused layer would quietly run in float32 again. (`--low-ram` swaps the streamer to the
-pre-fused distilled transformer instead and keeps casting at bind time.)
+in `TI2VidTwoStagesPipeline._fuse_distilled_lora`) re-quantizes from a float32 weight; `fuse_loras`
+gives the new scales/biases the dtype the old ones had (until that fix they came out float32 on every
+path). Every such call site also calls `BasePipeline._recast_after_inplace_fusion()` afterwards, so a
+compute dtype set before the fusion is re-applied to whatever the fusion replaced. (`--low-ram` swaps
+the streamer to the pre-fused distilled transformer instead and keeps casting at bind time.)
 
 Why float16: on an M1 GPU (no native bf16), int8 `quantized_matmul` at the stage-2 shapes
 (17,856 tokens × 4096) runs at 6.6 TFLOPS with float32 activations, 5.8 with bf16 and 8.1 with

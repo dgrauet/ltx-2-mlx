@@ -188,7 +188,7 @@ def test_additive_mask_is_clamped_not_infinite():
 
 
 def test_inplace_lora_fusion_is_recast_to_the_compute_dtype():
-    """LoRA fusion re-quantizes from float32, so the fused scales come out float32."""
+    """LoRA fusion re-quantizes from float32 but keeps the scales' dtype; the recast after it is a no-op here."""
     from types import SimpleNamespace
 
     from ltx_core_mlx.loader.fuse_loras import apply_loras
@@ -213,7 +213,7 @@ def test_inplace_lora_fusion_is_recast_to_the_compute_dtype():
     )
     apply_quantization(model, fused.sd)
     model.load_weights(list(fused.sd.items()))
-    assert model.transformer_blocks[0].attn1.to_q.scales.dtype == mx.float32  # what the fusion leaves behind
+    assert model.transformer_blocks[0].attn1.to_q.scales.dtype == mx.float16  # fuse_loras keeps the scales' dtype
 
     BasePipeline._recast_after_inplace_fusion(SimpleNamespace(dit=model))  # what dfr / ic_lora now call
     assert model.transformer_blocks[0].attn1.to_q.scales.dtype == mx.float16
