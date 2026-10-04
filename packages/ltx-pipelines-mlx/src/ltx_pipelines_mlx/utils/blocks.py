@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -81,6 +81,7 @@ from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtr
 from ltx_core_mlx.utils.ffmpeg import find_ffmpeg
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.weights import load_split_safetensors, remap_audio_vae_keys
+from ltx_pipelines_mlx.utils.constants import detect_params
 from ltx_pipelines_mlx.utils.types import AutoDuration
 
 if TYPE_CHECKING:
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
     from ltx_core_mlx.model.video_vae.diffusion_decoder.config import DiffusionDecoderConfig
     from ltx_core_mlx.model.video_vae.diffusion_decoder.keyframes import DecodeKeyframes
     from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
+    from ltx_pipelines_mlx.utils.args import ImageConditioningInput
 
 logger = logging.getLogger(__name__)
 
@@ -264,15 +266,58 @@ class PromptEncoder:
 
 
 class ImageConditioner:
-    """Owns the video VAE encoder lifecycle.
+    """Owns the video VAE encoder lifecycle, and the CRF image conditionings are re-compressed at.
 
     Mirrors upstream ``utils.blocks.ImageConditioner``. Wraps a callable
-    so that the encoder is built, passed to user code, then freed.
+    so that the encoder is built, passed to user code, then freed. Also the
+    single place that knows what H.264 CRF an image conditioning should be
+    re-compressed at: that value is a property of the model generation, and
+    this block already holds the checkpoint it belongs to. Pipelines call
+    :meth:`resolve_crf` so callers may omit the CRF and still condition the
+    way the model was trained.
     """
 
     def __init__(self, model_dir: str | Path) -> None:
         self.model_dir = _resolve_model_dir(model_dir)
         self._encoder: _VideoVAEEncoder | None = None
+        self._default_image_crf: int | None = None
+
+    @property
+    def encoder_path(self) -> Path:
+        """The VAE encoder checkpoint this block loads (``vae_encoder_conv`` on 2.5 packs)."""
+        _decoder_name, encoder_name = _video_vae_names(self.model_dir)
+        return self.model_dir / f"{encoder_name}.safetensors"
+
+    @property
+    def default_image_crf(self) -> int:
+        """The H.264 CRF image conditionings should be re-compressed at for this checkpoint.
+
+        Read from the VAE encoder checkpoint's ``model_version`` metadata (see
+        :func:`~ltx_pipelines_mlx.utils.constants.detect_params`) rather than
+        hardcoded, because the value the model was trained with changed between
+        generations (33 before LTX-2.4, 18 from 2.4 on). Unversioned files (the
+        2.3 MLX packs) get the oldest value. Resolved on first use and cached,
+        so a run without image conditionings never reads the header.
+        """
+        if self._default_image_crf is None:
+            self._default_image_crf = detect_params(self.encoder_path).default_image_crf
+        return self._default_image_crf
+
+    def resolve_crf(self, images: Sequence[ImageConditioningInput]) -> list[ImageConditioningInput]:
+        """Fill in :attr:`default_image_crf` for every conditioning that left its CRF unset (``crf=None``).
+
+        Mirrors upstream ``ImageConditioner.resolve_crf``. Call near the top of a
+        pipeline's generate path: omitting the CRF then means "use what matches
+        this model", while an explicitly passed CRF (including ``0`` for no
+        re-compression) is always honoured.
+
+        Args:
+            images: Image conditioning inputs, possibly with ``crf=None``.
+
+        Returns:
+            The inputs with every ``crf`` set.
+        """
+        return [image if image.crf is not None else image._replace(crf=self.default_image_crf) for image in images]
 
     def load(self) -> _VideoVAEEncoder:
         """Build the VAE encoder (cached)."""
@@ -280,7 +325,7 @@ class ImageConditioner:
             return self._encoder
         self._encoder = _VideoVAEEncoder()
         _decoder_name, encoder_name = _video_vae_names(self.model_dir)
-        weights = load_split_safetensors(self.model_dir / f"{encoder_name}.safetensors", prefix=f"{encoder_name}.")
+        weights = load_split_safetensors(self.encoder_path, prefix=f"{encoder_name}.")
         weights = {
             k.replace("._mean_of_means", ".mean_of_means").replace("._std_of_means", ".std_of_means"): v
             for k, v in weights.items()
