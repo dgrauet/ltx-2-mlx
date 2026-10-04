@@ -42,9 +42,10 @@ def prepare_image_for_encoding(
        (PIL.Image input) bypass decode, use directly.
     2. H.264 round-trip at ``crf`` (pass ``crf=0`` to skip). The default 33
        is the pre-2.4 value and is kept only for import-stable callers that
-       have no checkpoint to resolve against (the trainer's validation
-       sampler); pipelines pass the CRF resolved from the checkpoint
-       (``ImageConditioner.resolve_crf``). ``None`` raises, as upstream.
+       have no checkpoint to resolve against; the pipelines and the trainer's
+       validation sampler pass the CRF resolved from the checkpoint
+       (``ImageConditioner.resolve_crf`` / ``default_image_crf``). ``None``
+       raises, as upstream.
     3. Aspect-preserving resize + center crop to ``(height, width)``.
     4. Normalize ``[0, 1] → [-1, 1]``, ``HWC → BCHW``, bfloat16.
 
