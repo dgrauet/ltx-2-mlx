@@ -187,7 +187,7 @@ class BasicAVTransformerBlock(nn.Module):
 
     def compute_modules(self) -> list[tuple[str, Attention | FeedForward]]:
         """The attention and feed-forward children, by attribute name."""
-        return [(name, mod) for name, mod in self.children().items() if isinstance(mod, (Attention, FeedForward))]
+        return [(name, mod) for name, mod in self.children().items() if isinstance(mod, Attention | FeedForward)]
 
     def set_compute_dtype(self, dtype: mx.Dtype | None) -> None:
         """Run attention and feed-forward internals in ``dtype`` (``None``: input dtype).
@@ -294,11 +294,13 @@ class BasicAVTransformerBlock(nn.Module):
         perturbations: BatchedPerturbationConfig | None = None,
         block_idx: int = 0,
     ) -> tuple[mx.array, mx.array | None]:
-        """Forward pass for joint audio+video block.
+        """Forward pass for the joint audio+video block, or video-only when ``audio_hidden`` is None.
 
         Args:
             video_hidden: (B, Nv, video_dim).
-            audio_hidden: (B, Na, audio_dim).
+            audio_hidden: (B, Na, audio_dim), or None for the video-only path (upstream
+                ``audio=None``): every audio sub-module and both A<->V cross-attentions are
+                skipped, and the audio-side params below may be None too.
             video_adaln_params: (B, 9 * video_dim) from top-level adaln_single.
             audio_adaln_params: (B, 9 * audio_dim) from top-level audio_adaln_single.
             video_prompt_adaln_params: (B, 2 * video_dim) for text cross-attn.
@@ -322,7 +324,7 @@ class BasicAVTransformerBlock(nn.Module):
                 per-block perturbation lookup.
 
         Returns:
-            Tuple of (video_hidden, audio_hidden).
+            Tuple of (video_hidden, audio_hidden); audio_hidden is None on the video-only path.
         """
         # --- Compute block-level modulation by ADDING tables to timestep params ---
         # 9 params: [0-2]=self-attn, [3-5]=ff, [6-8]=text-xattn (reference ordering)

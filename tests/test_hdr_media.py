@@ -21,10 +21,15 @@ from ltx_pipelines_mlx.utils.hdr_media import (
     resize_and_reflect_pad,
     save_exr_frame,
 )
+from tests.hdr_tools import needs_libx265, needs_openexr
 
-openexr = pytest.importorskip("OpenEXR")
+
+@pytest.fixture
+def openexr():
+    return pytest.importorskip("OpenEXR")
 
 
+@needs_libx265
 def test_hlg_writer_tags_bt2020_hlg_10bit(tmp_path):
     out = tmp_path / "m.mp4"
     with HlgFfmpegWriter(str(out), width=64, height=32, fps=24.0) as writer:
@@ -64,6 +69,7 @@ def test_writer_rejects_odd_dims(tmp_path):
         HlgFfmpegWriter(str(tmp_path / "x.mp4"), width=63, height=32, fps=24.0)
 
 
+@needs_libx265
 def test_writer_cleans_up_on_write_error(tmp_path):
     out = tmp_path / "m.mp4"
     with (
@@ -88,7 +94,7 @@ def test_reflect_pad_then_crop_round_trips_1080():
     np.testing.assert_array_equal(padded[1080:1088], src[1078:1070:-1])  # reflect, edge excluded
 
 
-def test_exr_round_trip_with_tags(tmp_path):
+def test_exr_round_trip_with_tags(tmp_path, openexr):
     rgb = np.random.default_rng(1).random((4, 6, 3)).astype(np.float32) * 8
     p = tmp_path / "f.exr"
     save_exr_frame(rgb, p, Primaries.AP1, "ACEScg")
@@ -128,6 +134,8 @@ def test_sdr_video_loads_as_acescct_vae_range(tmp_path):
     np.testing.assert_allclose(frames[0], white_acescct * 2 - 1, atol=1e-2)
 
 
+@needs_openexr
+@needs_libx265
 def test_encode_hdr_outputs_writes_exr_and_hlg(tmp_path):
     chunks = [np.full((2, 32, 64, 3), 0.4, dtype=np.float32), np.full((1, 32, 64, 3), 0.6, dtype=np.float32)]
     exr_dir = encode_hdr_outputs(iter(chunks), str(tmp_path / "out.mp4"), 24.0, EXRColorSpace.ACESCG)
@@ -135,6 +143,7 @@ def test_encode_hdr_outputs_writes_exr_and_hlg(tmp_path):
     assert (tmp_path / "out.mp4").stat().st_size > 0
 
 
+@needs_libx265
 def test_writer_exit_interrupted_drain_unlinks_and_keeps_the_real_error(tmp_path):
     out = tmp_path / "m.mp4"
     writer = HlgFfmpegWriter(str(out), width=64, height=32, fps=24.0)
@@ -202,7 +211,7 @@ def test_decode_raises_on_ffmpeg_failure(tmp_path, monkeypatch):
         list(hdr_media._decode_rgb24_frames(src, 4))
 
 
-def test_read_exr_mono_y_broadcasts_and_unknown_channels_raise(tmp_path):
+def test_read_exr_mono_y_broadcasts_and_unknown_channels_raise(tmp_path, openexr):
     y = np.random.default_rng(2).random((4, 6)).astype(np.float16)
     mono = tmp_path / "y.exr"
     header = {"compression": openexr.ZIP_COMPRESSION, "type": openexr.scanlineimage}

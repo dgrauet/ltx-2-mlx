@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import mlx.core as mx
@@ -21,6 +22,8 @@ from ltx_core_mlx.utils.image import prepare_image_for_encoding
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS
+from ltx_pipelines_mlx.utils.blocks import ImageConditioner
+from ltx_pipelines_mlx.utils.constants import DEFAULT_IMAGE_CRF
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.samplers import denoise_loop
 from ltx_trainer_mlx.progress import SamplingContext
@@ -34,6 +37,22 @@ if TYPE_CHECKING:
     from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
 
 logger = logging.getLogger(__name__)
+
+
+def validation_image_crf(model_dir: str | Path) -> int:
+    """The H.264 CRF a validation I2V image is re-compressed at for this checkpoint.
+
+    Read from the VAE encoder's ``model_version`` metadata exactly as the pipelines do
+    (:attr:`ImageConditioner.default_image_crf`): 33 before LTX-2.4, 18 from 2.4 on.
+    Only the safetensors header is read; no weights are loaded.
+
+    Args:
+        model_dir: Local model pack directory.
+
+    Returns:
+        The CRF.
+    """
+    return ImageConditioner(model_dir).default_image_crf
 
 
 @dataclass
@@ -95,6 +114,7 @@ class ValidationSampler:
         audio_decoder: AudioVAEDecoder | None = None,
         vocoder: VocoderWithBWE | None = None,
         sampling_context: SamplingContext | None = None,
+        image_crf: int = DEFAULT_IMAGE_CRF,
     ):
         """Initialize the validation sampler.
 
@@ -109,6 +129,9 @@ class ValidationSampler:
             audio_decoder: Optional audio VAE decoder.
             vocoder: Optional vocoder.
             sampling_context: Optional progress tracking context.
+            image_crf: H.264 CRF the conditioning image is re-compressed at; pass the
+                checkpoint's value (:func:`validation_image_crf`). The default is the
+                pre-2.4 value.
         """
         self._transformer = transformer
         self._vae_decoder = vae_decoder
@@ -118,6 +141,7 @@ class ValidationSampler:
         self._audio_decoder = audio_decoder
         self._vocoder = vocoder
         self._sampling_context = sampling_context
+        self._image_crf = image_crf
 
         self._video_patchifier = VideoLatentPatchifier()
         self._audio_patchifier = AudioPatchifier()
@@ -225,7 +249,7 @@ class ValidationSampler:
         assert self._vae_encoder is not None
 
         # Prepare image for encoding: (1, 3, H, W) in [-1, 1]
-        image = prepare_image_for_encoding(config.condition_image, config.height, config.width)
+        image = prepare_image_for_encoding(config.condition_image, config.height, config.width, crf=self._image_crf)
         # Add frame dim: (1, 3, 1, H, W)
         image = image[:, :, None, :, :]
 

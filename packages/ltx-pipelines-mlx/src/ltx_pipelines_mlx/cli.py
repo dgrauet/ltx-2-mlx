@@ -1,15 +1,16 @@
 """Command-line interface for ltx-2-mlx.
 
 Usage:
-    ltx-2-mlx generate --prompt "a cat walking" --output out.mp4
-    ltx-2-mlx generate --prompt "animate this" --image photo.jpg -o anim.mp4
-    ltx-2-mlx generate --prompt "a scene" --two-stage -o hires.mp4
-    ltx-2-mlx generate --prompt "a scene" --two-stages-hq --stage1-steps 20 -o hq.mp4
-    ltx-2-mlx a2v --prompt "music video" --audio music.wav -o a2v.mp4
+    ltx-2-mlx generate --prompt "a cat walking" --distilled -f 97 --frame-rate 24 --output out.mp4
+    ltx-2-mlx generate --prompt "animate this" --image photo.jpg --two-stage -f 97 --frame-rate 24 -o anim.mp4
+    ltx-2-mlx generate --prompt "a scene" --two-stage -f 97 --frame-rate 24 -o hires.mp4
+    ltx-2-mlx generate --prompt "a scene" --two-stages-hq --stage1-steps 20 -f 97 --frame-rate 24 -o hq.mp4
+    ltx-2-mlx a2v --prompt "music video" --audio music.wav --frame-rate 24 -o a2v.mp4
     ltx-2-mlx retake --prompt "new scene" --video source.mp4 --start 1 --end 3 -o retake.mp4
     ltx-2-mlx extend --prompt "continue" --video source.mp4 --extend-frames 2 -o extended.mp4
-    ltx-2-mlx keyframe --prompt "transition" --start img1.png --end img2.png -o kf.mp4
-    ltx-2-mlx ic-lora --prompt "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 -o out.mp4
+    ltx-2-mlx keyframe --prompt "transition" --start img1.png --end img2.png --frame-rate 24 -o kf.mp4
+    ltx-2-mlx ic-lora --prompt "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 \\
+        --frame-rate 24 -o out.mp4
     ltx-2-mlx enhance --prompt "a cat walking" --mode t2v
     ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q8
     ltx-2-mlx train --config training_config.yaml
@@ -216,8 +217,8 @@ def _add_teacache_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help=(
-            "Override TeaCache rel_l1_thresh (default 0.5; higher = more skipping = "
-            "faster but lossier). Ignored unless --enable-teacache is set."
+            "Override TeaCache rel_l1_thresh (default 0.5 on --two-stage and a2v, 1.0 on --two-stages-hq; "
+            "higher = more skipping = faster but lossier). Ignored unless --enable-teacache is set."
         ),
     )
 
@@ -298,8 +299,8 @@ def _add_generation_args(
             "mx.compile + per-block sync + Metal heap release. Cuts "
             "transformer peak Metal ~75%% (e.g. q8 ~10-12 GB -> ~2.8 GB). "
             "Targets 16 GB Macs (q8) and 32 GB Macs (bf16). Supported "
-            "on generate (one-stage / --two-stage / --two-stages-hq), a2v, "
-            "keyframe, ic-lora, retake, and extend. Compatible with generate's --lora flag "
+            "on every generate mode (incl. --distilled and --dfr), a2v, keyframe, ic-lora, "
+            "hdr-ic-lora, lipdub, retake, and extend. Compatible with generate's --lora flag "
             "via per-block BlockLoraSource bind-time fusion. Two-stage at "
             "LoRA strength 1.0 swaps to the pre-fused "
             "transformer-distilled.safetensors at the stage 1->2 transition; "
@@ -454,18 +455,18 @@ def _build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="ltx-2-mlx",
-        description="LTX-2.3 video generation on Apple Silicon (MLX)",
+        description="LTX-2.3 / LTX-2.5 video generation on Apple Silicon (MLX)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  ltx-2-mlx generate --prompt "a sunset" --output sunset.mp4
-  ltx-2-mlx generate --prompt "animate" --image photo.jpg -o anim.mp4
-  ltx-2-mlx generate --prompt "a scene" --two-stage -o hires.mp4
-  ltx-2-mlx a2v --prompt "music video" --audio music.wav -o a2v.mp4
+  ltx-2-mlx generate --prompt "a sunset" --distilled -f 97 --frame-rate 24 --output sunset.mp4
+  ltx-2-mlx generate --prompt "animate" --image photo.jpg --two-stage -f 97 --frame-rate 24 -o anim.mp4
+  ltx-2-mlx generate --prompt "a scene" --two-stage -f 97 --frame-rate 24 -o hires.mp4
+  ltx-2-mlx a2v --prompt "music video" --audio music.wav --frame-rate 24 -o a2v.mp4
   ltx-2-mlx retake --prompt "new scene" --video source.mp4 --start 1 --end 3 -o out.mp4
   ltx-2-mlx extend --prompt "continue" --video source.mp4 --extend-frames 2 -o out.mp4
-  ltx-2-mlx keyframe --prompt "transition" --start img1.png --end img2.png -o out.mp4
-  ltx-2-mlx ic-lora --prompt "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 -o out.mp4
+  ltx-2-mlx keyframe --prompt "transition" --start img1.png --end img2.png --frame-rate 24 -o out.mp4
+  ltx-2-mlx ic-lora --prompt "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 --frame-rate 24 -o out.mp4
   ltx-2-mlx enhance --prompt "a cat walking" --mode t2v
   ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q4
 """,
@@ -588,13 +589,16 @@ examples:
     gen.add_argument(
         "--two-stage",
         action="store_true",
-        help="Two-stage pipeline: dev model + CFG at half-res, upscale, distilled LoRA refine (requires q8 model)",
+        help=(
+            "Two-stage pipeline: dev model + CFG at half-res, upscale, distilled LoRA refine "
+            "(needs a pack with the dev transformer and the distilled LoRA)"
+        ),
     )
     gen.add_argument(
         "--two-stages-hq",
         action="store_true",
         dest="two_stages_hq",
-        help="HQ two-stage pipeline (res_2s sampler for stage 1). Mirrors upstream TI2VidTwoStagesHQPipeline.",
+        help="HQ two-stage pipeline (res_2s sampler on both stages). Mirrors upstream TI2VidTwoStagesHQPipeline.",
     )
     gen.add_argument(
         "--distilled",
@@ -614,7 +618,7 @@ examples:
             "[experimental] DFR (Diffusion Fidelity Rendering) base path, LTX 2.5 packs only: distilled "
             "half-res stage with keyframe slots on a segment-aligned canvas, then a full-res detailing "
             "stage with the official detailing IC-LoRA guided by the stage-1 latent. Mirrors upstream "
-            "DFRPipeline (spatial_upscalings=1). The detailing LoRA is a gated "
+            "DFRPipeline (see --spatial-upscalings / --temporal-upscalings). The detailing LoRA is a gated "
             "HuggingFace repo: accept its licence on the model page once before the first run."
         ),
     )
@@ -636,7 +640,8 @@ examples:
         help=(
             "DFR spatial epilogue: 1 = stage 2 at full resolution (default), 2 = stage 1 at H/4 and "
             "stage 2 + temporal rounds at H/2, then a full-res detailing epilogue (Lanczos-upsampled "
-            "re-encoded keyframes + 2x2 spatially-tiled denoise). Dims are floored to multiples of "
+            "re-encoded keyframes, then a windowed denoise: one step on 2x2 spatial tiles, the rest on "
+            "4x4). Dims are floored to multiples of "
             "128 px, with a warning. --dfr only; not compatible with --segment or --tile-*."
         ),
     )
@@ -889,7 +894,7 @@ examples:
         help=(
             "Dev (non-distilled) transformer filename. Enables dev mode: the "
             "distilled LoRA is fused alongside the IC-LoRA (Comfy IC-LoRA recipe). "
-            "e.g. transformer.safetensors in a dev model dir"
+            "e.g. transformer-dev.safetensors in the model dir"
         ),
     )
 
@@ -946,7 +951,7 @@ examples:
     # --- hdr-ic-lora ---
     hdr = sub.add_parser(
         "hdr-ic-lora",
-        help="SDR-to-HDR IC-LoRA, single-stage ACEScct (LTX-2.5 packs only; HLG mp4 + EXR frames)",
+        help="[experimental] SDR-to-HDR IC-LoRA, single-stage ACEScct (LTX-2.5 packs only; HLG mp4 + EXR frames)",
     )
     hdr.add_argument(
         "--input",
@@ -972,14 +977,18 @@ examples:
         "--hdr-lora",
         required=True,
         help=(
-            "SDR-to-HDR IC-LoRA .safetensors (Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR, gated). Pass the local file: "
-            "the repo also holds the scene embeddings, so a bare repo id is ambiguous."
+            "Local SDR-to-HDR IC-LoRA file ltx-2.5-22b-ic-lora-sdr-to-hdr-1.0.safetensors, downloaded from the "
+            "gated Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR. A repo id is refused: the repo also holds the "
+            "scene embeddings."
         ),
     )
     hdr.add_argument(
         "--text-embeddings",
         required=True,
-        help=".safetensors with video_context (the scene embeddings shipped in the HDR LoRA repo).",
+        help=(
+            "Local .safetensors with video_context: ltx-2.5-22b-ic-lora-sdr-to-hdr-scene-emb.safetensors from the "
+            "same repo as --hdr-lora."
+        ),
     )
     hdr.add_argument(
         "--input-colorspace",

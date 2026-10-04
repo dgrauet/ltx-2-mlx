@@ -28,6 +28,7 @@ import yaml
 from pydantic import BaseModel
 from safetensors.numpy import save_file as save_safetensors
 
+from ltx_pipelines_mlx.utils.constants import DEFAULT_IMAGE_CRF
 from ltx_trainer_mlx.config import LtxTrainerConfig
 from ltx_trainer_mlx.config_display import print_config
 from ltx_trainer_mlx.gpu_utils import free_gpu_memory, free_gpu_memory_context, get_gpu_memory_gb
@@ -40,7 +41,12 @@ from ltx_trainer_mlx.model_loader import (
 )
 from ltx_trainer_mlx.progress import TrainingProgress
 from ltx_trainer_mlx.utils import save_image
-from ltx_trainer_mlx.validation_sampler import CachedPromptEmbeddings, GenerationConfig, ValidationSampler
+from ltx_trainer_mlx.validation_sampler import (
+    CachedPromptEmbeddings,
+    GenerationConfig,
+    ValidationSampler,
+    validation_image_crf,
+)
 from ltx_trainer_mlx.video_utils import save_video
 
 logger = logging.getLogger(__name__)
@@ -852,6 +858,10 @@ class LtxvTrainer:
             audio_decoder=self._audio_vae if generate_audio else None,
             vocoder=self._vocoder if generate_audio else None,
             sampling_context=sampling_ctx,
+            # Only I2V validation (which needs the VAE encoder) re-compresses an image.
+            image_crf=(
+                validation_image_crf(cfg.model.model_path) if self._vae_encoder is not None else DEFAULT_IMAGE_CRF
+            ),
         )
 
         output_dir = Path(cfg.output_dir) / "samples"

@@ -279,7 +279,10 @@ def _openexr():
     try:
         import OpenEXR  # ty: ignore[unresolved-import]
     except ImportError as err:
-        raise ImportError("EXR I/O needs the optional extra: uv sync --extra hdr (OpenEXR>=3.3)") from err
+        raise ImportError(
+            "EXR I/O needs OpenEXR>=3.3, the optional extra 'hdr': pip install 'ltx-pipelines-mlx[hdr]' "
+            "(in a checkout of this repo: uv sync --extra hdr)"
+        ) from err
     return OpenEXR
 
 

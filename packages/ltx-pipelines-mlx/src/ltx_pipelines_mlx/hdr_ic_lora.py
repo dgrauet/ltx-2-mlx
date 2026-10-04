@@ -22,7 +22,6 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 from huggingface_hub import hf_hub_download
-from huggingface_hub.errors import GatedRepoError
 
 from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
 from ltx_core_mlx.conditioning.types.keyframe_slots import extract_generated_keyframes
@@ -39,7 +38,7 @@ from .dfr_layout import resolve_canvas
 from .iclora_utils import reference_conditioning_from_latent
 from .scheduler import DISTILLED_SIGMAS
 from .utils import hdr_media
-from .utils._orchestration import resolve_lora_path, resolve_model_dir
+from .utils._orchestration import resolve_model_dir
 from .utils.blocks import ImageConditioner, VideoDecoder
 from .utils.generation import is_ltx25_pack
 from .utils.hdr_media import (
@@ -57,6 +56,11 @@ from .utils.progress import phase
 from .utils.samplers import denoise_loop
 
 logger = logging.getLogger(__name__)
+
+HDR_LORA_REPO = "Lightricks/LTX-2.5-22b-IC-LoRA-SDR-To-HDR"
+"""Gated HuggingFace repo holding the SDR-to-HDR IC-LoRA and its scene embeddings."""
+HDR_LORA_FILENAME = "ltx-2.5-22b-ic-lora-sdr-to-hdr-1.0.safetensors"
+HDR_SCENE_EMBEDDINGS_FILENAME = "ltx-2.5-22b-ic-lora-sdr-to-hdr-scene-emb.safetensors"
 
 _materialize = getattr(mx, "eval")  # noqa: B009 -- mx.eval is the MLX graph materialiser
 
@@ -124,7 +128,10 @@ def load_video_context(path: str | Path) -> mx.array:
     """
     emb_path = Path(path)
     if not emb_path.is_file():
-        raise FileNotFoundError(f"Text embeddings not found: {emb_path}")
+        raise FileNotFoundError(
+            f"Text embeddings not found: {emb_path} (expected a local {HDR_SCENE_EMBEDDINGS_FILENAME}). "
+            f"{_download_hint()}"
+        )
     tensors = mx.load(str(emb_path))
     assert isinstance(tensors, dict)
     for name in ("video_context", "video_prompt_embeds"):
@@ -154,25 +161,34 @@ def require_hdr_export_tools() -> None:
         )
 
 
+def _download_hint() -> str:
+    return (
+        f"Fetch both files of the gated repo {HDR_LORA_REPO} once (accept its licence on HuggingFace first): "
+        f"huggingface-cli download {HDR_LORA_REPO} {HDR_LORA_FILENAME} {HDR_SCENE_EMBEDDINGS_FILENAME} "
+        f"--local-dir hdr-lora, then pass --hdr-lora hdr-lora/{HDR_LORA_FILENAME} "
+        f"--text-embeddings hdr-lora/{HDR_SCENE_EMBEDDINGS_FILENAME}."
+    )
+
+
 def _resolve_hdr_lora(hdr_lora: str) -> str:
-    """Resolve the SDR-to-HDR IC-LoRA without touching the network for a local file path.
+    """Accept only an existing local ``.safetensors`` file; never touch the network.
+
+    A HuggingFace repo id is refused up front: the SDR-to-HDR repo holds two ``.safetensors`` (the
+    LoRA and the scene embeddings), so a snapshot would download both and still be ambiguous.
 
     Raises:
+        ValueError: ``hdr_lora`` is not a ``.safetensors`` path (e.g. a repo id).
         FileNotFoundError: ``hdr_lora`` names a ``.safetensors`` file that does not exist.
-        PermissionError: ``hdr_lora`` is a gated HuggingFace repo whose licence was not accepted.
     """
-    if hdr_lora.endswith(".safetensors"):
-        if not Path(hdr_lora).is_file():
-            raise FileNotFoundError(f"HDR IC-LoRA file not found: {hdr_lora}")
-        return hdr_lora
-    try:
-        return resolve_lora_path(hdr_lora)
-    except GatedRepoError as exc:
-        raise PermissionError(
-            f"The HDR IC-LoRA '{hdr_lora}' is a gated HuggingFace repo: accept its licence once at "
-            f"https://huggingface.co/{hdr_lora} with the account you are logged in as "
-            "(huggingface-cli login), then rerun. No model was loaded."
-        ) from exc
+    if not hdr_lora.endswith(".safetensors"):
+        raise ValueError(
+            f"--hdr-lora takes a local .safetensors file ({HDR_LORA_FILENAME}), not {hdr_lora!r}. {_download_hint()}"
+        )
+    if not Path(hdr_lora).is_file():
+        raise FileNotFoundError(
+            f"HDR IC-LoRA file not found: {hdr_lora} (expected {HDR_LORA_FILENAME}). {_download_hint()}"
+        )
+    return hdr_lora
 
 
 def _require_ltx25_pack(model_dir: str) -> None:
@@ -227,7 +243,7 @@ class HDRICLoraPipeline(BasePipeline):
 
     Args:
         model_dir: LTX-2.5 pack (local path or HuggingFace repo id).
-        hdr_lora: SDR-to-HDR IC-LoRA ``.safetensors`` path or HuggingFace repo id.
+        hdr_lora: Local SDR-to-HDR IC-LoRA ``.safetensors`` file (:data:`HDR_LORA_FILENAME`).
         text_embeddings: ``.safetensors`` holding the precomputed ``video_context``.
         low_ram_streaming: Stream transformer blocks (``--low-ram``); the LoRA is then fused per
             block bind instead of in place.
@@ -235,10 +251,10 @@ class HDRICLoraPipeline(BasePipeline):
     Raises:
         ImportError: OpenEXR (the ``hdr`` extra) is missing.
         RuntimeError: ffmpeg has no ``libx265`` encoder.
-        FileNotFoundError: the text embeddings or a local LoRA ``.safetensors`` do not exist.
+        FileNotFoundError: the text embeddings or the LoRA ``.safetensors`` do not exist.
         KeyError: the embeddings file holds neither ``video_context`` nor ``video_prompt_embeds``.
-        ValueError: ``model_dir`` is not an LTX-2.5 pack.
-        PermissionError: ``hdr_lora`` is a gated HuggingFace repo whose licence was not accepted.
+        ValueError: ``hdr_lora`` is not a ``.safetensors`` path (e.g. a repo id), or ``model_dir`` is not
+            an LTX-2.5 pack.
 
     All of these are checked before the model pack is downloaded or anything is loaded.
     """

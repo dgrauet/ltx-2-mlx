@@ -76,8 +76,9 @@ def compute_dtype_from_env() -> mx.Dtype | None:
     return _COMPUTE_DTYPES[value]
 
 
-def _all_finite(*arrays: mx.array) -> bool:
-    return all(bool(mx.all(mx.isfinite(a)).item()) for a in arrays)
+def _all_finite(*arrays: mx.array | None) -> bool:
+    """True when every given array is finite; ``None`` (an absent stream, e.g. video-only audio) is skipped."""
+    return all(bool(mx.all(mx.isfinite(a)).item()) for a in arrays if a is not None)
 
 
 # ---------------------------------------------------------------------------
@@ -1159,7 +1160,7 @@ class X0Model(nn.Module):
 
         Args:
             video_latent: Noisy video latent.
-            audio_latent: Noisy audio latent.
+            audio_latent: Noisy audio latent, or None to run the DiT video-only.
             sigma: Current noise level (B,).
             video_timesteps: Optional per-token timesteps (B, Nv).
             audio_timesteps: Optional per-token timesteps (B, Na).
@@ -1169,7 +1170,7 @@ class X0Model(nn.Module):
             **kwargs: Passed to inner model.
 
         Returns:
-            Tuple of (video_x0, audio_x0).
+            Tuple of (video_x0, audio_x0); audio_x0 is None when ``audio_latent`` is None.
         """
         video_v, audio_v = self.model(
             video_latent=video_latent,

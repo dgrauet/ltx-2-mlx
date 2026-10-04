@@ -121,10 +121,10 @@ def main() -> int:
         print(f"[{i + 1}/{len(prompts)}] {prompt[:80]}…")
         calibrator.reset_for_next_prompt()
 
-        # tap fires on each stage 1 step's conditioned pass via
-        # guided_denoise_loop. Stage 2 uses denoise_loop (no tap),
-        # so its 3 steps don't contribute deltas — the calibrator only
-        # observes stage 1.
+        # tap fires on each stage 1 step's conditioned pass (guided_denoise_loop,
+        # or res2s_denoise_loop with --hq). Stage 2 is never given the tap
+        # (denoise_loop, or res2s_denoise_loop with --hq since #175), so its
+        # steps don't contribute deltas: the calibrator only observes stage 1.
         pipeline.generate_two_stage(
             prompt=prompt,
             height=args.height,
