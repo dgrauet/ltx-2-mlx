@@ -115,6 +115,9 @@ def dfr_seam_roles(num_frames: int, *, high_quality_hdr: bool) -> tuple[list[int
 def load_video_context(path: str | Path) -> mx.array:
     """Load ``video_context`` (or trainer ``video_prompt_embeds``) from ``.safetensors`` (upstream ``_load_video_context``).
 
+    Returns:
+        The context as ``(1, N, D)`` (an unbatched ``(N, D)`` tensor gets a batch axis).
+
     Raises:
         FileNotFoundError: the file does not exist.
         KeyError: neither key is in the file.
@@ -126,7 +129,10 @@ def load_video_context(path: str | Path) -> mx.array:
     assert isinstance(tensors, dict)
     for name in ("video_context", "video_prompt_embeds"):
         if name in tensors:
-            return tensors[name]
+            context = tensors[name]
+            # The official scene-emb file stores ``(N, 4096)`` with no batch axis; the DiT's
+            # cross-attention takes ``(B, N, D)``.
+            return context[None] if context.ndim == 2 else context
     raise KeyError(f"video_context/video_prompt_embeds not found in {emb_path} (keys={sorted(tensors)})")
 
 

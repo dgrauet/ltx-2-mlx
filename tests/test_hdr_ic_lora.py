@@ -134,6 +134,13 @@ def test_video_prompt_embeds_key_is_accepted(tmp_path):
     assert load_video_context(p).shape == (1, 3, 4096)
 
 
+def test_unbatched_scene_embeddings_get_a_batch_axis(tmp_path):
+    """The official scene-emb file stores ``video_context`` as ``(1024, 4096)``, without a batch axis."""
+    p = tmp_path / "e.safetensors"
+    mx.save_safetensors(str(p), {"video_context": mx.ones((1024, 4096)), "audio_context": mx.ones((1024, 2048))})
+    assert load_video_context(p).shape == (1, 1024, 4096)
+
+
 def test_rejects_23_pack_before_any_load(tmp_path):
     emb = _embeddings(tmp_path)
     with pytest.raises(ValueError, match=r"LTX-2\.5"):

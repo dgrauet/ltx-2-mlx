@@ -20,7 +20,10 @@ _BASE = ["-p", "x", "-o", "o.mp4", "--frame-rate", "24"]
         ["a2v", *_BASE, "--audio", "a.wav"],
         ["keyframe", *_BASE, "--start", "a.png", "--end", "b.png"],
         ["ic-lora", *_BASE, "--lora", "l.safetensors", "1.0", "--video-conditioning", "c.mp4", "1.0"],
-        ["hdr-ic-lora", *_BASE, "--lora", "l.safetensors", "1.0"],
+        [
+            "hdr-ic-lora",
+            *("--input", "in.mp4", "-o", "o.mp4", "--hdr-lora", "l.safetensors", "--text-embeddings", "e.safetensors"),
+        ],
     ],
     ids=lambda a: a[0],
 )
