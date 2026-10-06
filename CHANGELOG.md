@@ -10,6 +10,18 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.16.1](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.0...v0.16.1) (2026-10-06)
+
+
+### Features
+
+* **core:** opt-in unfused LoRA adapters (LTX2_LORA_MODE=unfused) ([#191](https://github.com/dgrauet/ltx-2-mlx/issues/191)) ([43c1a9e](https://github.com/dgrauet/ltx-2-mlx/commit/43c1a9e6585939c88d6998013bed9fbbe73cff2d))
+
+
+### Bug Fixes
+
+* match upstream image-conditioning preprocessing ([#193](https://github.com/dgrauet/ltx-2-mlx/issues/193)) ([bfa5755](https://github.com/dgrauet/ltx-2-mlx/commit/bfa5755371a973651ea218ac3b56dcd34aa92c45)), closes [#188](https://github.com/dgrauet/ltx-2-mlx/issues/188)
+
 ## [0.16.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.12...v0.16.0) (2026-10-04)
 
 
