@@ -20,7 +20,7 @@ stability guarantees.
 
 ### Bug Fixes
 
-* match upstream image-conditioning preprocessing ([#193](https://github.com/dgrauet/ltx-2-mlx/issues/193)) ([bfa5755](https://github.com/dgrauet/ltx-2-mlx/commit/bfa5755371a973651ea218ac3b56dcd34aa92c45)), closes [#188](https://github.com/dgrauet/ltx-2-mlx/issues/188)
+* match upstream image-conditioning preprocessing ([#193](https://github.com/dgrauet/ltx-2-mlx/issues/193)) ([bfa5755](https://github.com/dgrauet/ltx-2-mlx/commit/bfa5755371a973651ea218ac3b56dcd34aa92c45)), refs [#188](https://github.com/dgrauet/ltx-2-mlx/issues/188)
 
 ## [0.16.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.15.12...v0.16.0) (2026-10-04)
 
