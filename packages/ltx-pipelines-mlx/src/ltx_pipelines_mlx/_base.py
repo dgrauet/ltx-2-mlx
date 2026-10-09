@@ -70,27 +70,30 @@ def apply_compute_dtype_from_env(dit: LTXModel) -> LTXModel:
 
 
 def unfused_loras_requested(lora_mode: str, low_ram_streaming: bool) -> bool:
-    """Whether the LoRA mode applies to a DiT loaded with ``low_ram_streaming``.
+    """Whether to attach LoRAs to a **resident** DiT as run-time adapters instead of fusing them.
 
-    ``--low-ram`` keeps fusing each block's LoRAs as the block is bound (the fused copy is thrown away
-    after the block runs), so the setting only changes resident models; a note says so.
+    Under ``--low-ram`` this is ``False``: the streamed path takes the mode through
+    :class:`~ltx_core_mlx.loader.block_streaming.BlockLoraSource` instead (``fuse=False`` sources feed
+    run-time adapters on the streamed block, see :func:`streamed_lora_fuse`).
 
     Args:
         lora_mode: The pipeline's parsed ``LTX2_LORA_MODE`` (:attr:`BasePipeline.lora_mode`).
         low_ram_streaming: Whether the pipeline streams the DiT blocks.
 
     Returns:
-        ``True`` when LoRAs should be attached as run-time adapters instead of fused.
+        ``True`` when the resident DiT should get adapters instead of an in-place fusion.
     """
-    if lora_mode != "unfused":
-        return False
-    if low_ram_streaming:
-        print(
-            "note: LTX2_LORA_MODE=unfused does not apply under --low-ram; LoRAs are fused per block at bind",
-            file=sys.stderr,
-        )
-        return False
-    return True
+    return lora_mode == "unfused" and not low_ram_streaming
+
+
+def streamed_lora_fuse(lora_mode: str) -> bool:
+    """``BlockLoraSource(fuse=...)`` for a task LoRA streamed under ``--low-ram``.
+
+    ``fused`` fuses each block's delta at bind (dequantize, add, re-quantize); ``unfused`` feeds the
+    factors to run-time adapters on the streamed block, so the quantized weights stay as stored.
+    The distilled LoRA is always fused (rank 384 / 450 on every block linear).
+    """
+    return lora_mode != "unfused"
 
 
 def reject_negative_prompt(negative_prompt: str | None, pipeline_name: str) -> None:
@@ -563,7 +566,6 @@ class BasePipeline:
 
                 return apply_compute_dtype_from_env(_impl(transformer_path, low_ram_streaming=self.low_ram_streaming))
 
-            # Before the --low-ram branch, so the note that unfused does not apply there is printed.
             unfused = unfused_loras_requested(self.lora_mode, self.low_ram_streaming)
             if self.low_ram_streaming:
                 from ltx_core_mlx.loader.block_streaming import BlockLoraSource
@@ -584,6 +586,7 @@ class BasePipeline:
                             block_prefix=LTXV_LORA_BLOCK_PREFIX,
                             strength=strength,
                             sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+                            fuse=streamed_lora_fuse(self.lora_mode),
                         )
                     )
                 object.__setattr__(model, "_lora_sources", sources)

@@ -114,6 +114,7 @@ def test_pending_loras_with_streaming_attaches_lora_sources(pipeline_stub):
         block_prefix=LTXV_LORA_BLOCK_PREFIX,
         strength=1.0,
         sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+        fuse=True,  # LTX2_LORA_MODE unset: fused at bind (#192: unfused streams fuse=False)
     )
     assert result is mock_model
     attached = object.__getattribute__(mock_model, "_lora_sources")
@@ -159,6 +160,7 @@ def test_pending_loras_with_streaming_multi_lora(pipeline_stub, loras):
             block_prefix=LTXV_LORA_BLOCK_PREFIX,
             strength=strength,
             sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+            fuse=True,
         )
     attached = object.__getattribute__(mock_model, "_lora_sources")
     assert set(mock_sources).issubset(set(attached))

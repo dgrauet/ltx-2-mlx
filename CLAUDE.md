@@ -1349,7 +1349,7 @@ before any model load and turns `GatedRepoError` into a `PermissionError` naming
 `Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler` at a fixed strength of 0.5
 (`DETAILING_LORA_STRENGTH`, not a user knob) to the resident distilled transformer right before
 stage 2, mirroring `ICLoraPipeline._fuse_loras`: under `--low-ram` it appends a `BlockLoraSource`
-(fused per block bind); otherwise it fuses in place and re-quantizes, since stage 1 is finished
+(fused per block bind, or run-time adapters with `LTX2_LORA_MODE=unfused`); otherwise it fuses in place and re-quantizes, since stage 1 is finished
 and the transformer is never reused clean afterward.
 
 **Audio.** A stage-2 audio state is created and denoised jointly with the video (as upstream), but
@@ -1720,11 +1720,27 @@ fails before any work rather than when the first LoRA is attached.
 | `--dfr` detailing LoRA (`DFRPipeline._attach_detailing_lora`) | adapters | the temporal rounds detach them in place (no DiT reload); the spatial epilogue re-attaches |
 | `generate --lora` on a resident DiT (`_pending_loras`) | adapters | the DiT is loaded as usual, then the LoRAs are attached |
 | distilled LoRA (stage 2 of `--two-stage`, `--two-stages-hq`, `a2v`, `keyframe`; `ic-lora` dev mode) | **fused** | rank 384 / 450 on every block linear: as adapters it would stay resident and add work to every forward |
-| `--low-ram` (any LoRA) | **fused per block at bind** | the fused copy is thrown away after each block runs; a note is printed |
+| `--low-ram` (task LoRAs: `--lora`, IC-LoRAs, detailing LoRA) | adapters on the streamed block | see "Unfused LoRAs under `--low-ram`" below; the distilled LoRA still fuses at bind |
 
 Cost: per adapted layer, `rank * (in + out)` multiply-adds per token against `in * out` for the layer
 (rank 128 on a 4096 x 4096 projection: +6 %; on the 4096 x 16384 feed-forward: +4 %), and the factors
 stay resident (the LoRA file's size, e.g. 1.3 GB for a rank-128 IC-LoRA in bf16).
+
+**Unfused LoRAs under `--low-ram`** (#192). The streamed pipelines add each task LoRA as a
+`BlockLoraSource(fuse=False)` (`streamed_lora_fuse(lora_mode)`); `fuse=True` sources (the default, and
+always the distilled LoRA) keep the bind-time fusion. Before each forward,
+`StreamingLTXModel._sync_lora_adapters` lays out adapters on the shared block for the current
+`fuse=False` sources, through `attach_loras` with zero factors: per targeted layer, the sources' ranks
+stacked in order, each at its largest rank over all blocks. It acts only when that set changes (a
+pipeline adds or drops a source), detaching the previous layout and retracing the compiled block.
+`BlockStreamer.bind` then loads each block's factors next to its weights
+(`_lora_factors_for_block`): `B` scaled by the strength in float32, zeros where a block has no factors
+for a layer or a smaller rank, so the parameter tree and the compiled graph stay fixed. The quantized
+weights are bound as stored (no dequantize / re-quantize per bind), and `cast_dtype` casts the
+factors with the module's other float parameters. Tests: `tests/test_unfused_lora_streaming.py`
+(streamed vs resident `attach_loras` on the tiny model in bf16 and q8, rank padding and a layer
+missing from a block, two stacked sources, fused + unfused sources together, clearing the sources
+restores the base output and plain layers, compute dtype).
 
 Tests: `tests/test_unfused_lora.py` (adapter vs dense `W + B @ A`; on a q8 layer and on the tiny q8
 DiT, fuse + re-quantize vs unfused against a float32 reference; stacking and reverse-order detach;

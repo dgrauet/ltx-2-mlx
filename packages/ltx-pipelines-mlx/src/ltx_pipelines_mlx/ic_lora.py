@@ -37,7 +37,7 @@ from ltx_core_mlx.model.upsampler import LatentUpsampler
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
-from ltx_pipelines_mlx._base import BasePipeline, unfused_loras_requested
+from ltx_pipelines_mlx._base import BasePipeline, streamed_lora_fuse, unfused_loras_requested
 from ltx_pipelines_mlx.iclora_utils import (
     append_ic_lora_reference_video_conditionings,
     read_lora_reference_downscale_factor,
@@ -229,13 +229,16 @@ class ICLoraPipeline(BasePipeline):
             from ltx_core_mlx.loader.block_streaming import BlockLoraSource
 
             sources: list = list(object.__getattribute__(self.dit, "_lora_sources"))
-            for lora_path, strength in lora_paths:
+            n_task = len(self._lora_paths)  # _effective_lora_paths appends the distilled LoRA last
+            for i, (lora_path, strength) in enumerate(lora_paths):
                 sources.append(
                     BlockLoraSource(
                         lora_path,
                         block_prefix=LTXV_LORA_BLOCK_PREFIX,
                         strength=strength,
                         sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+                        # Task IC-LoRAs follow LTX2_LORA_MODE; the distilled LoRA always fuses.
+                        fuse=streamed_lora_fuse(self.lora_mode) if i < n_task else True,
                     )
                 )
                 logger.info(f"Attached LoRA streamer: {lora_path} (strength={strength})")

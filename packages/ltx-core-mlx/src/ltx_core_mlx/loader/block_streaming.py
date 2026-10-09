@@ -20,9 +20,11 @@ Architecture
 - A pipeline uses a single shared block module and a :class:`BlockStreamer`,
   passing ``block_provider`` to :meth:`LTXModel.__call__` so the iteration
   loop fetches the bound block per index.
-- LoRA fusion can be done up-front into the safetensors-derived dict.
-  We do not yet support on-the-fly LoRA fusion per block; the upstream
-  cost (matmul on GPU per block) is small but the plumbing is.
+- LoRAs come in as :class:`BlockLoraSource` s. By default each bound block gets its LoRA
+  delta fused in (dequantize -> ``W + B @ A`` -> re-quantize). A source built with
+  ``fuse=False`` (``LTX2_LORA_MODE=unfused``) instead hands its ``A`` / ``B`` factors to
+  run-time adapters on the shared block (:mod:`ltx_core_mlx.loader.lora_adapters`): the
+  quantized weights stay as stored, so a small LoRA is not lost to re-quantization.
 
 Memory profile (LTX-2.3 22B bf16)
 ---------------------------------
@@ -68,6 +70,9 @@ class BlockLoraSource:
         sd_ops: Optional :class:`SDOps` to remap raw safetensors keys
             (e.g. ComfyUI/diffusers → MLX naming via
             ``LTXV_LORA_COMFY_RENAMING_MAP``).
+        fuse: ``True`` (default) fuses each block's delta into its weights at
+            bind; ``False`` applies it through run-time adapters instead
+            (``LTX2_LORA_MODE=unfused``, see :class:`StreamingLTXModel`).
     """
 
     def __init__(
@@ -76,8 +81,11 @@ class BlockLoraSource:
         block_prefix: str,
         strength: float = 1.0,
         sd_ops=None,
+        fuse: bool = True,
     ) -> None:
         self.strength = strength
+        self.fuse = fuse
+        self._ranks: dict[str, int] | None = None
         self.block_prefix = block_prefix
         self._lora_path = str(lora_path)
         self._sd_ops = sd_ops
@@ -124,9 +132,38 @@ class BlockLoraSource:
             out[f"{param_name}.lora_B.weight"] = self._lora_data[slots["b"]]
         return out
 
+    def ranks(self) -> dict[str, int]:
+        """Largest rank per block-relative layer path, over every block (the adapter layout)."""
+        if self._ranks is None:
+            ranks: dict[str, int] = {}
+            for block in self._block_keys.values():
+                for param_name, slots in block.items():
+                    if "a" in slots and "b" in slots:
+                        rank = int(self._lora_data[slots["a"]].shape[0])
+                        ranks[param_name] = max(ranks.get(param_name, 0), rank)
+            self._ranks = ranks
+        return self._ranks
+
+    def factor_dtype(self) -> mx.Dtype:
+        """Storage dtype of the LoRA factors (the dtype the adapters are laid out in)."""
+        for block in self._block_keys.values():
+            for slots in block.values():
+                if "a" in slots:
+                    return self._lora_data[slots["a"]].dtype
+        return mx.bfloat16
+
+    def get_block_factors(self, block_idx: int) -> dict[str, tuple[mx.array, mx.array]]:
+        """``{layer path: (A, B)}`` for one block, as stored (strength not applied)."""
+        out: dict[str, tuple[mx.array, mx.array]] = {}
+        for param_name, slots in self._block_keys.get(block_idx, {}).items():
+            if "a" in slots and "b" in slots:
+                out[param_name] = (self._lora_data[slots["a"]], self._lora_data[slots["b"]])
+        return out
+
     def close(self) -> None:
         self._lora_data = {}
         self._block_keys = {}
+        self._ranks = None
 
 
 class BlockStreamer:
@@ -242,8 +279,12 @@ class BlockStreamer:
             self._weights = self._reload_dict()
         weights = [(param_name, self._weights[full_key]) for full_key, param_name in self._block_key_map[idx]]
 
-        if lora_sources:
-            weights = self._fuse_lora_into_block(weights, idx, lora_sources)
+        fused_sources = [src for src in lora_sources or [] if src.fuse]
+        unfused_sources = [src for src in lora_sources or [] if not src.fuse]
+        if fused_sources:
+            weights = self._fuse_lora_into_block(weights, idx, fused_sources)
+        if unfused_sources:
+            weights = weights + self._lora_factors_for_block(block, idx, unfused_sources)
 
         if cast_dtype is not None:
             prefixes = tuple(f"{name}." for name, _ in block.compute_modules())
@@ -287,6 +328,54 @@ class BlockStreamer:
 
         fused = apply_loras(block_sd, lora_sd_and_strengths)
         return list(fused.sd.items())
+
+    @staticmethod
+    def _lora_factors_for_block(
+        block: nn.Module,
+        idx: int,
+        lora_sources: list[BlockLoraSource],
+    ) -> list[tuple[str, mx.array]]:
+        """``lora_a`` / ``lora_b`` values of the shared block's adapters for block ``idx``.
+
+        The adapters were laid out by :meth:`StreamingLTXModel._sync_lora_adapters`: per layer,
+        the ranks of the sources stacked in order, each at the source's largest rank over all
+        blocks. A source with no factors for that layer in this block (or a smaller rank there)
+        contributes zeros, so the parameter shapes, and the compiled block, stay the same.
+        ``B`` is scaled by the strength in float32, as :func:`attach_loras` does.
+        """
+        from ltx_core_mlx.loader.lora_adapters import _in_out_features, _resolve
+
+        paths = sorted({path for src in lora_sources for path in src.ranks()})
+        per_source = [src.get_block_factors(idx) for src in lora_sources]
+        out: list[tuple[str, mx.array]] = []
+        for path in paths:
+            found = _resolve(block, path)
+            if found is None:
+                raise KeyError(f"LoRA layer '{path}' is not in the streamed block")
+            layer = found[2]
+            if "lora_a" not in layer:
+                raise RuntimeError(f"streamed block layer '{path}' has no LoRA adapter; sync the adapters first")
+            in_features, out_features = _in_out_features(layer)
+            dtype = layer["lora_a"].dtype
+            a_parts: list[mx.array] = []
+            b_parts: list[mx.array] = []
+            for src, factors in zip(lora_sources, per_source, strict=True):
+                rank = src.ranks().get(path, 0)
+                if rank == 0:
+                    continue
+                a = mx.zeros((rank, in_features), dtype=mx.float32)
+                b = mx.zeros((out_features, rank), dtype=mx.float32)
+                if path in factors:
+                    fa, fb = factors[path]
+                    r = int(fa.shape[0])
+                    a = mx.concatenate([fa.astype(mx.float32), a[r:]], axis=0) if r < rank else fa.astype(mx.float32)
+                    fb = fb.astype(mx.float32) * src.strength
+                    b = mx.concatenate([fb, b[:, r:]], axis=1) if r < rank else fb
+                a_parts.append(a)
+                b_parts.append(b)
+            out.append((f"{path}.lora_a", mx.concatenate(a_parts, axis=0).astype(dtype)))
+            out.append((f"{path}.lora_b", mx.concatenate(b_parts, axis=1).astype(dtype)))
+        return out
 
     def _reload_dict(self) -> dict[str, mx.array]:
         """Re-mmap all weight files into a fresh dict."""
@@ -360,6 +449,8 @@ class StreamingLTXModel(nn.Module):
         object.__setattr__(self, "_compiled_block", compiled)
         object.__setattr__(self, "_lora_sources", lora_sources or [])
         object.__setattr__(self, "_cast_dtype", None)
+        object.__setattr__(self, "_lora_adapters", None)
+        object.__setattr__(self, "_lora_layout", ())
         # The inner model's overflow guard drops the compute dtype through this wrapper,
         # so that later binds stop casting too (weak: the wrapper owns the model).
         object.__setattr__(model, "_compute_dtype_owner", weakref.ref(self))
@@ -382,9 +473,48 @@ class StreamingLTXModel(nn.Module):
         inner = super().__getattr__("inner")
         inner.set_sparse_attention(state)
 
+    def _sync_lora_adapters(self) -> None:
+        """Lay out run-time LoRA adapters on the shared block for the current unfused sources.
+
+        Pipelines add and remove :class:`BlockLoraSource` s by replacing ``_lora_sources``; this
+        runs before every forward and only acts when the set of ``fuse=False`` sources changed.
+        Each targeted layer of the shared block becomes an adapter (the class of
+        :func:`~ltx_core_mlx.loader.lora_adapters.attach_loras`) whose rank is the sum of the
+        sources' largest ranks for that layer; :meth:`BlockStreamer.bind` then loads each block's
+        factors into it. The compiled block is retraced, since the parameter tree changed.
+        """
+        from ltx_core_mlx.loader.lora_adapters import _in_out_features, _resolve, attach_loras
+        from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
+
+        sources = [src for src in object.__getattribute__(self, "_lora_sources") if not src.fuse]
+        layout = tuple(id(src) for src in sources)
+        if layout == object.__getattribute__(self, "_lora_layout"):
+            return
+        shared = object.__getattribute__(self, "_shared_block")
+        handle = object.__getattribute__(self, "_lora_adapters")
+        if handle is not None:
+            handle.detach()
+            handle = None
+        if sources:
+            sd: dict[str, mx.array] = {}
+            for path in sorted({p for src in sources for p in src.ranks()}):
+                found = _resolve(shared, path)
+                if found is None:
+                    continue  # attach_loras skips it too; bind would then raise on this layer
+                rank = sum(src.ranks().get(path, 0) for src in sources)
+                in_features, out_features = _in_out_features(found[2])
+                dtype = next(src.factor_dtype() for src in sources if path in src.ranks())
+                sd[f"{path}.lora_A.weight"] = mx.zeros((rank, in_features), dtype=dtype)
+                sd[f"{path}.lora_B.weight"] = mx.zeros((out_features, rank), dtype=dtype)
+            handle = attach_loras(shared, [LoraStateDictWithStrength(StateDict(sd=sd, size=0, dtype=set()), 1.0)])
+        object.__setattr__(self, "_lora_adapters", handle)
+        object.__setattr__(self, "_lora_layout", layout)
+        object.__setattr__(self, "_compiled_block", mx.compile(shared, inputs=shared))
+
     def __call__(self, *args, **kwargs):
         # Inject block_provider unless caller already passed one.
         if kwargs.get("block_provider") is None:
+            self._sync_lora_adapters()
             streamer = object.__getattribute__(self, "_streamer")
             shared = object.__getattribute__(self, "_shared_block")
             lora_sources = object.__getattribute__(self, "_lora_sources")

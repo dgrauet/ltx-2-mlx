@@ -409,22 +409,24 @@ def test_dfr_unfused_attach_and_in_place_detach(tmp_path, monkeypatch):
     assert pipe._detailing_adapters is None
 
 
-def test_dfr_unfused_is_ignored_under_low_ram(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(("mode", "fuse"), [("unfused", False), ("fused", True)])
+def test_dfr_detailing_lora_under_low_ram_follows_the_mode(tmp_path, monkeypatch, capsys, mode, fuse):
+    """Under --low-ram the detailing LoRA streams as a BlockLoraSource; unfused makes it fuse=False (#192)."""
     import ltx_pipelines_mlx.dfr as dfr_mod
     from tests.test_dfr import _write_25_pack
 
     _write_25_pack(tmp_path)
-    monkeypatch.setenv("LTX2_LORA_MODE", "unfused")
+    monkeypatch.setenv("LTX2_LORA_MODE", mode)
     pipe = dfr_mod.DFRPipeline(
         str(tmp_path), low_memory=False, low_ram_streaming=True, detailing_lora=str(tmp_path / "detail.safetensors")
     )
     pipe.dit = SimpleNamespace(_lora_sources=[])  # type: ignore[assignment]
     made = []
-    monkeypatch.setattr(dfr_mod, "BlockLoraSource", lambda path, **kw: made.append(path) or ("src", path))
+    monkeypatch.setattr(dfr_mod, "BlockLoraSource", lambda path, **kw: made.append((path, kw["fuse"])) or ("src", path))
     pipe._attach_detailing_lora()
-    assert made == [str(tmp_path / "detail.safetensors")]
+    assert made == [(str(tmp_path / "detail.safetensors"), fuse)]
     assert pipe._detailing_adapters is None
-    assert "does not apply under --low-ram" in capsys.readouterr().err
+    assert "does not apply" not in capsys.readouterr().err
 
 
 def _ic_pipe(tmp_path, model, lora_paths, *, dev_mode=False, distilled=None, lora_mode="fused"):
@@ -567,22 +569,43 @@ def test_a_bad_mode_fails_when_the_pipeline_is_built(tmp_path, monkeypatch, low_
         )
 
 
-def test_pending_loras_under_low_ram_keep_bind_fusion_and_say_so(tmp_path, monkeypatch, capsys):
-    """generate --lora --low-ram with unfused: BlockLoraSource as before, plus the note."""
+@pytest.mark.parametrize(("mode", "fuse"), [("unfused", False), ("fused", True)])
+def test_pending_loras_under_low_ram_stream_with_the_mode(tmp_path, monkeypatch, capsys, mode, fuse):
+    """generate --lora --low-ram: a BlockLoraSource per LoRA, fuse=False when unfused (#192)."""
     from pathlib import Path
     from unittest.mock import patch
 
     from ltx_pipelines_mlx._base import BasePipeline
 
     streamed = SimpleNamespace(_lora_sources=[])
-    stub = SimpleNamespace(verbose=False, low_ram_streaming=True, lora_mode="unfused", _pending_loras=[("l.st", 1.0)])
+    stub = SimpleNamespace(verbose=False, low_ram_streaming=True, lora_mode=mode, _pending_loras=[("l.st", 1.0)])
     stub._fuse_pending_loras = _no_fusion
     with (
         patch("ltx_pipelines_mlx.utils._orchestration.load_transformer", return_value=streamed),
         patch("ltx_pipelines_mlx.utils._orchestration.resolve_lora_path", side_effect=lambda p: p),
-        patch("ltx_core_mlx.loader.block_streaming.BlockLoraSource", side_effect=lambda p, **kw: ("src", p)),
+        patch(
+            "ltx_core_mlx.loader.block_streaming.BlockLoraSource", side_effect=lambda p, **kw: ("src", p, kw["fuse"])
+        ),
     ):
         dit = BasePipeline._load_transformer_with_optional_streaming(stub, Path("/fake/transformer.safetensors"))
     assert dit is streamed
-    assert streamed._lora_sources == [("src", "l.st")]
-    assert "does not apply under --low-ram" in capsys.readouterr().err
+    assert streamed._lora_sources == [("src", "l.st", fuse)]
+    assert "does not apply" not in capsys.readouterr().err
+
+
+def test_ic_lora_low_ram_unfused_streams_task_loras_unfused_and_the_distilled_lora_fused(tmp_path, monkeypatch):
+    import ltx_pipelines_mlx.ic_lora as ic_mod
+    from ltx_core_mlx.loader import block_streaming
+
+    made = []
+    monkeypatch.setattr(
+        block_streaming, "BlockLoraSource", lambda path, **kw: made.append((path, kw["fuse"])) or ("src", path)
+    )
+    pipe = ic_mod.ICLoraPipeline.__new__(ic_mod.ICLoraPipeline)
+    pipe.lora_mode = "unfused"
+    pipe.low_ram_streaming = True
+    pipe._lora_paths = [("task.safetensors", 1.0)]
+    pipe._effective_lora_paths = lambda: [("task.safetensors", 1.0), ("distilled.safetensors", 0.5)]
+    pipe.dit = SimpleNamespace(_lora_sources=[])
+    pipe._fuse_loras()
+    assert made == [("task.safetensors", False), ("distilled.safetensors", True)]

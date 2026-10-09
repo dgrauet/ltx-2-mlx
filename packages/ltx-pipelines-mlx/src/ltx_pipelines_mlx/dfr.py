@@ -61,7 +61,7 @@ from ltx_core_mlx.model.video_vae.tiling import DimensionTilingConfig, TileCount
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
 from ltx_core_mlx.utils.weights import apply_quantization
-from ltx_pipelines_mlx._base import resolve_distilled_nag, unfused_loras_requested
+from ltx_pipelines_mlx._base import resolve_distilled_nag, streamed_lora_fuse, unfused_loras_requested
 from ltx_pipelines_mlx.dfr_layout import (
     TemporalTilePlan,
     TilePrefix,
@@ -492,6 +492,7 @@ class DFRPipeline(DistilledPipeline):
                     block_prefix=LTXV_LORA_BLOCK_PREFIX,
                     strength=DETAILING_LORA_STRENGTH,
                     sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
+                    fuse=streamed_lora_fuse(self.lora_mode),
                 )
                 sources.append(source)
                 object.__setattr__(self.dit, "_lora_sources", sources)
