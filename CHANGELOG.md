@@ -10,6 +10,28 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.16.3](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.2...v0.16.3) (2026-10-09)
+
+
+### Features
+
+* distilled audio-to-video (a2v --distilled) ([#201](https://github.com/dgrauet/ltx-2-mlx/issues/201)) ([51a9967](https://github.com/dgrauet/ltx-2-mlx/commit/51a9967df86fd7a9811244a7bd9872155c370c02))
+* distilled extend (extend --distilled) ([#209](https://github.com/dgrauet/ltx-2-mlx/issues/209)) ([04e2dd0](https://github.com/dgrauet/ltx-2-mlx/commit/04e2dd00795fcceb3fae65694f7eb8d87fa92d45))
+* distilled retake (retake --distilled) ([#204](https://github.com/dgrauet/ltx-2-mlx/issues/204)) ([3e292d7](https://github.com/dgrauet/ltx-2-mlx/commit/3e292d7957e5d1f3540ae26eb624d7558ca049e6))
+* normalized attention guidance (nag) for the distilled path ([#207](https://github.com/dgrauet/ltx-2-mlx/issues/207)) ([88e1d35](https://github.com/dgrauet/ltx-2-mlx/commit/88e1d356e157561cbf0fbb949dd8c6a578118b6e))
+
+
+### Bug Fixes
+
+* **a2v:** evaluate the source audio tokens before freeing the audio encoder ([#208](https://github.com/dgrauet/ltx-2-mlx/issues/208)) ([9c8c05e](https://github.com/dgrauet/ltx-2-mlx/commit/9c8c05ebc33a2b3b59ea57cab84e366383f9534a))
+* **pipelines:** evaluate the retake source encode before the DiT loads, tile it like upstream ([#203](https://github.com/dgrauet/ltx-2-mlx/issues/203)) ([51b0332](https://github.com/dgrauet/ltx-2-mlx/commit/51b0332bd9d5f6560f8a34b2888daef33598d37a))
+
+
+### Documentation
+
+* align docs and CLI help with the code before 0.16.3 ([#210](https://github.com/dgrauet/ltx-2-mlx/issues/210)) ([00ca7c0](https://github.com/dgrauet/ltx-2-mlx/commit/00ca7c03fbef19c6d9f6ad43db69ec9b5716fd38))
+* generate --distilled with start and end images as a faster keyframe alternative on 2.5 ([#206](https://github.com/dgrauet/ltx-2-mlx/issues/206)) ([d70f6af](https://github.com/dgrauet/ltx-2-mlx/commit/d70f6afec9db6c06b2b57cf36b25ff9178767775))
+
 ## [0.16.2](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.1...v0.16.2) (2026-10-07)
 
 
