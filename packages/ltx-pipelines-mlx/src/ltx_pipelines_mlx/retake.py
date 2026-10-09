@@ -17,11 +17,13 @@ The class hosts both:
   than a separate ``ExtendPipeline`` class so the file structure stays
   isomorphic with upstream's ``retake.py``.
 
-Both modes share the same dev transformer, text encoding (positive +
-negative for CFG), and ``guided_denoise_loop`` invocation — they only
-differ in how the ``denoise_mask`` is constructed and whether new
-tokens are appended to the source latent. The distilled mode is wired
-into ``retake`` only; ``extend`` refuses it.
+On the default dev path both modes share the same dev transformer, text
+encoding (positive + negative for CFG), and ``guided_denoise_loop``
+invocation — they only differ in how the ``denoise_mask`` is constructed
+and whether new tokens are appended to the source latent. ``retake`` also
+has a distilled mode (``distilled=True``, upstream's default); the
+distilled ``extend`` lives in ``ExtendDistilledPipeline``
+(``extend_distilled.py``), and this class's ``extend`` refuses it.
 
 Ported from ltx-pipelines/src/ltx_pipelines/retake.py
 """

@@ -2,7 +2,7 @@
 
 Matches the reference architecture:
   Stage 1: Dev model + CFG at half resolution, audio frozen (encoded from input).
-  Stage 2: Dev + distilled LoRA fused, refine video + audio at full resolution.
+  Stage 2: Dev + distilled LoRA fused, refine the video at full resolution, audio still frozen.
 
 Requires the dev model + distilled LoRA weights (e.g. dgrauet/ltx-2.3-mlx-q8).
 
@@ -170,7 +170,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
     """Audio-to-Video two-stage generation pipeline.
 
     Stage 1: Dev model + CFG at half spatial resolution, audio frozen.
-    Stage 2: Dev + distilled LoRA fused, refine video + audio at full resolution.
+    Stage 2: Dev + distilled LoRA fused, refine the video at full resolution, audio still frozen.
 
     Inherits from TI2VidTwoStagesPipeline for dev model loading, LoRA fusion,
     upsampler, VAE encoder, and decoder management.

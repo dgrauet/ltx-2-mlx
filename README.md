@@ -7,8 +7,8 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **LTX-2.5** — pipeline coverage on 2.5 packs (`--distilled`, `--two-stage`, `--two-stages-hq`, `--one-stage`, `--dfr`, `keyframe`, `a2v`, `retake`, `extend`, `hdr-ic-lora`), auto-detected from the pack (no new flag), plus **auto-predicted duration** via the DurationHead (omit `-f`, or clamp with `--auto-duration MIN:MAX`). Only `ic-lora` / `lipdub` wait on official 2.5 task LoRAs. See [LTX-2.5 section](#ltx-25).
 - **Text-to-Video** — generate video + stereo 48kHz audio from a text prompt
 - **Image-to-Video** — animate a reference image; `--image PATH FRAME STRENGTH` is repeatable for multi-anchor I2V, and `FRAME` may be `last` or negative (counted from the end)
-- **Audio-to-Video** — generate video conditioned on an audio track
-- **Retake / Extend** — edit existing videos (regenerate segments, add frames)
+- **Audio-to-Video** — generate video conditioned on an audio track (`a2v`, dev + CFG; `a2v --distilled` for the fast distilled path, experimental)
+- **Retake / Extend** — edit existing videos (regenerate segments, add frames); `retake --distilled` / `extend --distilled` run on the distilled model, roughly 10–20× faster (experimental)
 - **Keyframe interpolation** — smooth transition between reference images
 - **IC-LoRA** — reference video conditioning (depth/pose/edges)
 - **HDR IC-LoRA** — single-stage ACEScct SDR-to-HDR (LTX-2.5 packs) producing an HLG BT.2020 10-bit mp4 + EXR frames
@@ -16,7 +16,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **Two-stage generation** — half-res → neural upscale → refine
 - **HQ generation** — res_2s second-order sampler + CFG/STG guidance
 - **Prompt Relay** — sequence local prompts over time within one generation (`--segment "text" [LEN]`); a training-free Gaussian penalty gates each prompt's tokens to a slice of the timeline via the video→text cross-attention. Works across all generate modes; on CFG modes the mask applies to the conditional pass only.
-- **Negative prompt (`--negative-prompt`)** — custom CFG negative on every CFG pipeline (`--one-stage` / `--two-stage` / `--two-stages-hq` / a2v / keyframe / retake / extend); defaults to the upstream `DEFAULT_NEGATIVE_PROMPT`. Distilled modes have no CFG and reject it.
+- **Negative prompt (`--negative-prompt`)** — custom CFG negative on every CFG pipeline (`--one-stage` / `--two-stage` / `--two-stages-hq` / a2v / keyframe / retake / extend); defaults to the upstream `DEFAULT_NEGATIVE_PROMPT`. Distilled modes have no CFG and reject it, except `generate --distilled` / `--dfr` with `--nag` (experimental Normalized Attention Guidance, applied inside the text cross-attentions).
 - **Prompt enhancement** — Gemma 3 12B rewrites short prompts into detailed descriptions
 - **Training** — LoRA fine-tuning with flow matching (T2V and V2V strategies)
 - **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers every `generate` mode including `--distilled` and `--dfr`, a2v / keyframe / ic-lora / hdr-ic-lora / lipdub / retake / extend; bind-time LoRA fusion supports custom distilled-lora-strength)
@@ -80,6 +80,9 @@ ltx-2-mlx retake --prompt "New action" --video source.mp4 --start 1 --end 3 -o r
 
 # Extend (add 2 latent frames after)
 ltx-2-mlx extend --prompt "Continue the scene" --video source.mp4 --extend-frames 2 -o extended.mp4
+
+# Distilled extend (no CFG, only the new window is denoised; experimental)
+ltx-2-mlx extend --distilled --prompt "Continue the scene" --video source.mp4 --extend-frames 4 -o extended_fast.mp4
 
 # Keyframe interpolation
 ltx-2-mlx keyframe --prompt "Smooth transition" --start frame1.png --end frame2.png --frame-rate 24 -o transition.mp4
@@ -171,7 +174,7 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 | `hdr-ic-lora` | supported, 2.5 only (single-stage ACEScct SDR-to-HDR; Experimental, validated end to end on real weights) |
 | `enhance` / `--enhance-prompt` | raises a clear error (Gemma 3-only) |
 | `--enable-teacache` | raises a clear error (not calibrated for 2.5) |
-| Prompt Relay | validated on 2.3 only |
+| Prompt Relay | supported — validated e2e on 2.5 `--distilled` and the `--dfr` base path; token ranges pinned against the pack's Gemma-4 tokenizer |
 | Modality tiling | validated on 2.5 `--distilled` (`--tile-frames 2`, unconditioned and with an end anchor) |
 | Diffusion video decoder | opt-in `--video-decoder diffusion` (experimental; auto-tiled above the decode budget, `--diffvae-tile` override); conv stays the default |
 

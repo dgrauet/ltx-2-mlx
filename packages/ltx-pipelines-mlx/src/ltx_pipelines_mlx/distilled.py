@@ -284,7 +284,8 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         """Turn on block-sparse video self-attention for stage 2 when ``LTX2_SOL_TAU`` asks for it.
 
         One tau per stage-2 step, matched to the step's sigma (the last tau repeats); the terminal sigma 0 is never
-        evaluated. Covers ``--distilled`` and ``--dfr``, whose stage 2 is this one.
+        evaluated. Covers every pipeline whose stage 2 is this one: ``generate --distilled`` / ``--dfr``,
+        ``a2v --distilled`` and ``extend --distilled``.
         """
         if self.sol_taus is None or self.dit is None:
             return None

@@ -188,16 +188,22 @@ def _build_tile_count_config(args: argparse.Namespace):
     )
 
 
-def _add_negative_prompt_arg(parser: argparse.ArgumentParser) -> None:
-    """Add ``--negative-prompt`` (CFG pipelines only)."""
+def _add_negative_prompt_arg(parser: argparse.ArgumentParser, *, rejected_by: str | None = "--distilled") -> None:
+    """Add ``--negative-prompt`` (CFG pipelines only).
+
+    Args:
+        parser: Subcommand parser.
+        rejected_by: The distilled mode flag(s) of this subcommand that refuse it, or ``None``
+            when the subcommand has no distilled mode.
+    """
+    tail = "CFG pipelines only." if rejected_by is None else f"CFG pipelines only: rejected by {rejected_by}."
     parser.add_argument(
         "--negative-prompt",
         default=None,
         help=(
             "Negative prompt for CFG: what should not appear in the video. Default: the upstream "
             "DEFAULT_NEGATIVE_PROMPT (common artifacts and quality issues). An empty string "
-            'encodes "" verbatim. CFG pipelines only: rejected by --distilled and --dfr '
-            "unless --nag is set."
+            f'encodes "" verbatim. {tail}'
         ),
     )
 
@@ -269,7 +275,7 @@ def _add_teacache_args(parser: argparse.ArgumentParser) -> None:
         "--enable-teacache",
         action="store_true",
         help=(
-            "generate --two-stage / --two-stages-hq and a2v only (LTX-2.3 packs): enable "
+            "generate --two-stage / --two-stages-hq and a2v (not --distilled) only (LTX-2.3 packs): enable "
             "TeaCache stage-1 acceleration (opt-in, ~1.46x speedup on Euler at default "
             "thresh; see CLAUDE.md)"
         ),
@@ -507,6 +513,10 @@ _RETAKE_COST_EPILOG = (
     "every pass, so retaking 1 latent frame of a 10 s clip costs the same as retaking all of it. "
     "An [estimate] line on stderr states the work before step 1 and a time projection after it."
 )
+_EXTEND_COST_EPILOG = (
+    _RETAKE_COST_EPILOG + " extend --distilled is the exception: it denoises only the new window (the last 25 source "
+    "frames + the appended ones)."
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -730,7 +740,7 @@ examples:
     gen.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30 standard, 15 HQ)")
     gen.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 steps (default: 3)")
     gen.add_argument("--cfg-scale", type=float, default=None, help="CFG guidance scale (default: 3.0)")
-    _add_negative_prompt_arg(gen)
+    _add_negative_prompt_arg(gen, rejected_by="--distilled and --dfr unless --nag is set")
     _add_nag_args(gen)
     gen.add_argument(
         "--stg-scale",
@@ -857,7 +867,7 @@ examples:
     ext = sub.add_parser(
         "extend",
         help="[beta] Add frames before or after an existing video",
-        epilog=_RETAKE_COST_EPILOG,
+        epilog=_EXTEND_COST_EPILOG,
     )
     _add_base_args(ext)
     ext.add_argument("--video", "-v", required=True, help="Source video file")
@@ -926,7 +936,7 @@ examples:
     kf.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
     kf.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
     kf.add_argument("--cfg-scale", type=float, default=None, help="Override CFG scale (default: 3.0 video, 7.0 audio)")
-    _add_negative_prompt_arg(kf)
+    _add_negative_prompt_arg(kf, rejected_by=None)
     kf.add_argument("--stg-scale", type=float, default=None, help="Override STG scale (default: 1.0)")
     kf.add_argument(
         "--dev-transformer",

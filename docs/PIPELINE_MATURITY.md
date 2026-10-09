@@ -36,9 +36,10 @@ quality consistency depends on input alignment.
 ### 🔴 Experimental
 
 Recently ported, limited validation, or known model-level quality
-limitations. The pipeline itself runs correctly (math is upstream-iso), but
-the **output quality** depends on a third-party LoRA that may itself be
-pre-1.0 or have known artifacts.
+limitations. Some entries run correctly (math is upstream-iso) but their
+**output quality** depends on a third-party LoRA that may itself be pre-1.0
+or have known artifacts; others are new local paths (the distilled `a2v` /
+`retake` / `extend` modes, NAG) validated on a few scenarios only.
 
 Pin a specific version if you depend on the current behaviour — semantic
 backwards compatibility is best-effort, not guaranteed, on this tier.
