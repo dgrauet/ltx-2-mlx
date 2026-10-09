@@ -10,6 +10,13 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.16.4](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.3...v0.16.4) (2026-10-09)
+
+
+### Features
+
+* **core:** unfused LoRAs under --low-ram block streaming ([#213](https://github.com/dgrauet/ltx-2-mlx/issues/213)) ([9e4a1a5](https://github.com/dgrauet/ltx-2-mlx/commit/9e4a1a54194460547a103334b5e06382724fbba6)), closes [#192](https://github.com/dgrauet/ltx-2-mlx/issues/192)
+
 ## [0.16.3](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.2...v0.16.3) (2026-10-09)
 
 
