@@ -202,10 +202,9 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             return
 
         if self.dit is None:
-            transformer_path = self.model_dir / "transformer.safetensors"
-            if not transformer_path.exists():
-                transformer_path = self._resolve_safetensors(self.model_dir, "transformer-distilled")
-            self.dit = self._load_transformer_with_optional_streaming(transformer_path)
+            self.dit = self._load_transformer_with_optional_streaming(
+                self._resolve_distilled_transformer(self.model_dir)
+            )
 
         self._load_vae_encoder()
 

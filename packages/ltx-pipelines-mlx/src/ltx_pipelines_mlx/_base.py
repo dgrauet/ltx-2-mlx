@@ -540,6 +540,16 @@ class BasePipeline:
             return versioned[-1]
         return model_dir / f"{stem}.safetensors"
 
+    @classmethod
+    def _resolve_distilled_transformer(cls, model_dir: Path) -> Path:
+        """Return the distilled transformer checkpoint of a pack.
+
+        ``transformer.safetensors`` when the pack ships a single transformer, else the
+        (possibly versioned) ``transformer-distilled*.safetensors`` via :meth:`_resolve_safetensors`.
+        """
+        single = model_dir / "transformer.safetensors"
+        return single if single.exists() else cls._resolve_safetensors(model_dir, "transformer-distilled")
+
     def _load_transformer_with_optional_streaming(self, transformer_path: Path) -> LTXModel:
         """Load a transformer from ``transformer_path``; honors ``_pending_loras``.
 
@@ -720,11 +730,7 @@ class BasePipeline:
 
         # Stage 1: DiT (largest component); LoRA fusion happens inside the wrapper.
         if self.dit is None:
-            transformer_path = model_dir / "transformer.safetensors"
-            if not transformer_path.exists():
-                transformer_path = self._resolve_safetensors(model_dir, "transformer-distilled")
-
-            self.dit = self._load_transformer_with_optional_streaming(transformer_path)
+            self.dit = self._load_transformer_with_optional_streaming(self._resolve_distilled_transformer(model_dir))
 
         # Stage 2: VAE + audio (smaller components)
         self._load_decoders()

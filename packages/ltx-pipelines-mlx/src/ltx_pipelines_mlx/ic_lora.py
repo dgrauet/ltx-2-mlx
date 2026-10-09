@@ -139,9 +139,7 @@ class ICLoraPipeline(BasePipeline):
             if self.dev_mode and self.dev_transformer_name:
                 transformer_path = model_dir / self.dev_transformer_name
             else:
-                transformer_path = model_dir / "transformer.safetensors"
-                if not transformer_path.exists():
-                    transformer_path = self._resolve_safetensors(model_dir, "transformer-distilled")
+                transformer_path = self._resolve_distilled_transformer(model_dir)
             self.dit = self._load_transformer_with_optional_streaming(transformer_path)
 
         # VAE encoder (for encoding control videos and I2V images)
@@ -321,10 +319,7 @@ class ICLoraPipeline(BasePipeline):
         self.dit = None
         aggressive_cleanup()
 
-        transformer_path = self.model_dir / "transformer.safetensors"
-        if not transformer_path.exists():
-            transformer_path = self._resolve_safetensors(self.model_dir, "transformer-distilled")
-        self.dit = self._load_transformer_with_optional_streaming(transformer_path)
+        self.dit = self._load_transformer_with_optional_streaming(self._resolve_distilled_transformer(self.model_dir))
         logger.info("Reloaded clean transformer for Stage 2")
 
     def _create_conditionings(
