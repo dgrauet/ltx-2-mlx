@@ -500,10 +500,7 @@ class RetakePipeline(BasePipeline):
 
     def _load_distilled_transformer(self) -> LTXModel:
         """Load the distilled transformer, resolved as :meth:`DistilledPipeline.load` does."""
-        transformer_path = self.model_dir / "transformer.safetensors"
-        if not transformer_path.exists():
-            transformer_path = self._resolve_safetensors(self.model_dir, "transformer-distilled")
-        return self._load_transformer_with_optional_streaming(transformer_path)
+        return self._load_transformer_with_optional_streaming(self._resolve_distilled_transformer(self.model_dir))
 
     def _guided_denoise(
         self,
