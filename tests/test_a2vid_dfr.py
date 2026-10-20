@@ -20,7 +20,6 @@ def _pack(tmp_path) -> str:
 
 def test_method_resolution_mixes_the_two_pipelines():
     assert A2VidDFRPipeline.generate_two_stage is DFRPipeline.generate_two_stage
-    assert A2VidDFRPipeline.generate_and_save is A2VidDistilledPipeline.generate_and_save
     assert A2VidDFRPipeline._stage1_audio_state is A2VidDistilledPipeline._stage1_audio_state
     assert A2VidDFRPipeline._stage2_audio_state is A2VidDistilledPipeline._stage2_audio_state
 
@@ -109,3 +108,17 @@ def test_default_detailing_lora_is_dfrs():
 
     args = cli._build_parser().parse_args(["a2v", "-p", "x", "--audio", "a.wav", "--frame-rate", "24", "-o", "o.mp4"])
     assert args.detailing_lora == DEFAULT_DETAILING_LORA and args.dfr is False
+
+
+def test_refuses_a_23_pack_before_encoding_the_audio(tmp_path, monkeypatch):
+    (tmp_path / "embedded_config.json").write_text(json.dumps({"transformer": {"num_layers": 48}}))
+    pipe = A2VidDFRPipeline(model_dir=str(tmp_path), detailing_lora=str(tmp_path / "x.safetensors"))
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the source audio must not be encoded")
+
+    monkeypatch.setattr(A2VidDistilledPipeline, "generate_and_save", must_not_run)
+    with pytest.raises(ValueError, match="use_keyframes_abs_pos_embedding"):
+        pipe.generate_and_save(
+            prompt="a singer", output_path=str(tmp_path / "o.mp4"), audio_path="song.wav", frame_rate=24.0
+        )

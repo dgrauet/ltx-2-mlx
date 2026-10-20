@@ -903,4 +903,4 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
         return video_latent, audio_latent
 
 
-__all__ = ["DistilledPipeline"]
+__all__ = ["DistilledPipeline", "Stage1Result"]

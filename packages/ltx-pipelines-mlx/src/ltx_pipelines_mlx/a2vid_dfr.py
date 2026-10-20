@@ -13,6 +13,8 @@ not offered here.
 
 from __future__ import annotations
 
+from typing import Any
+
 import mlx.core as mx
 
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState
@@ -38,6 +40,18 @@ class A2VidDFRPipeline(A2VidDistilledPipeline, DFRPipeline):
     ``generate_two_stage`` (canvas, keyframe slots, detailing stage 2) and the constructor come from
     ``DFRPipeline``.
     """
+
+    def generate_and_save(self, *args: Any, **kwargs: Any) -> str:  # type: ignore[override]
+        """:meth:`A2VidDistilledPipeline.generate_and_save`, refusing a pack without keyframe slots first.
+
+        DFR refuses such a pack (e.g. any LTX-2.3 pack) in ``generate_two_stage``; checking here
+        fails before the audio encoder is loaded and the source track encoded.
+
+        Raises:
+            ValueError: on a pack without the keyframe embedding, before any model is loaded.
+        """
+        self._require_generated_keyframes_support([1])
+        return super().generate_and_save(*args, **kwargs)
 
     def _frozen_audio_state(
         self,
