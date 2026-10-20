@@ -39,6 +39,7 @@ Everything else is in [Common flags](#common-flags).
 - **Own flags:** `--stage1-steps` (8), `--stage2-steps` (3), `--nag` with `--negative-prompt` (experimental, see [NAG](#negative-prompt-without-cfg-nag)). No CFG, so `--cfg-scale`, `--stg-scale` and TeaCache do not apply, and `--negative-prompt` alone is rejected.
 - **Example:** `ltx-2-mlx generate --distilled -p "a fox in the forest" -H 512 -W 768 -f 49 --frame-rate 24 -o fox.mp4`
 - **Notes:** fastest mode. Quality sits slightly below the dev + CFG variants.
+- **Preview, then finish (Python API):** `DistilledPipeline.generate_two_stage(..., return_stage1=True)` also returns the run's `Stage1Result`; passing it back as `stage1=` skips the stage-1 loop and runs only the upsample and stage 2, bit-identical to a plain render of the same request. A cheap preview is `stage2_steps=1`. Only the result's `video_tokens`, `audio_tokens`, `generated_keyframes` and `latent_dims` are read, so an app can save those arrays however it likes and rebuild the result; a result whose shapes do not fit the request raises `ValueError`. Keying a saved stage 1 to its prompt and seed is the app's job (#143).
 
 ### `generate --two-stage`
 
