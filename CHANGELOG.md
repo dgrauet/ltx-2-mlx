@@ -10,6 +10,34 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.17.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.3...v0.17.0) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* generate --distilled / --dfr with --segment now also gates audio_attn2 (audio relay strength 1.0 by default, as the reference ComfyUI node); --relay-audio-strength 0 reproduces the previous renders bit for bit. The CFG modes keep the video-only relay by default.
+
+### Features
+
+* **core:** unfused LoRAs under --low-ram block streaming ([#213](https://github.com/dgrauet/ltx-2-mlx/issues/213)) ([9e4a1a5](https://github.com/dgrauet/ltx-2-mlx/commit/9e4a1a54194460547a103334b5e06382724fbba6)), closes [#192](https://github.com/dgrauet/ltx-2-mlx/issues/192)
+* **pipelines:** audio-to-video on the DFR base path (a2v --dfr) ([#219](https://github.com/dgrauet/ltx-2-mlx/issues/219)) ([5fed9e2](https://github.com/dgrauet/ltx-2-mlx/commit/5fed9e2a588102c231658d2a2b7be1ef7bf350b4))
+* **pipelines:** capture and resume the distilled stage 1 (return_stage1 / stage1) ([#217](https://github.com/dgrauet/ltx-2-mlx/issues/217)) ([fa79407](https://github.com/dgrauet/ltx-2-mlx/commit/fa79407684ec3d5cc3955228b9e0a7312093e166))
+* prompt relay on the audio cross-attention (audio_attn2) ([#218](https://github.com/dgrauet/ltx-2-mlx/issues/218)) ([0879826](https://github.com/dgrauet/ltx-2-mlx/commit/087982635bc25d9037367d204e39a56db73b0254))
+
+
+### Bug Fixes
+
+* **ic-lora:** run stage 2 on the reloaded clean transformer ([#220](https://github.com/dgrauet/ltx-2-mlx/issues/220)) ([5438924](https://github.com/dgrauet/ltx-2-mlx/commit/5438924f8cf950e6cad25549bc32612da5999548))
+* **pipelines:** evaluate the image encode and the a2v upsample before their encoder is freed ([#216](https://github.com/dgrauet/ltx-2-mlx/issues/216)) ([aaa3d51](https://github.com/dgrauet/ltx-2-mlx/commit/aaa3d5128cd1390ca543ab98e7d1abe4308e6274))
+* **pipelines:** refuse stage-1 resume on DFR and 2.3 packs before the a2v --dfr audio encode ([#224](https://github.com/dgrauet/ltx-2-mlx/issues/224)) ([4fee375](https://github.com/dgrauet/ltx-2-mlx/commit/4fee3756660860b47e5a4a21580226cda7460847))
+* **pipelines:** retake regenerates the audio tokens that overlap the window in time ([#222](https://github.com/dgrauet/ltx-2-mlx/issues/222)) ([fc399f3](https://github.com/dgrauet/ltx-2-mlx/commit/fc399f3e911fff960aaa23b54288b4062d6e48ea))
+
+
+### Documentation
+
+* align docs and CLI help with the code before 0.17.0 ([#225](https://github.com/dgrauet/ltx-2-mlx/issues/225)) ([e7e03fc](https://github.com/dgrauet/ltx-2-mlx/commit/e7e03fcbdaa6993368237c40b4d7aa4055b6ac0f))
+* ic-lora runs on 2.5 with the published 2.5 IC-LoRAs ([#221](https://github.com/dgrauet/ltx-2-mlx/issues/221)) ([1b99b83](https://github.com/dgrauet/ltx-2-mlx/commit/1b99b83f7934ad359a2d82b509b67220c35de23f))
+
 ## [0.16.3](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.2...v0.16.3) (2026-10-09)
 
 
