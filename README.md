@@ -4,22 +4,22 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 
 ## Features
 
-- **LTX-2.5** — pipeline coverage on 2.5 packs (`--distilled`, `--two-stage`, `--two-stages-hq`, `--one-stage`, `--dfr`, `keyframe`, `a2v`, `retake`, `extend`, `ic-lora`, `hdr-ic-lora`), auto-detected from the pack (no new flag), plus **auto-predicted duration** via the DurationHead (omit `-f`, or clamp with `--auto-duration MIN:MAX`). Only `lipdub` waits on a 2.5 Dub-It LoRA; `ic-lora` runs with the IC-LoRAs Lightricks has published for 2.5. See [LTX-2.5 section](#ltx-25).
+- **LTX-2.5** — pipeline coverage on 2.5 packs (`--distilled`, `--two-stage`, `--two-stages-hq`, `--one-stage`, `--dfr`, `a2v`, `retake`, `extend`, `ic-lora`, `hdr-ic-lora`), auto-detected from the pack (no new flag), plus **auto-predicted duration** via the DurationHead (omit `-f`, or clamp with `--auto-duration MIN:MAX`). Only `lipdub` waits on a 2.5 Dub-It LoRA; `ic-lora` runs with the IC-LoRAs Lightricks has published for 2.5. See [LTX-2.5 section](#ltx-25).
 - **Text-to-Video** — generate video + stereo 48kHz audio from a text prompt
 - **Image-to-Video** — animate a reference image; `--image PATH FRAME STRENGTH` is repeatable for multi-anchor I2V, and `FRAME` may be `last` or negative (counted from the end)
 - **Audio-to-Video** — generate video conditioned on an audio track (`a2v`, dev + CFG; `a2v --distilled` for the fast distilled path and `a2v --dfr` on the DFR base path (2.5 packs), both experimental)
 - **Retake / Extend** — edit existing videos (regenerate segments, add frames); `retake --distilled` / `extend --distilled` run on the distilled model, roughly 10–20× faster (experimental)
-- **Keyframe interpolation** — smooth transition between reference images
+- **Interpolation between images** — `generate --two-stage` with each image bound as a guide (`--image PATH FRAME STRENGTH guide`) and `--refine-audio`; this replaces the `keyframe` command, removed following upstream v1.5.0
 - **IC-LoRA** — reference video conditioning (depth/pose/edges)
 - **HDR IC-LoRA** — single-stage ACEScct SDR-to-HDR (LTX-2.5 packs) producing an HLG BT.2020 10-bit mp4 + EXR frames
 - **LipDub** *(experimental)* — lip-dub a reference video by re-syncing visuals to the source audio
 - **Two-stage generation** — half-res → neural upscale → refine
 - **HQ generation** — res_2s second-order sampler + CFG/STG guidance
 - **Prompt Relay** — sequence local prompts over time within one generation (`--segment "text" [LEN]`); a training-free Gaussian penalty gates each prompt's tokens to a slice of the timeline via the video→text and audio→text cross-attentions (`--relay-audio-strength`: default 1.0 on `--distilled` / `--dfr`, 0 on the CFG modes). Works across all generate modes; on CFG modes the masks apply to the conditional pass only.
-- **Negative prompt (`--negative-prompt`)** — custom CFG negative on every CFG pipeline (`--one-stage` / `--two-stage` / `--two-stages-hq` / a2v / keyframe / retake / extend); defaults to the upstream `DEFAULT_NEGATIVE_PROMPT`. Distilled modes have no CFG and reject it, except `generate --distilled` / `--dfr` with `--nag` (experimental Normalized Attention Guidance, applied inside the text cross-attentions).
+- **Negative prompt (`--negative-prompt`)** — custom CFG negative on every CFG pipeline (`--one-stage` / `--two-stage` / `--two-stages-hq` / a2v / retake / extend); defaults to the upstream `DEFAULT_NEGATIVE_PROMPT`. Distilled modes have no CFG and reject it, except `generate --distilled` / `--dfr` with `--nag` (experimental Normalized Attention Guidance, applied inside the text cross-attentions).
 - **Prompt enhancement** — Gemma 3 12B rewrites short prompts into detailed descriptions
 - **Training** — LoRA fine-tuning with flow matching (T2V and V2V strategies)
-- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers every `generate` mode including `--distilled` and `--dfr`, a2v / keyframe / ic-lora / hdr-ic-lora / lipdub / retake / extend; bind-time LoRA fusion supports custom distilled-lora-strength)
+- **Block streaming (`--low-ram`)** — stream transformer blocks from disk so q8 fits 16 GB Macs and bf16 fits 32 GB Macs (covers every `generate` mode including `--distilled` and `--dfr`, a2v / ic-lora / hdr-ic-lora / lipdub / retake / extend; bind-time LoRA fusion supports custom distilled-lora-strength)
 - **Modality tiling (`--tile-frames N --tile-spatial M`)** — split video tokens into spatial+temporal tiles to cap O(N²) attention activations. Combined with `--low-ram`, unblocks long / HD / 4K generations on Mac Studio (64-128 GB) that would otherwise OOM.
 - **6 model packs** — bf16 / int8 / int4 for each of LTX-2.3 and LTX-2.5 (fits 16GB–64GB Macs)
 - **3 upsamplers** — spatial 2x, spatial 1.5x, temporal 2x
@@ -84,8 +84,9 @@ ltx-2-mlx extend --prompt "Continue the scene" --video source.mp4 --extend-frame
 # Distilled extend (no CFG, only the new window is denoised; experimental)
 ltx-2-mlx extend --distilled --prompt "Continue the scene" --video source.mp4 --extend-frames 4 -o extended_fast.mp4
 
-# Keyframe interpolation
-ltx-2-mlx keyframe --prompt "Smooth transition" --start frame1.png --end frame2.png --frame-rate 24 -o transition.mp4
+# Interpolate between two images (guides at the first and last frame)
+ltx-2-mlx generate --two-stage --prompt "Smooth transition" --image frame1.png 0 1.0 guide --image frame2.png last 1.0 guide \
+    --refine-audio -f 97 --frame-rate 24 -o transition.mp4
 
 # Prompt enhancement
 ltx-2-mlx enhance --prompt "a cat" --mode t2v
@@ -99,11 +100,10 @@ ltx-2-mlx generate -p "A cat" --two-stage -f 97 --frame-rate 24 -o cat.mp4 --mod
 # Block streaming: q8 model on 16 GB Mac
 ltx-2-mlx generate -p "A cat" --distilled -f 97 --frame-rate 24 -o cat.mp4 --model dgrauet/ltx-2.3-mlx-q8 --low-ram
 
-# Block streaming works on every generate mode + a2v / keyframe / ic-lora / hdr-ic-lora / retake / extend
+# Block streaming works on every generate mode + a2v / ic-lora / hdr-ic-lora / retake / extend
 ltx-2-mlx generate -p "A cat" -f 97 --frame-rate 24 -o cat.mp4 --two-stage --low-ram
 ltx-2-mlx generate -p "A cat" -f 97 --frame-rate 24 -o cat.mp4 --two-stages-hq --low-ram
 ltx-2-mlx a2v -p "music video" --audio music.wav --frame-rate 24 -o a2v.mp4 --low-ram
-ltx-2-mlx keyframe -p "transition" --start a.png --end b.png --frame-rate 24 -o kf.mp4 --low-ram
 ltx-2-mlx ic-lora -p "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 --frame-rate 24 --low-ram -o out.mp4
 
 # HDR IC-LoRA — SDR mp4 -> HLG master + ACEScg EXR frames (LTX-2.5 pack; gated LoRA repo)
@@ -167,7 +167,6 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 | `--two-stage` (dev + CFG) | supported (see above) |
 | `--two-stages-hq` (res_2s + CFG) | supported — validated e2e on 2.5 (deterministic, audio at healthy 2.3-level loudness) |
 | `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to an auto-predicted duration on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`/`--dfr`; `--auto-duration MIN:MAX` overrides the clamp. Not available on 2.3 packs (no `DurationHead` weights); `-f` stays required there |
-| `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
 | `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB). `a2v --distilled` / `a2v --dfr`: Experimental, validated e2e on 2.5 q8 |
 | `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames). `--low-ram` wired (mirrors upstream `offload_mode`): 49-frame retake that OOM'd now peaks at 13.8 GB |
 | `ic-lora` | runs with the IC-LoRAs Lightricks has published for 2.5 (`Lightricks/LTX-2.5-22b-IC-LoRA-*`); upstream's plans that keep the IC-LoRA in stage 2 (`stage_2_ic_lora=True`) are not ported |
@@ -265,7 +264,7 @@ minutes away. These flags decode a short window of latent frames from the in-pro
 prediction every N steps and write it as a self-contained animated WebP — a couple of
 seconds of real motion at the current denoise quality, so temporal problems show up at
 step 4 instead of minute 15. Available on every generating subcommand except `hdr-ic-lora`
-(`generate`, `a2v`, `retake`, `extend`, `keyframe`, `ic-lora`, `lipdub`).
+(`generate`, `a2v`, `retake`, `extend`, `ic-lora`, `lipdub`).
 
 ```
 --stepwise-image-output-dir DIR   Write per-step preview clips here
@@ -345,7 +344,7 @@ The number of frames lives on the `8k + 1` grid (VAE temporal compression 8x); a
 | 49 | 2.0s | 7 | |
 | 65 | 2.7s | 9 | |
 | 81 | 3.4s | 11 | |
-| 97 | 4.0s | 13 | **Default** for `keyframe` / `a2v` / `ic-lora` |
+| 97 | 4.0s | 13 | **Default** for `a2v` / `ic-lora` |
 | 121 | 5.0s | 16 | |
 | 145 | 6.0s | 19 | |
 | 161 | 6.7s | 21 | |
@@ -374,7 +373,7 @@ Weights are pre-converted to MLX format by [mlx-forge](https://github.com/dgraue
 | Package | Description |
 |---------|-------------|
 | `ltx-core-mlx` | Model library: DiT, VAE, audio, text encoder, conditioning, guidance |
-| `ltx-pipelines-mlx` | Generation pipelines: T2V, I2V, A2V, retake, extend, keyframe, two-stage, distilled, DFR, IC-LoRA, HDR IC-LoRA, LipDub |
+| `ltx-pipelines-mlx` | Generation pipelines: T2V, I2V, A2V, retake, extend, two-stage, distilled, DFR, IC-LoRA, HDR IC-LoRA, LipDub |
 | `ltx-trainer-mlx` | Training: LoRA fine-tuning with flow matching |
 
 ## Resources

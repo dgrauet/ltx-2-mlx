@@ -13,7 +13,7 @@ Start from what you have:
 
 - **Text only** → `generate --distilled` (fastest, 2.5 packs recommended) · `generate --two-stage` (dev + CFG, best default quality) · `generate --two-stages-hq` (res_2s sampler, slower) · `generate --one-stage` (native resolution ≤ 704 × 480, no upsampler).
 - **Text + one or more images** → the same `generate` modes (all five, `--dfr` included) with `--image PATH FRAME STRENGTH` (repeatable).
-- **Two images to interpolate between** → `keyframe` (dev + CFG) · on 2.5 packs also `generate --distilled` with a start and an end `--image` (about 4–6× faster, hardware per number on the `keyframe` card).
+- **Two images to interpolate between** → `generate --two-stage` with both images bound as guides and `--refine-audio` (dev + CFG; replaces the removed `keyframe` command) · on 2.5 packs also `generate --distilled` with a start and an end `--image` (faster; see [Interpolating between images](#interpolating-between-images)).
 - **A control video** (depth / canny / pose / motion tracks) → `ic-lora`; **an SDR clip to upgrade to HDR (2.5 packs)** → `hdr-ic-lora`.
 - **An audio track to drive the video** → `a2v` (dev + CFG) · `a2v --distilled` (distilled, no CFG, experimental) · `a2v --dfr` (DFR detail, no CFG, experimental).
 - **An existing video to change** → `retake` (a time range; `retake --distilled` runs the distilled model, experimental) · `extend` (add frames; `extend --distilled` continues it on the distilled path, experimental) · `lipdub` (re-sync lips to audio, experimental).
@@ -79,15 +79,19 @@ Everything else is in [Common flags](#common-flags).
 - **Cost (M2 Pro 32 GB, q8, `--low-ram`):** 768 × 512, 49 frames ≈ 277 s (8-step stage 1 at ~10.7 s/forward over 864 video tokens, 3-step stage 2 at ~53.5 s/forward over 4128 tokens — target + 2 keyframe slots + the half-res reference), peak Metal 14.0 GB, max RSS 10.8 GB. Frame 24 is visibly sharper (tree crowns, haze texture) than the plain `--distilled` render at the same seed. `--image` (I2V, frame 0 anchor) adds ~7 s. A 137-frame request pads to a 145-frame canvas (6 slots) and costs ≈ 783 s. `--video-decoder diffusion` at 1152 × 768, 25 frames runs untiled at ≈ 465 s, 12 GB peak Metal (the decoder now runs in its own bf16 whatever dtype the pipeline hands it; the first measurement, 22 GB, was the decode promoted to fp32 by an fp32 stage-2 latent). The keyframe-aware diffusion decode costs +58 % on the decode phase at 768 × 512 × 49 (157 s vs 100 s, 2 planes), same peak Metal. Temporal rounds at 768 × 512, 121 frames, `--no-audio`: `--temporal-upscalings 1` (241 frames @ 48 fps) ≈ 27 min (1599 s), `--temporal-upscalings 2` (481 @ 96) ≈ 67 min (4028 s). Spatial epilogue at 1536 × 1024, 49 frames, `--no-audio`: `--spatial-upscalings 2` ≈ 38 min (2272 s; epilogue 1941 s: one step on 2×2 tiles, then 4×4), peak Metal 11.2 GB; + `--temporal-upscalings 1` (97 frames @ 48 fps) ≈ 84 min (5015 s; epilogue 4251 s), peak Metal 16.8 GB.
 - **Notes:** on I2V, the first-frame keyframe marker is now applied consistently (see [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental)). `--segment` (Prompt Relay) auto-distributes over the padded canvas, not the requested duration (e.g. 145 frames for `-f 137`), so segment boundaries shift by the padding before the tail is trimmed — pass explicit segment lengths for exact boundaries. [Details](../CLAUDE.md#dfr-base-path-generate---dfr-25-packs-experimental).
 
-### `keyframe`
+### Interpolating between images
 
-- **Produces:** an interpolation between a start image and an end image. Dev model + CFG at half res, then a distilled refine.
-- **Packs:** 2.3 and 2.5 (2.5 needs `--dev-transformer transformer-dev.safetensors`). **Tier:** Stable.
-- **Required:** `--prompt`, `--output`, `--frame-rate`, `--start`, `--end` (image paths).
-- **Own flags:** `--frames` (97), `--start-strength` (1.0), `--end-strength` (1.0), `--stage1-steps`, `--stage2-steps`, `--cfg-scale` (3.0 video, 7.0 audio), `--negative-prompt`, `--stg-scale` (1.0), `--dev-transformer`, `--distilled-lora`, `--lora-strength` (1.0).
-- **Example:** `ltx-2-mlx keyframe -p "the camera pushes in" --start a.jpg --end b.jpg -f 97 --frame-rate 24 -o out.mp4`
-- **Notes:** the distilled model hallucinates on interpolation, so this pipeline always uses the dev model. Lower `--end-strength` gives the prompt more freedom to diverge from the end fixture.
-- **Distilled alternative (2.5 packs):** `generate --distilled --image start.png 0 1.0 --image end.png last 1.0` interpolated cleanly in a comparison against `keyframe` at 768 × 512, 97 frames (a front-to-three-quarter turn and a front-to-profile turn, seeds 5 and 24, `LTX2_COMPUTE_DTYPE=float16`). On one machine (M1 Max, three-quarter turn, seed 5) `keyframe` took 951 s (cold start included) and the distilled run 165 s, 5.8×; `keyframe` took 725 s and 712 s on the other two M1 Max runs, and the remaining distilled runs (168–177 s) ran on an M4 Pro, which is slower than the M1 Max on this workload, so the speed-up on one machine is at least ~4×. The first and last frames match their images about as closely as `keyframe`'s do (PSNR against the image, first / last frame: 35.7–36.0 / 31.5–32.8 dB for the distilled runs with the end anchor at 1.0, 34.5–34.9 / 31.3–33.6 dB for `keyframe`; anchors at 0.7 give 35.8–36.5 / 30.9–32.6 dB), and an end anchor at strength 0.7 instead of 1.0 changed little. The two paths take different routes between the poses: on the three-quarter turn the distilled run turned later in the clip, and on the profile turn it briefly went past profile before settling. The anchors at `frame_idx > 0` are soft, so a pose the motion cannot plausibly reach is blended rather than reached; keep `keyframe` for 2.3 packs and when the motion between the images matters more than the time. [Details](../CLAUDE.md#keyframe-interpolation-pipeline).
+There is no `keyframe` command any more: upstream LTX-2 v1.5.0 removed `KeyframeInterpolationPipeline`, and this port follows. Its replacement, upstream's too, is `generate --two-stage` with every image bound as a guide and the audio refined in stage 2:
+
+```bash
+ltx-2-mlx generate --two-stage -p "the camera pushes in" \
+  --image a.jpg 0 1.0 guide --image b.jpg last 1.0 guide \
+  --refine-audio -f 97 --frame-rate 24 -o out.mp4
+```
+
+Python: `TI2VidTwoStagesPipeline.generate_and_save(..., images=[ImageConditioningInput.guide("a.jpg", 0, 1.0), ImageConditioningInput.guide("b.jpg", -1, 1.0)], refine_audio=True)`. The old command ran 20 stage-1 steps by default; the replacement runs the two-stage default of 30, as upstream did (`--stage1-steps 20` gives the old count). The other flags are the [`generate --two-stage`](#generate---two-stage) ones; the old start and end strengths are the STRENGTH of each `--image`.
+
+On 2.5 packs, `generate --distilled --image start.png 0 1.0 --image end.png last 1.0` is a faster alternative. Against the old `keyframe` command at 768 × 512, 97 frames (a front-to-three-quarter turn and a front-to-profile turn, seeds 5 and 24, `LTX2_COMPUTE_DTYPE=float16`) it was at least ~4× faster on one machine (M1 Max, three-quarter turn, seed 5: 165 s against 951 s with the cold start included; the other two `keyframe` runs took 725 s and 712 s), and its first and last frames matched their images about as closely (PSNR against the image, first / last frame: 35.7–36.0 / 31.5–32.8 dB, against 34.5–34.9 / 31.3–33.6 dB). The two took different routes between the poses, and the anchors at `frame_idx > 0` are soft, so a pose the motion cannot plausibly reach is blended rather than reached.
 
 ### `ic-lora`
 
@@ -231,9 +235,9 @@ Run `ltx-2-mlx <subcommand> --help` for the exact spelling of these options.
 | `--diffvae-tile FRAMES HEIGHT WIDTH` | auto | Diffusion-decoder tile size, in pixel frames and pixels (multiples of 2 and 8; `0` leaves an axis untiled, `0 0 0` forces a single tile). | with `--video-decoder diffusion` |
 | `--lora PATH STRENGTH` | — | Extra LoRA weights, repeatable. A local `.safetensors` file or a HuggingFace repo id. Required on the IC-LoRA family. | `generate` modes, `ic-lora`, `lipdub` |
 | `--enhance-prompt` | off | Rewrite the prompt with Gemma before generating. Gemma 3 only, so it raises on 2.5 packs. | `generate` modes |
-| `--negative-prompt` | upstream `DEFAULT_NEGATIVE_PROMPT` | Negative prompt for CFG: what the video should avoid. One global prompt, even with `--segment`. `""` is encoded as an empty prompt, not replaced by the default. Rejected by `generate --distilled` / `--dfr` (unless `--nag` is set; there it has no default) and by `a2v --distilled` / `--dfr`, `retake --distilled` and `extend --distilled` (no CFG, no `--nag`). | CFG modes: `generate --one-stage` / `--two-stage` / `--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend`; `--distilled` / `--dfr` with `--nag` |
-| `--dev-transformer` | `transformer-dev.safetensors` on `generate`, unset elsewhere | Filename of the dev (non-distilled) transformer inside the pack. On `keyframe` and `ic-lora` there is no default, and on `ic-lora` passing it switches dev mode on. | `generate` modes, `keyframe`, `ic-lora` |
-| `--distilled-lora` | resolved from the pack; `ltx-2.3-22b-distilled-lora-384-1.1.safetensors` on `ic-lora` | Filename of the distilled LoRA used by the refine stage. | `generate` modes, `keyframe`, `ic-lora` |
+| `--negative-prompt` | upstream `DEFAULT_NEGATIVE_PROMPT` | Negative prompt for CFG: what the video should avoid. One global prompt, even with `--segment`. `""` is encoded as an empty prompt, not replaced by the default. Rejected by `generate --distilled` / `--dfr` (unless `--nag` is set; there it has no default) and by `a2v --distilled` / `--dfr`, `retake --distilled` and `extend --distilled` (no CFG, no `--nag`). | CFG modes: `generate --one-stage` / `--two-stage` / `--two-stages-hq`, `a2v`, `retake`, `extend`; `--distilled` / `--dfr` with `--nag` |
+| `--dev-transformer` | `transformer-dev.safetensors` on `generate`, unset elsewhere | Filename of the dev (non-distilled) transformer inside the pack. On `ic-lora` there is no default, and passing it switches dev mode on. | `generate` modes, `ic-lora` |
+| `--distilled-lora` | resolved from the pack; `ltx-2.3-22b-distilled-lora-384-1.1.safetensors` on `ic-lora` | Filename of the distilled LoRA used by the refine stage. | `generate` modes, `ic-lora` |
 | `--distilled-lora-strength` | 1.0 (0.5 on `ic-lora` dev mode) | Strength of that LoRA. Any value other than 1.0 forces bind-time fusion under `--low-ram`. | `generate` modes, `ic-lora` |
 
 ### Negative prompt without CFG (NAG)
@@ -276,7 +280,7 @@ would otherwise not fit. On a 32 GB Mac at typical token counts, prefer `--low-r
 | `--enable-teacache` | off | Timestep-aware residual caching in stage 1. About 1.46× on the Euler sampler and 1.78× on res_2s. The same seed gives a different render, often a different composition, so it cannot preview a plain render. [Details](../CLAUDE.md#teacache-opt-in-stage-1-acceleration). LTX-2.3 packs only (refused on 2.5). | `generate --two-stage`, `generate --two-stages-hq`, `a2v` (not `--distilled` / `--dfr`) |
 | `--teacache-thresh F` | 0.5 Euler, 1.0 res_2s | How aggressively steps are skipped. Higher is faster and lossier. Ignored without `--enable-teacache`. | with `--enable-teacache` |
 | `--stage2-steps N` | full table (3) | Fewer stage-2 refine steps. Takes the **last** N sigmas of the stage-2 table, so the refine re-noises less and always finishes at σ=0 (`1` → `[0.421875, 0.0]`, `2` → `[0.725, 0.421875, 0.0]`). A one-step refine gives a usable preview of the shot, not a softer copy of it. | every two-stage pipeline except `extend --distilled` (full 8 + 3 tables) |
-| `--stage1-steps N` | full table (8) | On a pipeline whose stage 1 uses the fixed distilled table, keeps σ=1.0 and then the **last** N sigmas of the table (`3` → `[1.0, 0.725, 0.421875, 0.0]`). On `--two-stage`, `--two-stages-hq`, `a2v` (without `--distilled`) and dev-mode `keyframe`, stage 1 uses the dynamic schedule instead and N is simply its step count. | every two-stage pipeline except `extend --distilled` (full 8 + 3 tables) |
+| `--stage1-steps N` | full table (8) | On a pipeline whose stage 1 uses the fixed distilled table, keeps σ=1.0 and then the **last** N sigmas of the table (`3` → `[1.0, 0.725, 0.421875, 0.0]`). On `--two-stage`, `--two-stages-hq`, `a2v` (without `--distilled`), stage 1 uses the dynamic schedule instead and N is simply its step count. | every two-stage pipeline except `extend --distilled` (full 8 + 3 tables) |
 | `LTX2_GEMMA_EVAL_EVERY` | 1 | Per-layer flush cadence in the Gemma forward, which keeps each Metal command buffer under the macOS GPU watchdog deadline. Set to `0` only if you have never seen a watchdog crash. [Details](../CLAUDE.md#metal-watchdog-mitigation). | all pipelines |
 | `LTX2_DIT_EVAL_EVERY` | 8 | Same guard for the DiT block loop: flush every N of the 48 blocks. `0` disables it. | all pipelines |
 | `LTX2_COMPUTE_DTYPE` | unset | Dtype for the inside of the DiT's attention and feed-forward modules. Unset, the blocks run in float32 (the F32 AdaLN tables promote them). `float16` keeps the residual stream and AdaLN modulation in float32 and runs the projections and attention in float16: on an M1 Max with the 2.5 q8 pack, a 576×1024×241 `--distilled` I2V render went from 701 s to 563 s. `bfloat16` is the precision upstream PyTorch uses. Off by default; a step whose output is not finite is recomputed without it. [Details](../CLAUDE.md#dit-compute-dtype-ltx2_compute_dtype). | all pipelines |
@@ -304,64 +308,64 @@ would otherwise not fit. On a 32 GB Mac at typical token counts, prefer `--low-r
 Columns are the cards above. `enhance`, `info`, `train`, `preprocess` and `slice`
 are utilities and have no column.
 
-| Flag | distilled | two-stage | hq | one-stage | dfr | keyframe | ic-lora | hdr-ic-lora | a2v | retake | extend | lipdub |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `--prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| `--output` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--model` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--gemma` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| `--seed` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--quiet` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--height` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ |
-| `--width` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ |
-| `--frame-rate` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `--frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
-| `--auto-duration` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--image` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ |
-| `--num-generated-keyframes` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--no-audio` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--video-decoder` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--diffvae-tile` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--lora` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| `--enhance-prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--negative-prompt` | with `--nag` | ✅ | ✅ | ✅ | with `--nag` | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ |
-| `--nag` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--nag-scale` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--nag-alpha` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--nag-tau` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--nag-video-only` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--dev-transformer` | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--distilled-lora` | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--distilled-lora-strength` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--detailing-lora` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
-| `--spatial-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--temporal-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--temporal-upsampler-path` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--low-ram` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `--tile-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--tile-spatial` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--tile-overlap` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--enable-teacache` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
-| `--teacache-thresh` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
-| `--refine-audio` | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--stepwise-image-output-dir` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| `--stepwise-interval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| `--stepwise-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| `--stepwise-frame` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| `--segment` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--relay-epsilon` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--relay-strength` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--relay-audio-strength` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--relay-audio-epsilon` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--input` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--output-path` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--hdr-lora` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--text-embeddings` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--input-colorspace` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--exr-colorspace` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--high-quality` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--no-keyframes` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `--keyframe-strength` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Flag | distilled | two-stage | hq | one-stage | dfr | ic-lora | hdr-ic-lora | a2v | retake | extend | lipdub |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `--prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--output` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--model` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--gemma` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--seed` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--quiet` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--height` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| `--width` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| `--frame-rate` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `--frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| `--auto-duration` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--image` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ |
+| `--num-generated-keyframes` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--no-audio` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--video-decoder` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--diffvae-tile` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--lora` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| `--enhance-prompt` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--negative-prompt` | with `--nag` | ✅ | ✅ | ✅ | with `--nag` | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ |
+| `--nag` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--nag-scale` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--nag-alpha` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--nag-tau` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--nag-video-only` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--dev-transformer` | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--distilled-lora` | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--distilled-lora-strength` | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--detailing-lora` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| `--spatial-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--temporal-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--temporal-upsampler-path` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--low-ram` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--tile-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--tile-spatial` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--tile-overlap` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--enable-teacache` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| `--teacache-thresh` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| `--refine-audio` | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--stepwise-image-output-dir` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--stepwise-interval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--stepwise-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--stepwise-frame` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `--segment` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--relay-epsilon` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--relay-strength` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--relay-audio-strength` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--relay-audio-epsilon` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--input` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--output-path` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--hdr-lora` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--text-embeddings` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--input-colorspace` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--exr-colorspace` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--high-quality` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--no-keyframes` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `--keyframe-strength` | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 A ❌ means the flag is either rejected by the parser or accepted and inert for that
 mode. The five `generate` modes share one parser: a ❌ flag on one of them is either
