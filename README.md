@@ -4,10 +4,10 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 
 ## Features
 
-- **LTX-2.5** — pipeline coverage on 2.5 packs (`--distilled`, `--two-stage`, `--two-stages-hq`, `--one-stage`, `--dfr`, `keyframe`, `a2v`, `retake`, `extend`, `hdr-ic-lora`), auto-detected from the pack (no new flag), plus **auto-predicted duration** via the DurationHead (omit `-f`, or clamp with `--auto-duration MIN:MAX`). Only `ic-lora` / `lipdub` wait on official 2.5 task LoRAs. See [LTX-2.5 section](#ltx-25).
+- **LTX-2.5** — pipeline coverage on 2.5 packs (`--distilled`, `--two-stage`, `--two-stages-hq`, `--one-stage`, `--dfr`, `keyframe`, `a2v`, `retake`, `extend`, `ic-lora`, `hdr-ic-lora`), auto-detected from the pack (no new flag), plus **auto-predicted duration** via the DurationHead (omit `-f`, or clamp with `--auto-duration MIN:MAX`). Only `lipdub` waits on a 2.5 Dub-It LoRA; `ic-lora` runs with the IC-LoRAs Lightricks has published for 2.5. See [LTX-2.5 section](#ltx-25).
 - **Text-to-Video** — generate video + stereo 48kHz audio from a text prompt
 - **Image-to-Video** — animate a reference image; `--image PATH FRAME STRENGTH` is repeatable for multi-anchor I2V, and `FRAME` may be `last` or negative (counted from the end)
-- **Audio-to-Video** — generate video conditioned on an audio track (`a2v`, dev + CFG; `a2v --distilled` for the fast distilled path, experimental)
+- **Audio-to-Video** — generate video conditioned on an audio track (`a2v`, dev + CFG; `a2v --distilled` for the fast distilled path and `a2v --dfr` on the DFR base path (2.5 packs), both experimental)
 - **Retake / Extend** — edit existing videos (regenerate segments, add frames); `retake --distilled` / `extend --distilled` run on the distilled model, roughly 10–20× faster (experimental)
 - **Keyframe interpolation** — smooth transition between reference images
 - **IC-LoRA** — reference video conditioning (depth/pose/edges)
@@ -15,7 +15,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 - **LipDub** *(experimental)* — lip-dub a reference video by re-syncing visuals to the source audio
 - **Two-stage generation** — half-res → neural upscale → refine
 - **HQ generation** — res_2s second-order sampler + CFG/STG guidance
-- **Prompt Relay** — sequence local prompts over time within one generation (`--segment "text" [LEN]`); a training-free Gaussian penalty gates each prompt's tokens to a slice of the timeline via the video→text cross-attention. Works across all generate modes; on CFG modes the mask applies to the conditional pass only.
+- **Prompt Relay** — sequence local prompts over time within one generation (`--segment "text" [LEN]`); a training-free Gaussian penalty gates each prompt's tokens to a slice of the timeline via the video→text and audio→text cross-attentions (`--relay-audio-strength`: default 1.0 on `--distilled` / `--dfr`, 0 on the CFG modes). Works across all generate modes; on CFG modes the masks apply to the conditional pass only.
 - **Negative prompt (`--negative-prompt`)** — custom CFG negative on every CFG pipeline (`--one-stage` / `--two-stage` / `--two-stages-hq` / a2v / keyframe / retake / extend); defaults to the upstream `DEFAULT_NEGATIVE_PROMPT`. Distilled modes have no CFG and reject it, except `generate --distilled` / `--dfr` with `--nag` (experimental Normalized Attention Guidance, applied inside the text cross-attentions).
 - **Prompt enhancement** — Gemma 3 12B rewrites short prompts into detailed descriptions
 - **Training** — LoRA fine-tuning with flow matching (T2V and V2V strategies)
@@ -168,9 +168,10 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 | `--two-stages-hq` (res_2s + CFG) | supported — validated e2e on 2.5 (deterministic, audio at healthy 2.3-level loudness) |
 | `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to an auto-predicted duration on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`/`--dfr`; `--auto-duration MIN:MAX` overrides the clamp. Not available on 2.3 packs (no `DurationHead` weights); `-f` stays required there |
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
-| `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB) |
+| `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB). `a2v --distilled` / `a2v --dfr`: Experimental, validated e2e on 2.5 q8 |
 | `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames). `--low-ram` wired (mirrors upstream `offload_mode`): 49-frame retake that OOM'd now peaks at 13.8 GB |
-| `ic-lora`, `lipdub` | not yet supported (no official 2.5 task IC-LoRAs published yet) |
+| `ic-lora` | runs with the IC-LoRAs Lightricks has published for 2.5 (`Lightricks/LTX-2.5-22b-IC-LoRA-*`); upstream's plans that keep the IC-LoRA in stage 2 (`stage_2_ic_lora=True`) are not ported |
+| `lipdub` | not yet on 2.5 (no 2.5 Dub-It LoRA published) |
 | `hdr-ic-lora` | supported, 2.5 only (single-stage ACEScct SDR-to-HDR; Experimental, validated end to end on real weights) |
 | `enhance` / `--enhance-prompt` | raises a clear error (Gemma 3-only) |
 | `--enable-teacache` | raises a clear error (not calibrated for 2.5) |
@@ -178,8 +179,7 @@ ltx-2-mlx generate --model /path/to/ltx-2.5-mlx-q8 --two-stage \
 | Modality tiling | validated on 2.5 `--distilled` (`--tile-frames 2`, unconditioned and with an end anchor) |
 | Diffusion video decoder | opt-in `--video-decoder diffusion` (experimental; auto-tiled above the decode budget, `--diffvae-tile` override); conv stays the default |
 
-The IC-LoRA family (`ic-lora` / `lipdub`) lands once
-Lightricks publishes the official 2.5 task IC-LoRAs.
+`lipdub` lands on 2.5 once Lightricks publishes a 2.5 Dub-It LoRA.
 
 For maximum detail on a 2.5 pack, `generate --dfr` (experimental) runs a base DFR pass with
 the official detailing IC-LoRA — see the [`generate --dfr` card](docs/PIPELINES.md#generate---dfr-experimental-ltx-25-packs-only) in the pipelines guide.

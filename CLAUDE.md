@@ -794,7 +794,7 @@ ltx-2-mlx a2v \
   --audio music.wav --image photo.jpg --frame-rate 24 -o output.mp4
 ```
 
-Flags: `--audio` (required), `--audio-start` (default 0 s), `--frame-rate` (required, mirrors upstream `frame_rate=`), `--image` (optional I2V), `--cfg-scale` (default 3.0), `--stg-scale` (default 1.0), `--negative-prompt`, `--stage1-steps` (default 30), `--stage2-steps` (default 3), `--enable-teacache` / `--teacache-thresh` (LTX-2.3 packs), `--distilled` (experimental, see below).
+Flags: `--audio` (required), `--audio-start` (default 0 s), `--frame-rate` (required, mirrors upstream `frame_rate=`), `--image` (optional I2V), `--cfg-scale` (default 3.0), `--stg-scale` (default 1.0), `--negative-prompt`, `--stage1-steps` (default 30), `--stage2-steps` (default 3), `--enable-teacache` / `--teacache-thresh` (LTX-2.3 packs), `--distilled` (experimental, see below), `--dfr` (experimental, 2.5 packs) with `--detailing-lora PATH_OR_REPO` (default: the official gated LoRA); `--distilled` with `--dfr`, and `--detailing-lora` without `--dfr`, are rejected.
 
 ```bash
 # Distilled A2V: no dev model, no CFG (Lightricks' LTX-2.5_A2V_Two_Stage_Distilled workflow)
@@ -805,7 +805,7 @@ ltx-2-mlx a2v --distilled \
 
 `A2VidDistilledPipeline` (`a2vid_distilled.py`) is `DistilledPipeline` with two hooks swapped: `_stage1_audio_state` / `_stage2_audio_state` return the encoded input track as a frozen state (`create_noised_state(..., frozen=True)`, zero mask, per-modality sigma 0) instead of noise / the re-noised stage-1 audio, as upstream's `freeze_audio=True` does in both stages. Stage 2 re-attaches the source tokens rather than stage 1's output (identical anyway: a frozen stream comes out of both loops bit for bit). The default hook bodies are the old inline calls, so `generate --distilled` and `--dfr` are byte-identical. The audio encoding and the source-waveform mux are shared with `a2v` (`encode_source_audio` / `decode_with_source_audio` in `a2vid_two_stage.py`). Flags: the `a2v` ones minus `--cfg-scale`, `--stg-scale`, `--negative-prompt` and `--enable-teacache` (rejected up front); `--stage1-steps` defaults to 8. Validated (M1 Max, 2.5 q8, 7 Oct): `generate --distilled`, `--distilled --low-ram`, `--dfr` and `a2v` are byte-identical (sha256) to main at 512×768×49, seed 5; `a2v --distilled` takes 109 s against 631 s for `a2v` at that size (default environment), 87 s with `--low-ram` (fp16), ~400 s at 704×1280×121 and 942 s at 704×1280×241 with three image anchors (fp16).
 
-`A2VidDFRPipeline` (`a2vid_dfr.py`, `a2v --dfr`, 2.5 packs) takes `A2VidDistilledPipeline`'s audio hooks and `generate_and_save` and `DFRPipeline`'s constructor and `generate_two_stage` (class order `A2VidDFRPipeline(A2VidDistilledPipeline, DFRPipeline)`): the keyframe canvas, the slots and the detailing stage 2 run as on `generate --dfr`, the input audio frozen in both stages. The canvas is padded to whole keyframe segments, so `_frozen_audio_state` right-pads the encoded track with zero tokens to the canvas (`fit_audio_tokens`); the padding is cut with the canvas padding. No temporal rounds or spatial epilogue; the decode is `decode_with_source_audio` (conv or plain diffusion decode, not the keyframe-aware one). Validated (M1 Max, 2.5 q8, float16, 16 Oct): 768×512×121 from a front-facing portrait, 248 s (peak 40.2 GB) against 186 s / 28.9 GB for `a2v --distilled`; SyncNet LSE-C 4.46 / 4.00, offset 0 both; ArcFace median 0.78 / 0.71; 768×512×113 (canvas 121): 242 s, LSE-C 4.69, ArcFace 0.80.
+`A2VidDFRPipeline` (`a2vid_dfr.py`, `a2v --dfr`, 2.5 packs) takes `A2VidDistilledPipeline`'s audio hooks and `generate_and_save` (behind a check that refuses a pack without keyframe slots before the audio encode) and `DFRPipeline`'s constructor and `generate_two_stage` (class order `A2VidDFRPipeline(A2VidDistilledPipeline, DFRPipeline)`): the keyframe canvas, the slots and the detailing stage 2 run as on `generate --dfr`, the input audio frozen in both stages. The canvas is padded to whole keyframe segments, so `_frozen_audio_state` right-pads the encoded track with zero tokens to the canvas (`fit_audio_tokens`); the padding is cut with the canvas padding. No temporal rounds or spatial epilogue; the decode is `decode_with_source_audio` (conv or plain diffusion decode, not the keyframe-aware one). Validated (M1 Max, 2.5 q8, float16, 16 Oct): 768×512×121 from a front-facing portrait, 248 s (peak 40.2 GB) against 186 s / 28.9 GB for `a2v --distilled`; SyncNet LSE-C 4.46 / 4.00, offset 0 both; ArcFace median 0.78 / 0.71; 768×512×113 (canvas 121): 242 s, LSE-C 4.69, ArcFace 0.80.
 
 ### Retake / Extend Example
 
@@ -822,6 +822,8 @@ ltx-2-mlx extend \
 ```
 
 Flags: `--steps` (default 30), `--cfg-scale` (default 3.0), `--stg-scale` (default 1.0), `--no-regen-audio` (retake only), `--distilled` (both; see below), `--image` (`extend --distilled` only).
+
+Retake regenerates the audio tokens whose time interval overlaps the latent-frame window (`audio_window_tokens` in `retake.py`, as upstream's `TemporalRegionMask`). Before 0.17 the window was mapped to tokens proportionally and started late (token 15 instead of 10 for latent frames 2-5 of a 49-frame clip at 24 fps), so retakes that regenerate audio shift.
 
 ```bash
 # Distilled retake: upstream RetakePipeline's default mode (distilled model, no CFG)
@@ -1091,7 +1093,7 @@ LTX-2.3 bf16 distilled, 480x704x33: confirmed runs end-to-end on M2 Pro 32 GB. W
 - `generate --two-stage` (Euler + CFG)
 - `generate --two-stages-hq` (res_2s + CFG)
 - `generate --distilled` and `generate --dfr` (the DFR detailing LoRA attaches as a `BlockLoraSource`)
-- `a2v` (audio-to-video) and `a2v --distilled`
+- `a2v` (audio-to-video) and `a2v --distilled` (`a2v --dfr` is wired the same way, not validated under `--low-ram`)
 - `keyframe` (interpolation)
 - `ic-lora` (control video conditioning, via bind-time LoRA fusion)
 - `hdr-ic-lora` (HDR LoRA as a `BlockLoraSource`)
@@ -1557,7 +1559,7 @@ dtype on entry (like the conv decoder) and the same decode peaks at ~12 GB (5.8 
 | `--two-stages-hq` (res_2s + CFG) | supported — validated e2e on 2.5 (deterministic, audio at healthy 2.3-level loudness) |
 | `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to `AutoDuration()` on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`/`--dfr`; `--auto-duration MIN:MAX` overrides the clamp. Absent on 2.3 packs, where omitting `-f` now raises immediately (see "Auto-Duration" above) |
 | `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
-| `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB). `a2v --distilled` (Experimental): validated e2e on 2.5 q8 at 512×768×49 (± `--low-ram`) and 704×1280×121/241 |
+| `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB). `a2v --distilled` (Experimental): validated e2e on 2.5 q8 at 512×768×49 (± `--low-ram`) and 704×1280×121/241; `a2v --dfr` (Experimental): validated e2e on 2.5 q8 at 768×512×121 and 768×512×113 |
 | `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames). `--low-ram` wired (mirrors upstream `offload_mode`): 49-frame retake that OOM'd now peaks at 13.8 GB. `retake --distilled` (Experimental): validated e2e on 2.5 q8 at 512×768×49 and 704×1280×121; `extend --distilled` (Experimental): validated e2e on 2.5 q8 at 704×1280, 10 s + 4 s (see Retake / Extend Example) |
 | `ic-lora` | runs with the IC-LoRAs Lightricks has published for 2.5 (`Lightricks/LTX-2.5-22b-IC-LoRA-*`); run end to end with Refine-Details at 768×512×49 (M1 Max, q8, float16: 140 s fused, 127 s with `LTX2_LORA_MODE=unfused`). Upstream's plans that keep the IC-LoRA in stage 2 (`stage_2_ic_lora=True`) are not ported |
 | `lipdub` | not yet on 2.5 (no 2.5 Dub-It LoRA published) |
@@ -1841,7 +1843,7 @@ How it works (`model/transformer/sparse_attention.py`):
   (appended conditioning tokens, e.g. DFR's reference, do not change it). Calls with an attention mask, an STG
   perturbation, cross-attention, or fewer than 4096 tokens stay dense.
 - `DistilledPipeline._stage2` turns it on around the stage-2 loop and off afterwards (also on error), so it covers
-  the stage 2 of every pipeline built on it: `generate --distilled`, `generate --dfr`, `a2v --distilled` and
+  the stage 2 of every pipeline built on it: `generate --distilled`, `generate --dfr`, `a2v --distilled`, `a2v --dfr` and
   `extend --distilled`. Stage 1, the DFR temporal rounds and spatial epilogue, and
   the other pipelines (single-stage `retake --distilled` included) are untouched. Under `--low-ram` the streamed model attaches the state to whichever block is bound
   and runs the eager shared block while it is on (the compiled block would replay the tau and routing of the step it

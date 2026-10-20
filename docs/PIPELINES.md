@@ -273,7 +273,7 @@ would otherwise not fit. On a 32 GB Mac at typical token counts, prefer `--low-r
 
 | Flag or variable | Default | Effect | Applies to |
 |---|---|---|---|
-| `--enable-teacache` | off | Timestep-aware residual caching in stage 1. About 1.46× on the Euler sampler and 1.78× on res_2s. The same seed gives a different render, often a different composition, so it cannot preview a plain render. [Details](../CLAUDE.md#teacache-opt-in-stage-1-acceleration). LTX-2.3 packs only (refused on 2.5). | `generate --two-stage`, `generate --two-stages-hq`, `a2v` (not `--distilled`) |
+| `--enable-teacache` | off | Timestep-aware residual caching in stage 1. About 1.46× on the Euler sampler and 1.78× on res_2s. The same seed gives a different render, often a different composition, so it cannot preview a plain render. [Details](../CLAUDE.md#teacache-opt-in-stage-1-acceleration). LTX-2.3 packs only (refused on 2.5). | `generate --two-stage`, `generate --two-stages-hq`, `a2v` (not `--distilled` / `--dfr`) |
 | `--teacache-thresh F` | 0.5 Euler, 1.0 res_2s | How aggressively steps are skipped. Higher is faster and lossier. Ignored without `--enable-teacache`. | with `--enable-teacache` |
 | `--stage2-steps N` | full table (3) | Fewer stage-2 refine steps. Takes the **last** N sigmas of the stage-2 table, so the refine re-noises less and always finishes at σ=0 (`1` → `[0.421875, 0.0]`, `2` → `[0.725, 0.421875, 0.0]`). A one-step refine gives a usable preview of the shot, not a softer copy of it. | every two-stage pipeline except `extend --distilled` (full 8 + 3 tables) |
 | `--stage1-steps N` | full table (8) | On a pipeline whose stage 1 uses the fixed distilled table, keeps σ=1.0 and then the **last** N sigmas of the table (`3` → `[1.0, 0.725, 0.421875, 0.0]`). On `--two-stage`, `--two-stages-hq`, `a2v` (without `--distilled`) and dev-mode `keyframe`, stage 1 uses the dynamic schedule instead and N is simply its step count. | every two-stage pipeline except `extend --distilled` (full 8 + 3 tables) |
@@ -333,7 +333,7 @@ are utilities and have no column.
 | `--dev-transformer` | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--distilled-lora` | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--distilled-lora-strength` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `--detailing-lora` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `--detailing-lora` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | `--spatial-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--temporal-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--temporal-upsampler-path` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -368,7 +368,8 @@ rejected up front with an explicit error (CFG, NAG, TeaCache and DFR-only flags)
 and ignored.
 
 `a2v --distilled` takes the `a2v` column except the CFG and TeaCache flags: `--cfg-scale`,
-`--stg-scale`, `--negative-prompt` and `--enable-teacache` are rejected up front.
+`--stg-scale`, `--negative-prompt` and `--enable-teacache` are rejected up front. `a2v --dfr`
+takes the same column as `a2v --distilled`, plus `--detailing-lora` (rejected without `--dfr`).
 
 `retake --distilled` takes the `retake` column except the CFG flags: `--cfg-scale`,
 `--stg-scale` and `--negative-prompt` are rejected up front.

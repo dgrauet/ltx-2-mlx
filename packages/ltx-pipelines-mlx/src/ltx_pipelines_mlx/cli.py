@@ -275,7 +275,7 @@ def _add_teacache_args(parser: argparse.ArgumentParser) -> None:
         "--enable-teacache",
         action="store_true",
         help=(
-            "generate --two-stage / --two-stages-hq and a2v (not --distilled) only (LTX-2.3 packs): enable "
+            "generate --two-stage / --two-stages-hq and a2v (not --distilled / --dfr) only (LTX-2.3 packs): enable "
             "TeaCache stage-1 acceleration (opt-in, ~1.46x speedup on Euler at default "
             "thresh; see CLAUDE.md)"
         ),
@@ -826,7 +826,9 @@ examples:
         metavar="PATH_OR_REPO",
         help="Detailing IC-LoRA for a2v --dfr (local .safetensors or HF repo id; default: the official, gated LoRA).",
     )
-    a2v.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30; with --distilled: 8)")
+    a2v.add_argument(
+        "--stage1-steps", type=int, default=None, help="Stage 1 steps (default: 30; with --distilled / --dfr: 8)"
+    )
     a2v.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 steps (default: 3)")
     a2v.add_argument(
         "--cfg-scale", type=float, default=None, help="CFG guidance scale (default: 3.0; rejected by --distilled)"
