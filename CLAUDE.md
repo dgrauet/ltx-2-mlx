@@ -910,6 +910,12 @@ where upstream used 30; the replacement runs the two-stage default, 30. On 2.5 p
 start and an end `--image` is a faster alternative that tracked both images in a 768×512×97 comparison against the
 old command (numbers in [docs/PIPELINES.md](docs/PIPELINES.md#interpolating-between-images)).
 
+Old command against the replacement (M2 Pro 32 GB, 2.5 q8, 640×384×49, 30 stage-1 steps, `--stg-scale 0 --low-ram`,
+seed 5, the same two unrelated images and prompt): 858 vs 840 s, peak footprint 23.2 vs 23.3 GB. Both match the
+first image (34.4 / 33.9 dB) and the last (21.5 / 22.4 dB) and cross between the two scenes through a bright fade;
+the replacement's crossing is smoother (largest frame-to-frame change 12.6 against 49.7) and its audio louder
+(−25.4 vs −30.1 dB, the refined stage-2 track).
+
 ---
 
 ## Two-Stage Pipeline (T2V / I2V)
