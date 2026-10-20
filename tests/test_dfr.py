@@ -189,6 +189,13 @@ def test_refuses_generated_keyframes_and_teacache_kwargs(tmp_path, monkeypatch):
         _run(pipe, enable_teacache=True)
 
 
+@pytest.mark.parametrize("kwargs", [{"return_stage1": True}, {"stage1": object()}])
+def test_refuses_stage1_capture_and_resume(tmp_path, monkeypatch, kwargs):
+    pipe, *_ = _make(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="return_stage1 / stage1"):
+        _run(pipe, **kwargs)
+
+
 def test_refuses_an_unresolvable_detailing_lora_before_any_load(tmp_path, monkeypatch):
     """A bad --detailing-lora must fail before stage 1, not after a full half-res render.
 

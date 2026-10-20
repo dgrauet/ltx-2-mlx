@@ -631,7 +631,8 @@ class DFRPipeline(DistilledPipeline):
                 :meth:`DistilledPipeline.generate_two_stage`: stage 1, stage 2, the temporal
                 rounds and the spatial epilogue all run with the negative prompt.
             **_unused_kwargs: Accepted (and ignored) for signature compatibility with
-                :meth:`DistilledPipeline.generate_two_stage`.
+                :meth:`DistilledPipeline.generate_two_stage`, except the stage-1 capture and
+                resume arguments (``return_stage1``, ``stage1``), which are refused.
 
         Returns:
             Tuple of (video_latent, audio_latent), trimmed back to the requested duration.
@@ -639,7 +640,8 @@ class DFRPipeline(DistilledPipeline):
         Raises:
             ValueError: on a pack without the keyframe embedding, when ``generated_keyframes``
                 is passed (DFR places its own slots from the canvas), when TeaCache is requested
-                when ``negative_prompt`` is set without ``nag`` (no CFG) or ``nag`` without it.
+                when ``negative_prompt`` is set without ``nag`` (no CFG) or ``nag`` without it,
+                or when ``return_stage1`` / ``stage1`` is passed (no stage-1 resume on DFR).
             FileNotFoundError: when the detailing LoRA cannot be resolved (raised up front,
                 before any prompt encoding).
             RuntimeError: when ``_stage1`` did not run the canvas hook, leaving the requested
@@ -650,6 +652,8 @@ class DFRPipeline(DistilledPipeline):
             raise ValueError("DFR places its keyframe slots from the canvas; --num-generated-keyframes does not apply")
         if enable_teacache:
             raise ValueError("TeaCache is not available on the DFR path (distilled flow)")
+        if _unused_kwargs.get("return_stage1") or _unused_kwargs.get("stage1") is not None:
+            raise ValueError("Stage-1 capture and resume (return_stage1 / stage1) are not supported on the DFR path")
         self._require_generated_keyframes_support([1])  # DFR always uses slots: refuse 2.3 packs up front
         self._require_num_frames_source(num_frames)
         if self.temporal_upscalings:
