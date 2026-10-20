@@ -266,12 +266,6 @@ class TestTwoStagePipelineInstantiation:
         assert pipe._distilled_lora == "custom-lora.safetensors"
         assert pipe._distilled_lora_strength == 0.8
 
-    def test_keyframe_inherits_from_two_stage(self):
-        from ltx_pipelines_mlx.keyframe_interpolation import KeyframeInterpolationPipeline
-        from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
-
-        assert issubclass(KeyframeInterpolationPipeline, TI2VidTwoStagesPipeline)
-
 
 # ---------------------------------------------------------------------------
 # Upsampler weights must be present — silent fallback is forbidden

@@ -20,7 +20,6 @@ from ltx_pipelines_mlx.a2vid_two_stage import A2VidPipelineTwoStage
 from ltx_pipelines_mlx.cli import _build_parser, _cmd_generate
 from ltx_pipelines_mlx.dfr import DFRPipeline
 from ltx_pipelines_mlx.distilled import DistilledPipeline
-from ltx_pipelines_mlx.keyframe_interpolation import KeyframeInterpolationPipeline
 from ltx_pipelines_mlx.retake import RetakePipeline
 from ltx_pipelines_mlx.ti2vid_one_stage import TI2VidOneStagePipeline
 from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
@@ -106,8 +105,6 @@ def test_encode_empty_negative_is_not_replaced_by_default(encode_pipe):
         RetakePipeline.extend,
         RetakePipeline.retake_from_video,
         RetakePipeline.extend_from_video,
-        KeyframeInterpolationPipeline.interpolate,
-        KeyframeInterpolationPipeline.generate_and_save,
     ],
     ids=lambda m: m.__qualname__,
 )
@@ -237,57 +234,6 @@ def test_a2v_forwards_negative(tmp_path, monkeypatch):
     assert seen["negative_prompt"] == "neg"
 
 
-def test_keyframe_interpolate_forwards_negative(tmp_path, monkeypatch):
-    pipe = KeyframeInterpolationPipeline(model_dir=_pack(tmp_path))
-    seen = _capture_encode(pipe, monkeypatch)
-    pipe.image_conditioner = lambda fn, free_after: ([], [])
-    with pytest.raises(_CapturedError):
-        pipe.interpolate(
-            prompt="p",
-            keyframe_images=["a.png", "b.png"],
-            keyframe_indices=[0, 8],
-            num_frames=9,
-            frame_rate=24.0,
-            cfg_scale=3.0,
-            negative_prompt="neg",
-        )
-    assert seen["negative_prompt"] == "neg"
-
-
-def test_keyframe_generate_and_save_forwards_negative(tmp_path, monkeypatch):
-    pipe = KeyframeInterpolationPipeline(model_dir=_pack(tmp_path))
-    seen = {}
-
-    def interp(**kwargs):
-        seen.update(kwargs)
-        raise _CapturedError
-
-    monkeypatch.setattr(pipe, "interpolate", interp)
-    with pytest.raises(_CapturedError):
-        pipe.generate_and_save(
-            prompt="p",
-            output_path="x.mp4",
-            keyframe_images=["a.png"],
-            keyframe_indices=[0],
-            frame_rate=24.0,
-            negative_prompt="neg",
-        )
-    assert seen["negative_prompt"] == "neg"
-
-
-def test_keyframe_rejects_negative_prompt_and_embeds_together(tmp_path):
-    pipe = KeyframeInterpolationPipeline(model_dir=_pack(tmp_path))
-    with pytest.raises(ValueError, match="not both"):
-        pipe.interpolate(
-            prompt="p",
-            keyframe_images=["a.png"],
-            keyframe_indices=[0],
-            frame_rate=24.0,
-            negative_prompt="neg",
-            negative_prompt_embeds=(mx.zeros((1, 1, 1)), mx.zeros((1, 1, 1))),
-        )
-
-
 # --- CFG-less pipelines refuse it -------------------------------------------------------
 
 
@@ -310,7 +256,7 @@ def test_dfr_refuses_negative_prompt(tmp_path):
 # --- CLI --------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("subcommand", ["generate", "a2v", "keyframe", "retake", "extend"])
+@pytest.mark.parametrize("subcommand", ["generate", "a2v", "retake", "extend"])
 def test_cli_cfg_subcommands_have_negative_prompt_flag(subcommand):
     from tests.test_docs_flags import parser_flags
 

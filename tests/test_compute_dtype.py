@@ -248,7 +248,7 @@ def test_two_stage_distilled_lora_fusion_is_recast(tmp_path):
     )
     pipe._recast_after_inplace_fusion = lambda dit=None: BasePipeline._recast_after_inplace_fusion(pipe, dit)
 
-    TI2VidTwoStagesPipeline._fuse_distilled_lora(pipe, model)  # the call site used by two-stage, hq, a2v, keyframe
+    TI2VidTwoStagesPipeline._fuse_distilled_lora(pipe, model)  # the call site used by two-stage, hq, a2v
     assert model.transformer_blocks[0].attn1.to_q.scales.dtype == mx.float16
     assert model.transformer_blocks[0].attn1(mx.random.normal((1, 8, dim))).dtype == mx.float16
 

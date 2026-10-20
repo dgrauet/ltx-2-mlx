@@ -12,7 +12,6 @@ Public pipeline classes mirror upstream Lightricks/LTX-2 pipelines 1:1:
 | ``ICLoraPipeline`` | ``ic_lora.ICLoraPipeline`` |
 | ``HDRICLoraPipeline`` | ``hdr_ic_lora.HDRICLoraPipeline`` |
 | ``LipDubPipeline`` | ``lipdub.LipDubPipeline`` |
-| ``KeyframeInterpolationPipeline`` | ``keyframe_interpolation.KeyframeInterpolationPipeline`` |
 | ``A2VidPipelineTwoStage`` | ``a2vid_two_stage.A2VidPipelineTwoStage`` |
 | ``RetakePipeline`` | ``retake.RetakePipeline`` (extend folded in) |
 
@@ -29,7 +28,6 @@ from ltx_pipelines_mlx.dfr import DFRPipeline
 from ltx_pipelines_mlx.distilled import DistilledPipeline
 from ltx_pipelines_mlx.hdr_ic_lora import HDRICLoraPipeline
 from ltx_pipelines_mlx.ic_lora import ICLoraPipeline
-from ltx_pipelines_mlx.keyframe_interpolation import KeyframeInterpolationPipeline
 from ltx_pipelines_mlx.lipdub import LipDubPipeline
 from ltx_pipelines_mlx.retake import RetakePipeline
 from ltx_pipelines_mlx.ti2vid_one_stage import TI2VidOneStagePipeline
@@ -57,7 +55,6 @@ __all__ = [
     "HDRICLoraPipeline",
     "ICLoraPipeline",
     "ImageConditioner",
-    "KeyframeInterpolationPipeline",
     "LipDubPipeline",
     "PromptEncoder",
     "RetakePipeline",
