@@ -43,10 +43,10 @@ Everything else is in [Common flags](#common-flags).
 
 ### `generate --two-stage`
 
-- **Produces:** T2V / I2V mp4 with audio. Dev model + CFG at half resolution, 2× upsample, distilled 3-step refine of the video. Stage 2 keeps stage 1's audio as frozen conditioning (upstream v1.4.0 `freeze_audio=True`).
+- **Produces:** T2V / I2V mp4 with audio. Dev model + CFG at half resolution, 2× upsample, distilled 3-step refine of the video. Stage 2 keeps stage 1's audio as frozen conditioning (upstream `freeze_audio=True`); `--refine-audio` denoises it with the video in stage 2 instead and ships stage 2's audio (upstream v1.5.0 `refine_audio`).
 - **Packs:** 2.3 and 2.5. **Tier:** Stable. Best default quality per minute.
 - **Required:** `--prompt`, `--output`, `--frame-rate`; `--frames` on 2.3 packs.
-- **Own flags:** `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--negative-prompt`, `--stg-scale` (1.0; each unit above 0 adds one extra forward pass per step — pass `--stg-scale 0` on 32 GB Macs for long clips), `--dev-transformer` (`transformer-dev.safetensors`), `--distilled-lora`, `--distilled-lora-strength` (1.0), `--enable-teacache`, `--teacache-thresh`.
+- **Own flags:** `--stage1-steps` (30), `--stage2-steps` (3), `--cfg-scale` (3.0), `--negative-prompt`, `--stg-scale` (1.0; each unit above 0 adds one extra forward pass per step — pass `--stg-scale 0` on 32 GB Macs for long clips), `--dev-transformer` (`transformer-dev.safetensors`), `--distilled-lora`, `--distilled-lora-strength` (1.0), `--enable-teacache`, `--teacache-thresh`, `--refine-audio`.
 - **Example:** `ltx-2-mlx generate --two-stage -p "a fox in the forest" -H 480 -W 704 -f 97 --frame-rate 24 --low-ram -o fox.mp4`
 - **Cost (M2 Pro 32 GB, q8):** 704 × 480, 97 frames ≈ 1374 s, or ≈ 942 s with `--enable-teacache`. [Details](../CLAUDE.md#teacache-opt-in-stage-1-acceleration).
 
@@ -55,7 +55,7 @@ Everything else is in [Common flags](#common-flags).
 - **Produces:** the same two-stage output with the second-order res_2s sampler on both stages (stage 2 without guidance, as upstream). Unlike `--two-stage`, stage 2 re-noises the stage-1 audio and refines it with the video, as upstream does.
 - **Packs:** 2.3 and 2.5. **Tier:** Stable. Roughly twice the stage-1 cost of `--two-stage`.
 - **Required:** identical to `--two-stage`.
-- **Own flags:** identical to `--two-stage`, except `--stage1-steps` defaults to 15 and `--stg-scale` to 0.0. Each step runs two model evaluations.
+- **Own flags:** identical to `--two-stage`, except `--stage1-steps` defaults to 15 and `--stg-scale` to 0.0, and `--refine-audio` is not accepted. Each step runs two model evaluations.
 - **Example:** `ltx-2-mlx generate --two-stages-hq -p "a fox in the forest" -H 480 -W 704 -f 97 --frame-rate 24 --low-ram -o fox.mp4`
 - **Cost (M2 Pro 32 GB, `--low-ram`):** 704 × 480, 97 frames ≈ 44 min at q8, ≈ 50 min at bf16. TeaCache at `--teacache-thresh 1.0` cuts a 576 × 384, 65-frame run from 1370 s to 768 s.
 
@@ -296,7 +296,7 @@ would otherwise not fit. On a 32 GB Mac at typical token counts, prefer `--low-r
 | `--segment "TEXT" [LEN]` | — | Prompt Relay: a local prompt gated to a slice of the timeline (video and audio), repeatable in timeline order. `LEN` is in latent frames. The global `--prompt` still applies everywhere. Validated on 2.3 and 2.5 packs. Not compatible with modality tiling. [Details](../CLAUDE.md#prompt-relay---segment). | `generate` modes |
 | `--relay-epsilon` | 1e-3 | Prompt Relay falloff. Smaller is sharper temporal gating. | with `--segment` |
 | `--relay-strength` | 1.0 | Prompt Relay penalty multiplier on the video cross-attention. Higher isolates segments more strictly. | with `--segment` |
-| `--relay-audio-strength` | 1.0 on `--distilled` / `--dfr`, 0 on the CFG modes | Prompt Relay penalty multiplier on the audio cross-attention (`audio_attn2`), so each segment's speech and sounds stay near its slice of the timeline. `0` gates the video only (the behaviour before this flag existed). Off by default on the CFG modes, where it did not move the speech; any value given is used. No effect on a frozen audio stream (`--two-stage` stage 2). | with `--segment` |
+| `--relay-audio-strength` | 1.0 on `--distilled` / `--dfr`, 0 on the CFG modes | Prompt Relay penalty multiplier on the audio cross-attention (`audio_attn2`), so each segment's speech and sounds stay near its slice of the timeline. `0` gates the video only (the behaviour before this flag existed). Off by default on the CFG modes, where it did not move the speech; any value given is used. No effect on a frozen audio stream (`--two-stage` stage 2 without `--refine-audio`). | with `--segment` |
 | `--relay-audio-epsilon` | `--relay-epsilon` | Prompt Relay falloff of the audio penalty, in (0, 1). | with `--segment` |
 
 ## Flags by pipeline
@@ -343,6 +343,7 @@ are utilities and have no column.
 | `--tile-overlap` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--enable-teacache` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | `--teacache-thresh` | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| `--refine-audio` | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--stepwise-image-output-dir` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `--stepwise-interval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `--stepwise-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
