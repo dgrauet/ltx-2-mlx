@@ -1518,6 +1518,12 @@ pre-epilogue slots) become the decoder keyframes for the final keyframe-aware de
 the epilogue's own tiling) and `--segment` (Prompt Relay), both up front in the CLI before any
 Gemma load, mirroring the temporal-rounds refusals above.
 
+**Spatial epilogue on the v1.5.0 grid** (M2 Pro 32 GB, LTX-2.5 q8, `--dfr --spatial-upscalings 2 --low-ram
+--no-audio`, seed 5, 1536×1024×49, against main's 2×2 then 4×4 grid on the same command): 2 × 1 tiles in both
+phases, epilogue 1915 → 800 s, whole render 2243 → 1128 s, peak memory footprint 22.3 → 22.4 GB, peak Metal
+during the decode 11.2 GB both; no seam in the 2-cell overlap band, mean |Laplacian| 12.21 → 12.07, PSNR 31.1 dB
+between the two renders (a different sample: the ancestral passes see other tiles).
+
 **Spatial epilogue validated** before the v1.5.0 grid (M2 Pro 32 GB, LTX-2.5 q8, `--dfr --low-ram --no-audio`, seed 5, `-f 49`;
 per-window pinned passes, 2×2 coarse then 4×4, overlap 10, ancestral, #180): `--spatial-upscalings 2` at
 1536×1024: 2272 s total, epilogue 1941 s, peak Metal 11.2 GB; with `--temporal-upscalings 1` (97 frames @
