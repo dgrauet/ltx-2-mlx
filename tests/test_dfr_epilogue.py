@@ -375,7 +375,7 @@ def test_epilogue_conditionings_per_window(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(orch, "combined_image_conditionings", lambda imgs, **kw: [])
     monkeypatch.setattr(dfr_mod, "combined_image_conditionings", lambda imgs, **kw: seen.append((list(imgs), kw)) or [])
-    _run(pipe, height=256, width=256, num_frames=49, images=[ImageConditioningInput("a.png", 24, 1.0)])
+    _run(pipe, height=256, width=256, num_frames=49, images=[ImageConditioningInput.at("a.png", 24, 1.0)])
     # image at 24 -> 48 on the final grid: in window 0 [0, 48]; window 1 resumes at 49, so it is not re-applied
     imgs, kw = seen[-1]
     assert [i.frame_idx for i in imgs] == [48] and kw["enc_h"] == 256 and kw["enc_w"] == 256
@@ -521,7 +521,7 @@ def test_images_reach_every_stage_at_its_resolution_and_the_epilogue_on_the_fina
 
     spy(orch, "stage")  # stages 1/2 import it from _orchestration at call time
     spy(dfr_mod, "dfr")  # the rounds and the epilogue
-    images = [ImageConditioningInput(paths[0], 0, 1.0), ImageConditioningInput(paths[1], 24, 1.0)]
+    images = [ImageConditioningInput.at(paths[0], 0, 1.0), ImageConditioningInput.at(paths[1], 24, 1.0)]
     _run(pipe, height=256, width=384, num_frames=49, images=images)
 
     assert enc_dims[0] == ("stage", 64, 96)  # stage 1 at H/4

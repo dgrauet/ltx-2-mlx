@@ -616,12 +616,12 @@ examples:
         default=None,
         metavar="ARG",
         help=(
-            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. "
+            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [BINDING] [CRF]]. "
             "PATH alone defaults to FRAME_IDX=0 STRENGTH=1.0 (legacy single-image I2V). "
             "Repeatable to anchor multiple frames (e.g. --image foo.jpg 0 1.0 "
             "--image foo.jpg 96 1.0 to anchor both ends and preserve identity). "
-            "FRAME_IDX is the pixel frame index (0-based); 0 replaces the first latent "
-            "frame directly, others guide via VideoConditionByKeyframeIndex. "
+            "FRAME_IDX is the pixel frame index (0-based). "
+            "BINDING is auto (default when omitted: FRAME_IDX 0 replaces the first latent, later frames guide), replace (pins the still on a causal latent start: pixel frame 0 or 1 + 8 * k) or guide (a keyframe at any pixel frame); with one trailing token, a binding keyword selects BINDING and an integer selects CRF. "
             "FRAME_IDX may be 'last' or negative (counted from the end), so an end "
             "anchor follows the frame count --auto-duration picks. "
             "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4. "
@@ -849,9 +849,10 @@ examples:
         default=None,
         metavar="ARG",
         help=(
-            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. "
+            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [BINDING] [CRF]]. "
             "Repeatable to anchor multiple frames. PATH alone defaults to "
             "FRAME_IDX=0 STRENGTH=1.0 (legacy single-image). "
+            "BINDING is auto (default when omitted: FRAME_IDX 0 replaces the first latent, later frames guide), replace (pins the still on a causal latent start: pixel frame 0 or 1 + 8 * k) or guide (a keyframe at any pixel frame); with one trailing token, a binding keyword selects BINDING and an integer selects CRF. "
             "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4."
         ),
     )
@@ -933,10 +934,10 @@ examples:
         default=None,
         metavar="ARG",
         help=(
-            "[--distilled only] Image anchor for the new frames. Form: PATH [FRAME_IDX STRENGTH [CRF]], repeatable, "
+            "[--distilled only] Image anchor for the new frames. Form: PATH [FRAME_IDX STRENGTH [BINDING] [CRF]], repeatable, "
             "as generate --distilled --image. FRAME_IDX counts the appended frames only: 0 is the first new frame, "
             "'last' or -1 the last one (8 x --extend-frames new frames). Every anchor is a guide "
-            "(VideoConditionByKeyframeIndex), applied in both stages. PATH alone means FRAME_IDX=0 STRENGTH=1.0."
+            "(VideoConditionByKeyframeIndex), applied in both stages, whatever its BINDING. PATH alone means FRAME_IDX=0 STRENGTH=1.0."
         ),
     )
     ext.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 30; rejected by --distilled)")
@@ -1017,7 +1018,8 @@ examples:
         default=None,
         metavar="ARG",
         help=(
-            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. Repeatable to anchor multiple frames. "
+            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [BINDING] [CRF]]. Repeatable to anchor "
+            "multiple frames. BINDING is auto (default when omitted: FRAME_IDX 0 replaces the first latent, later frames guide), replace (pins the still on a causal latent start: pixel frame 0 or 1 + 8 * k) or guide (a keyframe at any pixel frame); with one trailing token, a binding keyword selects BINDING and an integer selects CRF. "
             "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4."
         ),
     )

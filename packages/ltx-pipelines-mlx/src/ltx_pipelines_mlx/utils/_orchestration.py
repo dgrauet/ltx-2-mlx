@@ -274,12 +274,15 @@ def combined_image_conditionings(
 ):
     """Build a list of conditioning items from a list of input images.
 
-    Mirrors upstream ``ltx_pipelines.utils.helpers.combined_image_conditionings``:
+    Mirrors upstream ``ltx_pipelines.utils.helpers.image_conditionings`` +
+    ``LoadedImageConditioning.to_item`` (v1.5.0), dispatching on the binding:
 
-    - First image with ``frame_idx == 0`` becomes a
-      :class:`VideoConditionByLatentIndex` (replaces latent[0]).
-    - Other images become :class:`VideoConditionByKeyframeIndex`
-      entries appended at their respective frame indices.
+    - :class:`ImageReplace` at pixel frame ``f`` becomes a
+      :class:`VideoConditionByLatentIndex` replacing latent
+      ``replacement_latent_index(f)`` (``0`` for frame 0, ``1 + (f - 1) // 8``
+      otherwise).
+    - :class:`ImageGuide` becomes a :class:`VideoConditionByKeyframeIndex`
+      appended at its pixel frame.
 
     Args:
         images: List of :class:`ImageConditioningInput` whose ``crf`` has
@@ -297,6 +300,7 @@ def combined_image_conditionings(
     from ltx_core_mlx.conditioning.types.keyframe_cond import VideoConditionByKeyframeIndex
     from ltx_core_mlx.conditioning.types.latent_cond import VideoConditionByLatentIndex
     from ltx_pipelines_mlx.utils.media_io import load_image_and_preprocess
+    from ltx_pipelines_mlx.utils.types import replacement_latent_index
 
     conditionings: list = []
     for img in images:
@@ -311,10 +315,10 @@ def combined_image_conditionings(
         # denoising step, with the VAE encoder still referenced next to the DiT.
         mx.eval(ref_tokens)
 
-        if img.frame_idx == 0:
+        if img.replaces:
             conditionings.append(
                 VideoConditionByLatentIndex(
-                    frame_indices=[0],
+                    frame_indices=[replacement_latent_index(img.frame_idx)],
                     clean_latent=ref_tokens,
                     strength=img.strength,
                 )

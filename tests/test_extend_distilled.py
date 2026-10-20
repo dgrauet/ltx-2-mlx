@@ -433,9 +433,9 @@ def test_image_anchors_count_the_new_frames_and_move_past_the_carry(stubbed):
 
     pipe, record, _ = stubbed
     images = [
-        ImageConditioningInput("a.png", 0, 0.7),
-        ImageConditioningInput("b.png", -1, 0.7),
-        ImageConditioningInput("c.png", 10, 1.0, 0),
+        ImageConditioningInput.at("a.png", 0, 0.7),
+        ImageConditioningInput.at("b.png", -1, 0.7),
+        ImageConditioningInput.at("c.png", 10, 1.0, 0),
     ]
     pipe.extend_from_video("x", "src.mp4", extend_frames=3, images=images)
 
@@ -462,7 +462,7 @@ def test_image_anchor_outside_the_new_frames_fails_before_any_encode(stubbed, fr
 
     pipe, record, _ = stubbed
     with pytest.raises(ValueError, match="frame index"):
-        pipe.extend_from_video("x", "src.mp4", extend_frames=3, images=[ImageConditioningInput("a.png", frame, 0.7)])
+        pipe.extend_from_video("x", "src.mp4", extend_frames=3, images=[ImageConditioningInput.at("a.png", frame, 0.7)])
     assert record["encoded"] == []
 
 
