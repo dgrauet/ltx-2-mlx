@@ -933,7 +933,9 @@ Two-stage pipeline for higher-resolution generation. Requires the dev model + di
   - `STAGE_2_SIGMAS` (default 3 steps)
   - I2V conditioning re-encoded at full resolution
   - Denormalize → neural upsampler 2x → re-normalize before Stage 2
-  - Audio: on `--two-stage`, stage 2 keeps stage 1's audio as a frozen conditioning stream (upstream v1.4.0 `freeze_audio=True`, #173); `--refine-audio` (`refine_audio=True`, upstream v1.5.0) re-noises it at the first stage-2 sigma, denoises it with the video and ships stage 2's audio; on `--two-stages-hq` stage 2 re-noises the stage-1 audio and refines it with the video, as upstream does
+  - Audio: on `--two-stage`, stage 2 keeps stage 1's audio as a frozen conditioning stream (upstream v1.4.0 `freeze_audio=True`, #173); `--refine-audio` (`refine_audio=True`, upstream v1.5.0) re-noises it at the first stage-2 sigma, denoises it with the video and ships stage 2's audio (2.5 q8, 640×384×121, `--stg-scale 0 --low-ram`, seed 5, a
+    speech prompt: same time, 1322 vs 1330 s, peak footprint 23.2 vs 22.8 GB; the same pauses at the same times, audio
+    −16.0 vs −17.9 dB RMS; the video changes too, 22.6 dB PSNR, since stage 2 no longer sees a frozen track); on `--two-stages-hq` stage 2 re-noises the stage-1 audio and refines it with the video, as upstream does
 
 ### Critical Implementation Details
 
