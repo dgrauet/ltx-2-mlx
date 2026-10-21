@@ -90,7 +90,27 @@ def _pin_prefix(tokens: mx.array, tokens_per_frame: int) -> VideoConditionByLate
 
 
 def _as_guide(image: ImageConditioningInput) -> ImageConditioningInput:
-    """The same anchor as a guide (resolved on the new frames, where a replace's latent grid does not apply)."""
+    """The same anchor as a guide.
+
+    Every anchor guides: the window starts with the pinned carry, so the new frames are counted
+    from a point that is not on the latent grid of the window. A replace binding is only taken on
+    frame 0, the binding ``auto`` (and ``ImageConditioningInput.at``) gives that frame.
+
+    Args:
+        image: An anchor on the new frames, ``frame_idx`` possibly negative (counted from the end).
+
+    Returns:
+        The anchor bound as a guide, same path, frame, strength and CRF.
+
+    Raises:
+        ValueError: on a replace binding off frame 0 (upstream would honour it on its own frame grid;
+            here it would silently become a guide).
+    """
+    if image.replaces and image.frame_idx != 0:
+        raise ValueError(
+            f"--image {image.path}: extend --distilled takes every anchor as a guide; "
+            f"a replace binding is not supported (got frame {image.frame_idx}), use guide"
+        )
     return ImageConditioningInput.guide(image.path, image.frame_idx, image.strength, image.crf)
 
 

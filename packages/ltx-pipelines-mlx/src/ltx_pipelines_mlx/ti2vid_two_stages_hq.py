@@ -176,7 +176,7 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
 
         # I2V conditioning at half resolution. ``images`` is the upstream-iso
         # multi-anchor list; ``image`` is the legacy single-image shorthand
-        # (frame_idx=0, strength=1.0).
+        # (``ImageConditioningInput.at(image, 0, 1.0)``, a frame-0 replace).
         from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
         from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 
@@ -277,8 +277,8 @@ class TI2VidTwoStagesHQPipeline(TI2VidTwoStagesPipeline):
         self._fuse_distilled_lora(self.dit)
 
         # --- Upscale with denormalize/renormalize ---
-        # Strip any appended keyframe tokens (multi-anchor with frame_idx>0
-        # appends via VideoConditionByKeyframeIndex; only the base
+        # Strip any appended keyframe tokens (guide-bound images append them
+        # via VideoConditionByKeyframeIndex; only the base
         # F*H*W tokens are spatial latent we need to unpatchify).
         self.generated_keyframes = extract_generated_keyframes(
             output_1.video_latent, video_state.generated_keyframe_layout, self.video_patchifier, (H_half, W_half)

@@ -204,3 +204,30 @@ def test_extend_anchors_are_guides() -> None:
     assert _as_guide(ImageConditioningInput.replace("a.png", 0, 0.7, 18)) == ImageConditioningInput.guide(
         "a.png", 0, 0.7, 18
     )
+
+
+def test_extend_refuses_a_replace_off_frame_zero() -> None:
+    """The window's latent grid starts on the carry, so a replace would silently become a guide."""
+    with pytest.raises(ValueError, match="extend --distilled takes every anchor as a guide"):
+        _as_guide(ImageConditioningInput.replace("a.png", 9, 1.0))
+    with pytest.raises(ValueError, match="got frame -8"):
+        _as_guide(_parse("a.png", "-8", "1.0", "replace"))
+
+
+def test_dfr_guard_resolves_negative_replace_indices() -> None:
+    """``-num_frames`` is frame 0; with the length still to be predicted a negative index waits."""
+    _refuse_replace_under_temporal_rounds([_parse("a.png", "-97", "1.0", "replace")], 97)
+    _refuse_replace_under_temporal_rounds([_parse("a.png", "-96", "1.0", "replace")], None)
+    with pytest.raises(ValueError, match="replace binding off frame 0"):
+        _refuse_replace_under_temporal_rounds([_parse("a.png", "-96", "1.0", "replace")], 97)
+
+
+def test_refine_audio_is_refused_by_pipelines_without_it() -> None:
+    """Upstream defines ``refine_audio`` on ``TI2VidTwoStagesPipeline`` only."""
+    from ltx_pipelines_mlx.distilled import DistilledPipeline
+    from ltx_pipelines_mlx.ti2vid_two_stages_hq import TI2VidTwoStagesHQPipeline
+
+    for cls in (TI2VidTwoStagesHQPipeline, DistilledPipeline):
+        pipe = cls.__new__(cls)
+        with pytest.raises(ValueError, match=f"refine_audio is not supported by {cls.__name__}"):
+            pipe.generate_and_save(prompt="p", output_path="out.mp4", frame_rate=24.0, refine_audio=True)

@@ -410,7 +410,7 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
             self._load_upsampler()
         assert self.upsampler is not None
 
-        # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
+        # Strip appended keyframe tokens (guide-bound images, generated keyframe slots).
         gen_tokens_1 = output_1.video_latent[:, : F * H_half * W_half, :]
         video_half = self.video_patchifier.unpatchify(gen_tokens_1, (F, H_half, W_half))
         H_full = H_half * 2

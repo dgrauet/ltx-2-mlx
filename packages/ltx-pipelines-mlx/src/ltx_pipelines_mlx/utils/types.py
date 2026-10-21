@@ -147,6 +147,7 @@ def replacement_latent_index(frame_idx: int) -> int:
 
 
 def _assert_replacement_frame_idx(frame_idx: int) -> None:
+    """Raise unless ``frame_idx`` starts a latent frame (0 or ``1 + 8k``; upstream message)."""
     if frame_idx == 0:
         return
     if frame_idx < 1 or (frame_idx - 1) % _VIDEO_TEMPORAL_SCALE != 0:

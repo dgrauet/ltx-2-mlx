@@ -11,6 +11,7 @@ Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages.py
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -513,7 +514,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         # I2V conditioning at half resolution. ``images`` is the upstream-iso
         # multi-anchor list; ``image`` is the legacy single-image shorthand
-        # (frame_idx=0, strength=1.0).
+        # (``ImageConditioningInput.at(image, 0, 1.0)``, a frame-0 replace).
         from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
         from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 
@@ -628,7 +629,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         self._fuse_distilled_lora(self.dit)
 
         # --- Upscale with denormalize/renormalize ---
-        # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
+        # Strip appended keyframe tokens (guide-bound images, generated keyframe slots).
         self.generated_keyframes = extract_generated_keyframes(
             output_1.video_latent, video_state.generated_keyframe_layout, self.video_patchifier, (H_half, W_half)
         )
@@ -784,7 +785,14 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         ``nag`` (Normalized Attention Guidance, the CFG-less subclasses only) is forwarded
         only when set, too, and so is ``refine_audio`` (``TI2VidTwoStagesPipeline`` only).
+
+        Raises:
+            ValueError: ``refine_audio`` on a subclass whose ``generate_two_stage`` does not take it.
         """
+        if refine_audio and "refine_audio" not in inspect.signature(self.generate_two_stage).parameters:
+            raise ValueError(
+                f"refine_audio is not supported by {type(self).__name__} (TI2VidTwoStagesPipeline only, as upstream)"
+            )
         gen_kwargs: dict = dict(
             prompt=prompt,
             height=height,

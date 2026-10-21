@@ -6,7 +6,7 @@ Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2) for Apple Silicon.
 
 - **LTX-2.5** — pipeline coverage on 2.5 packs (`--distilled`, `--two-stage`, `--two-stages-hq`, `--one-stage`, `--dfr`, `a2v`, `retake`, `extend`, `ic-lora`, `hdr-ic-lora`), auto-detected from the pack (no new flag), plus **auto-predicted duration** via the DurationHead (omit `-f`, or clamp with `--auto-duration MIN:MAX`). Only `lipdub` waits on a 2.5 Dub-It LoRA; `ic-lora` runs with the IC-LoRAs Lightricks has published for 2.5. See [LTX-2.5 section](#ltx-25).
 - **Text-to-Video** — generate video + stereo 48kHz audio from a text prompt
-- **Image-to-Video** — animate a reference image; `--image PATH FRAME STRENGTH` is repeatable for multi-anchor I2V, and `FRAME` may be `last` or negative (counted from the end)
+- **Image-to-Video** — animate a reference image; `--image PATH FRAME STRENGTH [auto|replace|guide] [CRF]` is repeatable for multi-anchor I2V, and `FRAME` may be `last` or negative (counted from the end)
 - **Audio-to-Video** — generate video conditioned on an audio track (`a2v`, dev + CFG; `a2v --distilled` for the fast distilled path and `a2v --dfr` on the DFR base path (2.5 packs), both experimental)
 - **Retake / Extend** — edit existing videos (regenerate segments, add frames); `retake --distilled` / `extend --distilled` run on the distilled model, roughly 10–20× faster (experimental)
 - **Interpolation between images** — `generate --two-stage` with each image bound as a guide (`--image PATH FRAME STRENGTH guide`) and `--refine-audio`; this replaces the `keyframe` command, removed following upstream v1.5.0

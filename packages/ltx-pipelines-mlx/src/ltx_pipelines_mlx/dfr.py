@@ -386,15 +386,32 @@ def rebase_image_conditionings(
     return rebased
 
 
-def _refuse_replace_under_temporal_rounds(images: Sequence[ImageConditioningInput] | None) -> None:
+def _refuse_replace_under_temporal_rounds(
+    images: Sequence[ImageConditioningInput] | None, num_frames: int | None = None
+) -> None:
     """Refuse a ``replace`` binding off frame 0 before a temporal round would rebase it off the latent grid.
 
     A round doubles the timeline, so pixel frame ``1 + 8 * k`` becomes ``2 + 16 * k``, which starts
     no latent: upstream's ``map_frame_index`` raises there, after stage 1 and stage 2 have run. This
     local guard raises before any model work instead.
+
+    Args:
+        images: Image conditioning inputs, ``frame_idx`` possibly negative (counted from the end).
+        num_frames: Requested pixel-frame count, or ``None`` while it is still to be predicted: a
+            negative index is then skipped here and checked again once the length is known.
+
+    Raises:
+        ValueError: on a ``replace`` binding that does not land on frame 0.
     """
     for image in images or ():
-        if image.replaces and image.frame_idx != 0:
+        if not image.replaces:
+            continue
+        frame_idx = image.frame_idx
+        if frame_idx < 0:
+            if num_frames is None:
+                continue
+            frame_idx += num_frames
+        if frame_idx != 0:
             raise ValueError(
                 f"--image {image.path}: a replace binding off frame 0 is not supported with DFR temporal rounds "
                 "(the doubled timeline moves it off the latent grid); use guide"
@@ -687,7 +704,7 @@ class DFRPipeline(DistilledPipeline):
                 raise ValueError("Prompt Relay (--segment) is not supported with DFR temporal rounds")
             if self._tile_count is not None:
                 raise ValueError("DFR temporal rounds do not support modality tiling (--tile-*)")
-            _refuse_replace_under_temporal_rounds(images)
+            _refuse_replace_under_temporal_rounds(images, num_frames if isinstance(num_frames, int) else None)
             self._resolve_temporal_upsampler_path()  # fail before any Gemma load
         if self.spatial_upscalings == 2:
             if prompt_relay is not None:
@@ -708,6 +725,8 @@ class DFRPipeline(DistilledPipeline):
         def canvas_for(resolved_frames: int) -> tuple[int, list[int]]:
             """Pad the resolved clip length to whole keyframe segments (``_stage1`` hook)."""
             nonlocal requested
+            if self.temporal_upscalings:
+                _refuse_replace_under_temporal_rounds(images, resolved_frames)  # negative indices, now resolvable
             canvas_frames, segment, positions = resolve_canvas(resolved_frames)
             requested = resolved_frames
             if self.verbose:

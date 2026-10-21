@@ -47,6 +47,7 @@ from ltx_pipelines_mlx.utils.blocks import snap_num_frames
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.media_io import decode_video_by_frame, video_preprocess
 from ltx_pipelines_mlx.utils.samplers import denoise_loop
+from ltx_pipelines_mlx.utils.types import ImageConditioningInput
 
 logger = logging.getLogger(__name__)
 
@@ -423,7 +424,7 @@ class ICLoraPipeline(BasePipeline):
         seed: int = 42,
         stage1_steps: int | None = None,
         stage2_steps: int | None = None,
-        images: list[tuple[str, int, float]] | None = None,
+        images: list[ImageConditioningInput | tuple[str, int, float]] | None = None,
         conditioning_attention_strength: float = 1.0,
         conditioning_attention_mask: mx.array | None = None,
         skip_stage_2: bool = False,
@@ -768,7 +769,7 @@ class ICLoraPipeline(BasePipeline):
         seed: int = 42,
         stage1_steps: int | None = None,
         stage2_steps: int | None = None,
-        images: list[tuple[str, int, float]] | None = None,
+        images: list[ImageConditioningInput | tuple[str, int, float]] | None = None,
         conditioning_attention_strength: float = 1.0,
         skip_stage_2: bool = False,
         single_stage: bool = False,

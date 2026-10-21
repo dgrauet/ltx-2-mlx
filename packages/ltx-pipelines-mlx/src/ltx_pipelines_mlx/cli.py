@@ -737,8 +737,8 @@ examples:
         help=(
             "DFR spatial epilogue: 1 = stage 2 at full resolution (default), 2 = stage 1 at H/4 and "
             "stage 2 + temporal rounds at H/2, then a full-res detailing epilogue (Lanczos-upsampled "
-            "re-encoded keyframes, then a windowed denoise: one step on 2x2 spatial tiles, the rest on "
-            "4x4). Dims are floored to multiples of "
+            "re-encoded keyframes, then a windowed denoise, one step then the rest, on one grid of spatial "
+            "tiles of at most 32 latent cells (1024 px) overlapping by 2). Dims are floored to multiples of "
             "128 px, with a warning. --dfr only; not compatible with --segment or --tile-*."
         ),
     )
@@ -943,7 +943,7 @@ examples:
             "[--distilled only] Image anchor for the new frames. Form: PATH [FRAME_IDX STRENGTH [BINDING] [CRF]], repeatable, "
             "as generate --distilled --image. FRAME_IDX counts the appended frames only: 0 is the first new frame, "
             "'last' or -1 the last one (8 x --extend-frames new frames). Every anchor is a guide "
-            "(VideoConditionByKeyframeIndex), applied in both stages, whatever its BINDING. PATH alone means FRAME_IDX=0 STRENGTH=1.0."
+            "(VideoConditionByKeyframeIndex), applied in both stages; BINDING replace is refused off frame 0. PATH alone means FRAME_IDX=0 STRENGTH=1.0."
         ),
     )
     ext.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 30; rejected by --distilled)")
