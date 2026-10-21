@@ -111,7 +111,6 @@ def test_every_pipeline_routes_decode_through_base():
     import ltx_pipelines_mlx.distilled
     import ltx_pipelines_mlx.hdr_ic_lora
     import ltx_pipelines_mlx.ic_lora
-    import ltx_pipelines_mlx.keyframe_interpolation
     import ltx_pipelines_mlx.lipdub
     import ltx_pipelines_mlx.ti2vid_one_stage
     import ltx_pipelines_mlx.ti2vid_two_stages  # noqa: F401

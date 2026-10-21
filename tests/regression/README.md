@@ -17,14 +17,16 @@ Heavy artifacts (`.mp4`, `.wav`) are gitignored. Only `manifest.json`
 
 A `g3b_hedgehog` golden runs the previously-validated hedgehog
 keyframe config (seed 712577398, default 480x704, dev model + CFG).
-It is **not** a regression check in the strict sense: the keyframe
-pipeline currently produces a hold-cut-decay pattern (frames stick on
-keyframe1 for ~80% of the timeline, jump, then collapse onto keyframe2
-over the last few frames) instead of smooth interpolation. Fix 2
-(`num_pixel_frames`) was applied and the pattern persists with only a
-~5% reduction in cut amplitude — confirming the regression is not
-localised to keyframe RoPE positions. `g3b_hedgehog` is kept so that
-future investigation has a frozen reference of the broken state.
+It is **not** a regression check in the strict sense: the `keyframe`
+pipeline it was captured with (`post_fix_2_kf`) produced a hold-cut-decay
+pattern (frames stick on keyframe1 for ~80% of the timeline, jump, then
+collapse onto keyframe2 over the last few frames) instead of smooth
+interpolation. Fix 2 (`num_pixel_frames`) was applied and the pattern
+persisted with only a ~5% reduction in cut amplitude — confirming the
+regression was not localised to keyframe RoPE positions. The `keyframe`
+command has since been removed (upstream v1.5.0); `g3b_hedgehog` now runs
+its replacement, `generate --two-stage` with both images bound as guides
+and `--refine-audio`, so it must be re-captured before any comparison.
 
 ## Per-fix workflow
 
