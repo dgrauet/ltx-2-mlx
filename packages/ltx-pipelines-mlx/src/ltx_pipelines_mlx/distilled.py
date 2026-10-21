@@ -140,7 +140,7 @@ def resolve_stage1_frames(
     """
     resolved_images = list(images) if images else []
     if image is not None and not resolved_images:
-        resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
+        resolved_images = [ImageConditioningInput.at(image, 0, 1.0)]
     resolved_images = resolve_frame_indices(resolved_images, num_frames)
     if canvas_for is not None:
         num_frames, generated_keyframes = canvas_for(num_frames)

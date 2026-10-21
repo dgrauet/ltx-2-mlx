@@ -361,18 +361,34 @@ def plan_epilogue_windows(
 def rebase_image_conditionings(
     images: Sequence[ImageConditioningInput], *, pixel_scale: int, pixel_start: int = 0, pixel_end: int | None = None
 ) -> list[ImageConditioningInput]:
-    """Map ``ImageConditioningInput.frame_idx`` onto a temporally upsampled grid (upstream ``_rebase_image_conditionings``).
+    """Map ``ImageConditioningInput.frame_idx`` onto a temporally upsampled grid (upstream ``rebase_image_conditionings``).
 
     After ``r`` rounds a moment sits at ``frame_idx * 2**r``; with ``pixel_end`` only images inside
-    ``[pixel_start, pixel_end]`` are kept and their index becomes tile-local.
+    ``[pixel_start, pixel_end]`` are kept and their index becomes tile-local. The binding is kept
+    (upstream v1.5.0 ``map_frame_index``): a guide that lands on tile-local frame 0 stays a guide.
     """
     rebased = []
     for image in images:
         scaled = image.frame_idx * pixel_scale
         if pixel_end is not None and not (pixel_start <= scaled <= pixel_end):
             continue
-        rebased.append(image._replace(frame_idx=scaled - pixel_start))
+        rebased.append(image.with_frame_idx(scaled - pixel_start))
     return rebased
+
+
+def _refuse_replace_under_temporal_rounds(images: Sequence[ImageConditioningInput] | None) -> None:
+    """Refuse a ``replace`` binding off frame 0 before a temporal round would rebase it off the latent grid.
+
+    A round doubles the timeline, so pixel frame ``1 + 8 * k`` becomes ``2 + 16 * k``, which starts
+    no latent: upstream's ``map_frame_index`` raises there, after stage 1 and stage 2 have run. This
+    local guard raises before any model work instead.
+    """
+    for image in images or ():
+        if image.replaces and image.frame_idx != 0:
+            raise ValueError(
+                f"--image {image.path}: a replace binding off frame 0 is not supported with DFR temporal rounds "
+                "(the doubled timeline moves it off the latent grid); use guide"
+            )
 
 
 class DFRPipeline(DistilledPipeline):
@@ -661,6 +677,7 @@ class DFRPipeline(DistilledPipeline):
                 raise ValueError("Prompt Relay (--segment) is not supported with DFR temporal rounds")
             if self._tile_count is not None:
                 raise ValueError("DFR temporal rounds do not support modality tiling (--tile-*)")
+            _refuse_replace_under_temporal_rounds(images)
             self._resolve_temporal_upsampler_path()  # fail before any Gemma load
         if self.spatial_upscalings == 2:
             if prompt_relay is not None:
