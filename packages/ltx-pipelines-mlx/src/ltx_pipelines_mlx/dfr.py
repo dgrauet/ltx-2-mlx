@@ -19,13 +19,15 @@ keyframes (plus an opening frame when no image anchors frame 0) are decoded one 
 the render's decoder, Lanczos-upsampled x2 and re-encoded as strength-1.0 keyframes; the H/2 latent
 is spatially upsampled and re-denoised window by window (one window per last-round temporal tile,
 each pinned to the previous one) with the detailing LoRA, the H/2 latent as the IC-LoRA reference
-and frozen stage-1 audio: one ancestral step on a 2x2 spatial grid, the remaining steps on 4x4. The
-re-encoded planes become the decoder keyframes.
+and frozen stage-1 audio: one ancestral step, then the remaining steps, on one spatial tile grid of
+tiles at most 32 latent cells per side (upstream v1.5.0). The re-encoded planes become the decoder
+keyframes.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
@@ -104,13 +106,12 @@ TEMPORAL_SIGMAS: list[float] = list(LTX_2_5_DISTILLED_SIGMAS[4:])
 _MAX_CONDITIONING_FPS = 60.0
 _SNAP_CONDITIONING_FPS_ABOVE = 30.0
 
-#: Upstream ``EPILOGUE_SPATIAL_OVERLAP``: spatial tiles inside an epilogue window overlap by this
-#: many token-grid cells (clamped per-axis by :func:`clamp_tile_counts` on a small latent).
-EPILOGUE_SPATIAL_OVERLAP = 10
-#: Upstream ``EPILOGUE_SPATIAL_COARSE_TILES`` / ``EPILOGUE_SPATIAL_TILES``: the first detailing step
-#: of each window runs on a 2x2 grid, the remaining steps retile to 4x4.
-EPILOGUE_SPATIAL_COARSE_TILES = 2
-EPILOGUE_SPATIAL_TILES = 4
+#: Upstream ``EPILOGUE_SPATIAL_OVERLAP`` (v1.5.0): spatial tiles inside an epilogue window overlap by
+#: this many token-grid cells (64 px; clamped per-axis by :func:`clamp_tile_counts` on a small latent).
+EPILOGUE_SPATIAL_OVERLAP = 2
+#: Upstream ``EPILOGUE_TILE_CELLS``: every epilogue step uses one grid of tiles at most this many
+#: latent cells per side (:func:`epilogue_tile_count`).
+EPILOGUE_TILE_CELLS = 32
 #: Upstream ``_EPILOGUE_ANCESTRAL_NOISE_SEED_OFFSET``: the epilogue's ancestral loop seeds from
 #: ``seed + 30000 + call``, ``call`` counting every pass (window i: coarse 2i, fine 2i + 1).
 EPILOGUE_ANCESTRAL_NOISE_SEED_OFFSET = 30000
@@ -203,6 +204,15 @@ def clamp_tile_counts(tiling: TileCountConfig, latent_fhw: tuple[int, int, int])
         height=_clamp_dim_tiling(tiling.height, height, "Height"),
         width=_clamp_dim_tiling(tiling.width, width, "Width"),
     )
+
+
+def epilogue_tile_count(cells: int) -> int:
+    """Tiles along a latent axis of ``cells`` cells: the fewest whose overlapping tiles fit ``EPILOGUE_TILE_CELLS``.
+
+    Upstream ``epilogue_tile_count`` (v1.5.0), e.g. 1 tile up to 32 cells (1024 px), 2 up to 62.
+    """
+    stride = EPILOGUE_TILE_CELLS - EPILOGUE_SPATIAL_OVERLAP
+    return max(1, math.ceil((cells - EPILOGUE_SPATIAL_OVERLAP) / stride))
 
 
 def floor_to_multiple(value: int, multiple: int) -> int:
@@ -1100,7 +1110,6 @@ class DFRPipeline(DistilledPipeline):
         conditionings: list,
         *,
         sigmas: list[float],
-        tiles: int,
         noise_scale: float,
         audio_tokens: mx.array,
         cond_fps: float,
@@ -1115,7 +1124,6 @@ class DFRPipeline(DistilledPipeline):
             latent: ``(1, 128, F, H, W)`` window latent the pass starts from.
             conditionings: The window's conditioning items, applied to a fresh state.
             sigmas: This pass's schedule (coarse ``sigmas[:2]`` or fine ``sigmas[1:]``).
-            tiles: Spatial tiles per axis (2 coarse, 4 fine), clamped to the latent.
             noise_scale: Initial noise blend (``sigmas[0]`` for the coarse pass, 0 for the fine one).
             audio_tokens: ``(1, T, 128)`` frozen audio tokens for the window.
             cond_fps: Transformer fps.
@@ -1127,11 +1135,12 @@ class DFRPipeline(DistilledPipeline):
             The denoised ``(1, 128, F, H, W)`` window latent.
         """
         F, H, W = latent.shape[2], latent.shape[3], latent.shape[4]
+        # One grid for both passes of a window (upstream v1.5.0 ``_run_epilogue_windows``).
         tiling = clamp_tile_counts(
             TileCountConfig(
                 frames=DimensionTilingConfig(1, 0),
-                height=DimensionTilingConfig(tiles, EPILOGUE_SPATIAL_OVERLAP),
-                width=DimensionTilingConfig(tiles, EPILOGUE_SPATIAL_OVERLAP),
+                height=DimensionTilingConfig(epilogue_tile_count(H), EPILOGUE_SPATIAL_OVERLAP),
+                width=DimensionTilingConfig(epilogue_tile_count(W), EPILOGUE_SPATIAL_OVERLAP),
             ),
             (F, H, W),
         )
@@ -1197,8 +1206,9 @@ class DFRPipeline(DistilledPipeline):
         The canvas is cut into ``2**T`` temporal windows on the last round's seams (one window without
         rounds), detailed one after the other. A non-first window starts on the last carry plane before
         its seam and pins its lead-in cells to the previous window's finished output, as the temporal
-        rounds do. Each window runs one ancestral step on a 2x2 spatial grid, then re-prepares the same
-        conditionings on that output (no new noise) and runs the remaining steps on a 4x4 grid; spatial
+        rounds do. Each window runs one ancestral step, then re-prepares the same conditionings on that
+        output (no new noise) and runs the remaining steps, both on one spatial grid of tiles at most
+        ``EPILOGUE_TILE_CELLS`` cells per side overlapping by ``EPILOGUE_SPATIAL_OVERLAP``; spatial
         tiles blend after every step, windows are never blended. Per window: user images on the final
         grid, the carry keyframes re-decoded, Lanczos x2 upsampled and re-encoded (strength 1.0) that
         sit after the resume point, an opening frame at frame 0 of the first window when no image
@@ -1386,7 +1396,6 @@ class DFRPipeline(DistilledPipeline):
                     window_latent,
                     conditionings,
                     sigmas=coarse_sigmas,
-                    tiles=EPILOGUE_SPATIAL_COARSE_TILES,
                     noise_scale=coarse_sigmas[0],
                     audio_tokens=audio_tokens,
                     cond_fps=cond_fps,
@@ -1401,7 +1410,6 @@ class DFRPipeline(DistilledPipeline):
                         window_latent,
                         conditionings,
                         sigmas=fine_sigmas,
-                        tiles=EPILOGUE_SPATIAL_TILES,
                         noise_scale=0.0,
                         audio_tokens=audio_tokens,
                         cond_fps=cond_fps,
@@ -1494,6 +1502,7 @@ __all__ = [
     "EPILOGUE_KEYFRAME_STRENGTH",
     "EPILOGUE_NOISE_SEED_OFFSET",
     "EPILOGUE_SPATIAL_OVERLAP",
+    "EPILOGUE_TILE_CELLS",
     "KEYFRAME_PLANE_DECODE_SEED_OFFSET",
     "TEMPORAL_ANCESTRAL_ETA",
     "TEMPORAL_SIGMAS",
