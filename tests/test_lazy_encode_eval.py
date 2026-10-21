@@ -40,8 +40,8 @@ def test_combined_image_conditionings_evaluates_each_latent_while_the_encoder_is
 
     monkeypatch.setattr(orch.mx, "eval", spy_eval)
     images = [
-        ImageConditioningInput(path="a.png", frame_idx=0, strength=1.0, crf=0),
-        ImageConditioningInput(path="b.png", frame_idx=16, strength=0.7, crf=0),
+        ImageConditioningInput.at("a.png", 0, 1.0, 0),
+        ImageConditioningInput.at("b.png", 16, 0.7, 0),
     ]
 
     conds = orch.combined_image_conditionings(

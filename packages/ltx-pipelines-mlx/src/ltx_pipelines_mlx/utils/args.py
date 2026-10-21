@@ -1,7 +1,8 @@
 """CLI argument helpers — mirrors upstream ``ltx_pipelines.utils.args``.
 
-Currently exposes the multi-image I2V conditioning input used by the
-text-to-video pipelines: ``ImageConditioningInput`` + ``ImageAction``.
+Currently exposes the multi-image I2V conditioning parser used by the
+text-to-video pipelines (``ImageAction``) and re-exports
+``ImageConditioningInput``, which lives in ``utils.types`` as upstream.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import NamedTuple
 # ``ltx_pipelines_mlx.utils.media_io`` (mirrors upstream's
 # ``ltx_pipelines.utils.media_io.DEFAULT_IMAGE_CRF``).
 from ltx_pipelines_mlx.utils.media_io import DEFAULT_IMAGE_CRF
+from ltx_pipelines_mlx.utils.types import ImageConditioningInput, ImageGuide, ImageReplace
 
 
 def _append_to_dest(namespace: argparse.Namespace, dest: str, item: object) -> None:
@@ -26,45 +28,15 @@ def _append_to_dest(namespace: argparse.Namespace, dest: str, item: object) -> N
     setattr(namespace, dest, existing)
 
 
-class ImageConditioningInput(NamedTuple):
-    """One image conditioning entry for multi-anchor I2V.
-
-    Mirrors upstream ``ltx_pipelines.utils.args.ImageConditioningInput``
-    verbatim.
-
-    Args:
-        path: Path to the image file.
-        frame_idx: Target latent frame index. ``0`` replaces the first
-            latent frame (``VideoConditionByLatentIndex``); any other
-            value appends a keyframe at that pixel-frame position
-            (``VideoConditionByKeyframeIndex``). A negative value counts
-            back from the end (``-1`` is the last pixel frame) and is
-            resolved by :func:`resolve_frame_indices` once the frame count
-            is known, which is what makes an end anchor usable with an
-            auto-predicted duration.
-        strength: Conditioning strength in ``[0, 1]``. ``1.0`` = fully
-            preserved.
-        crf: H.264 CRF the image is re-compressed at before encoding.
-            ``None`` (the default) means "use what matches the model": the
-            pipeline fills it in from the checkpoint it runs
-            (``ImageConditioner.resolve_crf``; 33 before LTX-2.4, 18 from
-            2.4 on). Pass it explicitly to override, including ``0`` to skip
-            re-compression entirely.
-    """
-
-    path: str
-    frame_idx: int
-    strength: float
-    crf: int | None = None
-
-
 def resolve_frame_indices(images: list[ImageConditioningInput], num_frames: int) -> list[ImageConditioningInput]:
     """Turn negative ``frame_idx`` values into pixel-frame positions counted from the end.
 
     ``-1`` becomes ``num_frames - 1`` (the last pixel frame), ``-2`` the one
-    before it, and so on. Non-negative indices pass through unchanged.
-    ``-num_frames`` resolves to ``0``, so it gets the hard first-latent replace
-    (``VideoConditionByLatentIndex``) rather than a soft keyframe.
+    before it, and so on. Non-negative indices pass through unchanged. The
+    binding is kept: a negative index parsed without a binding (``auto``) is a
+    guide, as upstream ``ImageConditioningInput.at`` makes every non-zero index,
+    so ``-num_frames`` resolves to a guide at frame 0. A ``replace`` is checked
+    against the latent grid once resolved (``0`` or ``1 + 8 * k``).
 
     Args:
         images: Conditioning inputs as parsed from ``--image``.
@@ -76,7 +48,7 @@ def resolve_frame_indices(images: list[ImageConditioningInput], num_frames: int)
     Raises:
         ValueError: If an index lies outside the clip, before its first frame or
             past its last (upstream ``assert_image_frames_in_clip`` checks the
-            same range).
+            same range), or if a resolved ``replace`` does not start a latent.
     """
     resolved = []
     for image in images:
@@ -89,25 +61,49 @@ def resolve_frame_indices(images: list[ImageConditioningInput], num_frames: int)
             raise ValueError(
                 f"--image {image.path}: frame index {image.frame_idx} is past the last of {num_frames} frames"
             )
-        resolved.append(image._replace(frame_idx=frame_idx))
+        try:
+            resolved.append(image.with_frame_idx(frame_idx))
+        except ValueError as e:
+            raise ValueError(f"--image {image.path}: {e}") from e
     return resolved
 
 
+_IMAGE_BINDING_KEYWORDS = frozenset({"auto", "replace", "guide"})
+
+
+def image_conditioning_input(
+    path: str, frame_idx: int, strength: float, binding_mode: str = "auto", crf: int | None = None
+) -> ImageConditioningInput:
+    """Build an :class:`ImageConditioningInput` from a ``BINDING`` keyword (upstream ``ImageAction``'s ``match``)."""
+    match binding_mode:
+        case "auto":
+            return ImageConditioningInput.at(path, frame_idx, strength, crf)
+        case "replace":
+            return ImageConditioningInput.replace(path, frame_idx, strength, crf)
+        case "guide":
+            return ImageConditioningInput.guide(path, frame_idx, strength, crf)
+    raise ValueError(f"BINDING must be auto, replace, or guide, got {binding_mode!r}")
+
+
 class ImageAction(argparse.Action):
-    """Variadic argparse action accepting ``PATH [FRAME_IDX [STRENGTH [CRF]]]``.
+    """Variadic argparse action accepting ``PATH [FRAME_IDX STRENGTH [BINDING] [CRF]]``.
 
     Repeatable. Each invocation appends one
-    :class:`ImageConditioningInput` to the namespace list.
+    :class:`ImageConditioningInput` to the namespace list. Mirrors upstream
+    ``ltx_pipelines.utils.args.ImageAction`` (v1.5.0): ``BINDING`` is
+    ``auto`` (the default when omitted: frame 0 replaces the first latent,
+    later frames guide as keyframes), ``replace`` (pins the still on a causal
+    latent start, pixel frame 0 or ``1 + 8 * k``) or ``guide`` (a keyframe at
+    any pixel frame). With one trailing token, a binding keyword selects
+    ``BINDING`` and an integer selects ``CRF``. An omitted CRF stays ``None``,
+    which the pipeline resolves from the checkpoint it runs
+    (``ImageConditioner.resolve_crf``), as upstream.
 
-    Backward-compat: ``--image PATH`` alone is accepted and defaults to
-    ``frame_idx=0, strength=1.0`` — matches the prior single-arg API. The
-    strict upstream form is ``--image PATH FRAME_IDX STRENGTH [CRF]`` (3 or
-    4 args). An omitted CRF stays ``None``, which the pipeline resolves from
-    the checkpoint it runs (``ImageConditioner.resolve_crf``), as upstream.
-
-    ``FRAME_IDX`` may also be ``last`` (or ``end``), or a negative number
-    counting back from the end: ``--image end.png last 1.0`` anchors the
-    final frame even when ``--auto-duration`` picks the length.
+    Local extensions: ``--image PATH`` alone is accepted and defaults to
+    ``frame_idx=0, strength=1.0`` (the prior single-arg API). ``FRAME_IDX``
+    may also be ``last`` (or ``end``), or a negative number counting back from
+    the end: ``--image end.png last 1.0`` anchors the final frame even when
+    ``--auto-duration`` picks the length.
     """
 
     def __call__(  # type: ignore[override]
@@ -119,33 +115,37 @@ class ImageAction(argparse.Action):
     ) -> None:
         if not isinstance(values, list):
             values = [values]
-        if len(values) not in (1, 3, 4):
+        if len(values) not in (1, 3, 4, 5):
             parser.error(
-                f"{option_string}: expected 1, 3, or 4 values "
-                "(PATH [FRAME_IDX STRENGTH [CRF]]), got "
-                f"{len(values)}: {values}"
+                f"{option_string} requires 1 or 3 to 5 arguments "
+                f"(PATH [FRAME_IDX STRENGTH [BINDING] [CRF]]), got {len(values)}: {values}"
             )
 
         path = values[0]
-        crf: int | None = None
         if len(values) == 1:
-            frame_idx, strength = 0, 1.0
-        else:
-            try:
-                frame_idx = -1 if str(values[1]).lower() in ("last", "end") else int(values[1])
-                strength = float(values[2])
-                if len(values) == 4:
+            _append_to_dest(namespace, self.dest, ImageConditioningInput.at(path, 0, 1.0))
+            return
+        binding_mode = "auto"
+        crf: int | None = None
+        if len(values) == 5 and values[3] not in _IMAGE_BINDING_KEYWORDS:
+            parser.error(f"{option_string} BINDING must be auto, replace, or guide, got {values[3]!r}")
+        try:
+            frame_idx = -1 if str(values[1]).lower() in ("last", "end") else int(values[1])
+            strength = float(values[2])
+            if len(values) == 4:
+                if values[3] in _IMAGE_BINDING_KEYWORDS:
+                    binding_mode = values[3]
+                else:
                     crf = int(values[3])
-            except (ValueError, TypeError) as e:
-                parser.error(f"{option_string}: could not parse FRAME_IDX/STRENGTH/CRF from {values[1:]}: {e}")
-
-        item = ImageConditioningInput(
-            path=path,
-            frame_idx=frame_idx,
-            strength=strength,
-            crf=crf,
-        )
-
+            elif len(values) == 5:
+                binding_mode = values[3]
+                crf = int(values[4])
+        except (ValueError, TypeError) as e:
+            parser.error(f"{option_string}: could not parse FRAME_IDX/STRENGTH/CRF from {values[1:]}: {e}")
+        try:
+            item = image_conditioning_input(path, frame_idx, strength, binding_mode, crf)
+        except ValueError as e:
+            parser.error(f"{option_string} {path}: {e}")
         _append_to_dest(namespace, self.dest, item)
 
 
@@ -199,6 +199,10 @@ __all__ = [
     "DEFAULT_IMAGE_CRF",
     "ImageAction",
     "ImageConditioningInput",
+    "ImageGuide",
+    "ImageReplace",
     "SegmentAction",
     "SegmentInput",
+    "image_conditioning_input",
+    "resolve_frame_indices",
 ]

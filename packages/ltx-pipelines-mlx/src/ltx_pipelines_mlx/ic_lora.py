@@ -367,14 +367,13 @@ class ICLoraPipeline(BasePipeline):
         conditionings: list[object] = []
 
         # Image conditionings (I2V) — upstream-iso multi-anchor pattern.
-        # frame_idx==0 → VideoConditionByLatentIndex (replace);
-        # frame_idx>0 → VideoConditionByKeyframeIndex (guide).
+        # ImageReplace → VideoConditionByLatentIndex; ImageGuide → VideoConditionByKeyframeIndex.
         if images:
             from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
             from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 
             normalized = [
-                img if isinstance(img, ImageConditioningInput) else ImageConditioningInput(*img) for img in images
+                img if isinstance(img, ImageConditioningInput) else ImageConditioningInput.at(*img) for img in images
             ]
             normalized = resolve_frame_indices(normalized, num_frames)
             # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).
@@ -629,14 +628,14 @@ class ICLoraPipeline(BasePipeline):
         enc_w_full = W_full * 32
 
         # Encode I2V images at upscaled resolution (if any) before freeing encoder.
-        # Upstream-iso multi-anchor pattern: frame_idx==0 → LatentIndex, else → KeyframeIndex.
+        # Upstream-iso multi-anchor pattern: ImageReplace → LatentIndex, ImageGuide → KeyframeIndex.
         conditionings_2 = []
         if images:
             from ltx_pipelines_mlx.utils._orchestration import combined_image_conditionings
             from ltx_pipelines_mlx.utils.args import ImageConditioningInput, resolve_frame_indices
 
             normalized = [
-                img if isinstance(img, ImageConditioningInput) else ImageConditioningInput(*img) for img in images
+                img if isinstance(img, ImageConditioningInput) else ImageConditioningInput.at(*img) for img in images
             ]
             normalized = resolve_frame_indices(normalized, num_frames)
             # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).

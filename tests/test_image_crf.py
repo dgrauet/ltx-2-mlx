@@ -99,9 +99,9 @@ def test_conditioner_without_encoder_file_falls_back(tmp_path: Path) -> None:
 def test_resolve_crf_keeps_explicit_values(tmp_path: Path) -> None:
     _write(tmp_path / "vae_encoder.safetensors", "2.5.0")
     images = [
-        ImageConditioningInput("a.png", 0, 1.0),
-        ImageConditioningInput("b.png", 8, 0.5, 0),
-        ImageConditioningInput("c.png", 16, 1.0, 33),
+        ImageConditioningInput.at("a.png", 0, 1.0),
+        ImageConditioningInput.at("b.png", 8, 0.5, 0),
+        ImageConditioningInput.at("c.png", 16, 1.0, 33),
     ]
     resolved = ImageConditioner(tmp_path).resolve_crf(images)
     assert [i.crf for i in resolved] == [18, 0, 33]
@@ -117,7 +117,7 @@ def test_default_image_crf_is_lazy_and_cached(tmp_path: Path) -> None:
 
 
 def test_image_action_leaves_crf_unset() -> None:
-    assert ImageConditioningInput("a.png", 0, 1.0).crf is None
+    assert ImageConditioningInput.at("a.png", 0, 1.0).crf is None
     assert _parse("a.png")[0].crf is None
     assert _parse("a.png", "0", "1.0")[0].crf is None
 
