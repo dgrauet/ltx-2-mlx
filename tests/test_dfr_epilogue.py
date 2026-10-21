@@ -561,3 +561,40 @@ def test_epilogue_refuses_a_plane_count_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(pipe, "_decode_lanczos_carry_keyframes", lambda kfs, seed: real(kfs, seed)[:-1])
     with pytest.raises(ValueError, match="keyframe latents"):
         _run(pipe, height=256, width=256, num_frames=49)
+
+
+def test_bindings_reach_every_stage_and_a_frame_0_guide_skips_the_opening_plane(tmp_path, monkeypatch):
+    """A replace at 9 pins latent 2 in stage 1, stage 2 and the epilogue; a guide at 0 stays a keyframe."""
+    from ltx_core_mlx.conditioning.types.latent_cond import VideoConditionByLatentIndex
+
+    pipe, _, noised, _, _, _ = _make_epilogue(tmp_path, monkeypatch)
+    paths = []
+    for name, value in (("a.png", 64), ("b.png", 192)):
+        path = tmp_path / name
+        Image.fromarray(np.full((64, 64, 3), value, dtype=np.uint8)).save(path)
+        paths.append(str(path))
+    lowered: list[tuple[str, list[str]]] = []
+
+    def spy(module, label):
+        real = module.combined_image_conditionings
+
+        def wrapped(imgs, **kw):
+            conds = real(imgs, **kw)
+            lowered.append((label, [type(c).__name__ for c in conds]))
+            return conds
+
+        monkeypatch.setattr(module, "combined_image_conditionings", wrapped)
+
+    spy(orch, "stage")
+    spy(dfr_mod, "dfr")
+    images = [ImageConditioningInput.guide(paths[0], 0, 1.0), ImageConditioningInput.replace(paths[1], 9, 1.0)]
+    _run(pipe, height=256, width=384, num_frames=49, images=images)
+
+    expected = ["VideoConditionByKeyframeIndex", "VideoConditionByLatentIndex"]
+    assert [label for label, _ in lowered] == ["stage", "stage", "dfr"]  # stage 1, stage 2, the epilogue window
+    assert all(types == expected for _, types in lowered)
+    conds = _epilogue_video_calls(noised, (8, 12))[0]["conditionings"]
+    (pinned,) = [c for c in conds if isinstance(c, VideoConditionByLatentIndex)]
+    assert pinned.frame_indices == [2]
+    keyframes = [c.frame_idx for c in conds if isinstance(c, VideoConditionByKeyframeIndex)]
+    assert keyframes == [0, 24, 48]  # the guide, then the carry planes: no opening plane (upstream ignores the binding)

@@ -298,7 +298,7 @@ class TI2VidOneStagePipeline(TI2VidTwoStagesPipeline):
         if self.low_memory:
             aggressive_cleanup()
 
-        # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
+        # Strip appended keyframe tokens (guide-bound images, generated keyframe slots).
         self.generated_keyframes = extract_generated_keyframes(
             output.video_latent, video_state.generated_keyframe_layout, self.video_patchifier, (H, W)
         )

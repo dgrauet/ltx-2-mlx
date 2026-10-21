@@ -14,7 +14,13 @@ from typing import NamedTuple
 # ``ltx_pipelines_mlx.utils.media_io`` (mirrors upstream's
 # ``ltx_pipelines.utils.media_io.DEFAULT_IMAGE_CRF``).
 from ltx_pipelines_mlx.utils.media_io import DEFAULT_IMAGE_CRF
-from ltx_pipelines_mlx.utils.types import ImageConditioningInput, ImageGuide, ImageReplace
+from ltx_pipelines_mlx.utils.types import (
+    ImageBinding,
+    ImageConditioningInput,
+    ImageGuide,
+    ImageReplace,
+    replacement_latent_index,
+)
 
 
 def _append_to_dest(namespace: argparse.Namespace, dest: str, item: object) -> None:
@@ -74,7 +80,21 @@ _IMAGE_BINDING_KEYWORDS = frozenset({"auto", "replace", "guide"})
 def image_conditioning_input(
     path: str, frame_idx: int, strength: float, binding_mode: str = "auto", crf: int | None = None
 ) -> ImageConditioningInput:
-    """Build an :class:`ImageConditioningInput` from a ``BINDING`` keyword (upstream ``ImageAction``'s ``match``)."""
+    """Build an :class:`ImageConditioningInput` from a ``BINDING`` keyword (upstream ``ImageAction``'s ``match``).
+
+    Args:
+        path: Image path.
+        frame_idx: Pixel frame index (negative counts back from the end, resolved later).
+        strength: Conditioning strength.
+        binding_mode: ``auto`` (replace on frame 0, guide elsewhere), ``replace`` or ``guide``.
+        crf: H.264 CRF of the re-compression, ``None`` to resolve it from the checkpoint.
+
+    Returns:
+        The conditioning input with its binding.
+
+    Raises:
+        ValueError: on an unknown keyword, or a ``replace`` off the latent grid (frame 0 or ``1 + 8k``).
+    """
     match binding_mode:
         case "auto":
             return ImageConditioningInput.at(path, frame_idx, strength, crf)
@@ -198,11 +218,13 @@ class SegmentAction(argparse.Action):
 __all__ = [
     "DEFAULT_IMAGE_CRF",
     "ImageAction",
+    "ImageBinding",
     "ImageConditioningInput",
     "ImageGuide",
     "ImageReplace",
     "SegmentAction",
     "SegmentInput",
     "image_conditioning_input",
+    "replacement_latent_index",
     "resolve_frame_indices",
 ]

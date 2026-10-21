@@ -713,7 +713,7 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             aggressive_cleanup()
 
         # --- Upscale (same denorm/upsample/renorm as TI2VidTwoStagesPipeline) ---
-        # Strip appended keyframe tokens (multi-anchor with frame_idx>0).
+        # Strip appended keyframe tokens (guide-bound images, generated keyframe slots).
         self.generated_keyframes = extract_generated_keyframes(
             output_1.video_latent, video_state.generated_keyframe_layout, self.video_patchifier, (H_half, W_half)
         )
