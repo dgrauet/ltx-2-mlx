@@ -21,14 +21,14 @@ from ltx_pipelines_mlx.dfr import (
     EPILOGUE_ANCESTRAL_NOISE_SEED_OFFSET,
     EPILOGUE_KEYFRAME_STRENGTH,
     EPILOGUE_NOISE_SEED_OFFSET,
-    EPILOGUE_SPATIAL_COARSE_TILES,
     EPILOGUE_SPATIAL_OVERLAP,
-    EPILOGUE_SPATIAL_TILES,
+    EPILOGUE_TILE_CELLS,
     KEYFRAME_PLANE_DECODE_SEED_OFFSET,
     TEMPORAL_UPSAMPLER_STEM,
     DFRPipeline,
     clamp_tile_counts,
     epilogue_sigma_phases,
+    epilogue_tile_count,
     floor_to_multiple,
     lanczos_x2,
     plan_epilogue_windows,
@@ -41,12 +41,18 @@ from tests.test_ltx25_distilled import _fake_upsampler, _FakeVaeEncoder
 
 
 def test_constants():
-    assert EPILOGUE_SPATIAL_OVERLAP == 10
-    assert (EPILOGUE_SPATIAL_COARSE_TILES, EPILOGUE_SPATIAL_TILES) == (2, 4)
+    assert EPILOGUE_SPATIAL_OVERLAP == 2
+    assert EPILOGUE_TILE_CELLS == 32
     assert EPILOGUE_KEYFRAME_STRENGTH == 1.0
     assert KEYFRAME_PLANE_DECODE_SEED_OFFSET == 4000
     assert EPILOGUE_NOISE_SEED_OFFSET == 2000
     assert EPILOGUE_ANCESTRAL_NOISE_SEED_OFFSET == 30000
+
+
+@pytest.mark.parametrize(("cells", "tiles"), [(1, 1), (16, 1), (32, 1), (33, 2), (48, 2), (62, 2), (63, 3)])
+def test_epilogue_tile_count(cells, tiles):
+    """Upstream v1.5.0: the fewest tiles of at most 32 cells, overlapping by 2, covering the axis."""
+    assert epilogue_tile_count(cells) == tiles
 
 
 def test_epilogue_sigma_phases():
@@ -405,9 +411,10 @@ def test_epilogue_passes_tilers_sampler_and_frozen_audio_t0(tmp_path, monkeypatc
     _run(pipe, height=512, width=512, num_frames=49)
     coarse, fine = rec["tilers"]
     assert coarse["latent_shape"] == fine["latent_shape"] == (7, 16, 16) and coarse["seams"] == fine["seams"] == []
-    assert (coarse["tiling"].frames.num_tiles, coarse["tiling"].height.num_tiles) == (1, 2)
-    assert (fine["tiling"].height.num_tiles, fine["tiling"].width.num_tiles) == (4, 4)
-    assert coarse["tiling"].height.overlap == 10 and fine["tiling"].height.overlap == 10
+    # Upstream v1.5.0: one grid for both passes; 16 cells per axis fit one tile of <= 32 cells.
+    assert coarse["tiling"] == fine["tiling"]
+    assert (coarse["tiling"].frames.num_tiles, coarse["tiling"].height.num_tiles) == (1, 1)
+    assert coarse["tiling"].width.num_tiles == 1 and coarse["tiling"].height.overlap == 2
     assert all(t["inner"] is pipe.dit and t["normalize_positions"] is True for t in rec["tiled"])
     epi = rec["ancestral"].calls[-2:]
     assert [c["sigmas"] for c in epi] == [LTX_2_5_STAGE_2_DISTILLED_SIGMAS[:2], LTX_2_5_STAGE_2_DISTILLED_SIGMAS[1:]]
@@ -429,8 +436,8 @@ def test_epilogue_runs_one_pinned_window_per_round_tile_t1(tmp_path, monkeypatch
     video, _ = _run(pipe, height=256, width=256, num_frames=49)  # 97 frames @ 48 fps
     assert [t["latent_shape"] for t in rec["tilers"]] == [(7, 8, 8), (7, 8, 8), (10, 8, 8), (10, 8, 8)]
     assert all(t["seams"] == [] for t in rec["tilers"])
-    assert rec["tilers"][0]["tiling"].height.overlap == 6  # clamped: 8 - 2
-    assert rec["tilers"][1]["tiling"].height.overlap == 4  # clamped: 8 - 4
+    assert rec["tilers"][0]["tiling"].height.num_tiles == 1  # 8 cells fit one tile
+    assert rec["tilers"][1]["tiling"] == rec["tilers"][0]["tiling"]  # one grid for both passes
     epi = rec["ancestral"].calls[-4:]
     assert [c["noise_seed"] for c in epi] == [7 + 30000 + i for i in range(4)]
     assert [c["audio_state"].latent.shape[1] for c in epi] == [compute_audio_token_count(49, frame_rate=60.0)] * 2 + [
@@ -478,6 +485,16 @@ def test_generated_keyframes_become_the_reencoded_planes(tmp_path, monkeypatch):
     assert [float(pipe.generated_keyframes[0, 0, i, 0, 0]) for i in range(2)] == [1.0, 2.0]  # encode order
 
 
+def test_epilogue_grid_follows_the_latent_size(tmp_path, monkeypatch):
+    """1152 x 512 px is 36 x 16 latent cells: 2 tiles down the height (overlap 2), 1 across."""
+    pipe, _, _, _, _, rec = _make_epilogue(tmp_path, monkeypatch)
+    _run(pipe, height=1152, width=512, num_frames=9)
+    for tiler in rec["tilers"]:
+        assert tiler["latent_shape"][1:] == (36, 16)
+        tiling = tiler["tiling"]
+        assert (tiling.height.num_tiles, tiling.height.overlap, tiling.width.num_tiles) == (2, 2, 1)
+
+
 def test_spatial_upscalings_1_is_unchanged(tmp_path, monkeypatch):
     pipe, euler, noised, attached, _, rec = _make_epilogue(tmp_path, monkeypatch)
     pipe.spatial_upscalings = 1
@@ -493,8 +510,7 @@ def test_single_segment_rounds_give_one_epilogue_window(tmp_path, monkeypatch):
     video, _ = _run(pipe, height=128, width=128, num_frames=9)  # canvas 25 -> 49 frames, seam [48]
     assert [t["latent_shape"] for t in rec["tilers"]] == [(7, 4, 4), (7, 4, 4)]
     coarse, fine = (t["tiling"] for t in rec["tilers"])
-    assert (coarse.height.num_tiles, coarse.height.overlap) == (2, 2)  # clamped: 4 - 2
-    assert (fine.height.num_tiles, fine.height.overlap) == (4, 0)
+    assert coarse == fine and (coarse.height.num_tiles, coarse.width.num_tiles) == (1, 1)
     assert video.shape == (1, 128, ((9 - 1) * 2) // 8 + 1, 4, 4)
 
 
