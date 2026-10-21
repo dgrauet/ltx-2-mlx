@@ -686,6 +686,14 @@ examples:
         ),
     )
     gen.add_argument(
+        "--refine-audio",
+        action="store_true",
+        help=(
+            "--two-stage only: denoise the audio in stage 2 with the video instead of keeping "
+            "the stage-1 audio (upstream refine_audio)"
+        ),
+    )
+    gen.add_argument(
         "--two-stages-hq",
         action="store_true",
         dest="two_stages_hq",
@@ -1386,6 +1394,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
 
     if sum(map(bool, (args.two_stages_hq, args.two_stage, args.distilled, args.one_stage, args.dfr))) > 1:
         raise SystemExit("Choose at most one of --two-stage, --two-stages-hq, --distilled, --one-stage, --dfr.")
+    if args.refine_audio and not args.two_stage:
+        raise SystemExit("--refine-audio requires --two-stage.")
     if args.dfr:
         if args.num_generated_keyframes:
             raise SystemExit("--dfr places its keyframe slots from the canvas; drop --num-generated-keyframes.")
@@ -1620,6 +1630,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["prompt_relay"] = relay
         if args.negative_prompt is not None:
             kwargs["negative_prompt"] = args.negative_prompt
+        if args.refine_audio:
+            kwargs["refine_audio"] = True
         pipe.generate_and_save(**kwargs)
 
     else:
