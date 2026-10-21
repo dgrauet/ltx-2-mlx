@@ -5,7 +5,7 @@
 Pure MLX port of [LTX-2](https://github.com/Lightricks/LTX-2/) (Lightricks) for Apple Silicon. Three-package monorepo mirroring the reference structure:
 
 - **ltx-core-mlx** (`ltx_core_mlx`) — model library: DiT, VAE, audio, text encoder, conditioning
-- **ltx-pipelines-mlx** (`ltx_pipelines_mlx`) — generation pipelines: T2V, I2V, A2V, retake, extend, keyframe, IC-LoRA, HDR IC-LoRA, LipDub, one-stage, two-stage, distilled, DFR
+- **ltx-pipelines-mlx** (`ltx_pipelines_mlx`) — generation pipelines: T2V, I2V, A2V, retake, extend, IC-LoRA, HDR IC-LoRA, LipDub, one-stage, two-stage, distilled, DFR
 - **ltx-trainer** (`ltx_trainer_mlx`) - ltx-2 training, democratized.
 
 Loads pre-converted MLX weights from the [LTX-2.3](https://huggingface.co/collections/dgrauet/ltx-23) and [LTX 2.5](https://huggingface.co/collections/dgrauet/ltx-25-6a90c410ff65a75f8aeae402) MLX collections on HuggingFace. Weight conversion is handled by [mlx-forge](https://github.com/dgrauet/mlx-forge).
@@ -129,7 +129,6 @@ packages/
 │       ├── a2vid_distilled.py             # Audio-to-video on the distilled path (a2v --distilled)
 │       ├── retake.py                      # RetakePipeline: regenerate a time segment + extend (append/prepend)
 │       ├── extend_distilled.py            # ExtendDistilledPipeline (extend --distilled: chunk-style continuation)
-│       ├── keyframe_interpolation.py      # Keyframe interpolation
 │       ├── ic_lora.py                     # IC-LoRA reference-based generation
 │       ├── iclora_utils.py                # Shared IC-LoRA helpers (metadata, reference conditioning)
 │       ├── hdr_ic_lora.py                 # HDRICLoraPipeline (ACEScct SDR-to-HDR, 2.5)
@@ -428,7 +427,6 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 | Command | Pipeline | Tier | Description |
 |---------|----------|------|-------------|
 | `generate` | T2V / I2V (mode flag required) | Stable | `--one-stage` (dev+CFG @ target), `--two-stage` (dev+CFG+upscale, recommended), `--two-stages-hq` (res_2s+CFG+upscale), `--distilled` (distilled+upscale, fastest), `--dfr` (2.5 packs, experimental; distilled + detailing IC-LoRA). `--image` for I2V on any mode. `--segment` for Prompt Relay temporal prompt gating. `-f/--frames` defaults to auto-predicted duration on 2.5 packs (via `DurationHead`) and is **required** on 2.3 packs (immediate `ValueError` before any Gemma load if omitted). `--auto-duration MIN:MAX` overrides the predictor's clamp range on 2.5 packs. `--no-audio` skips audio decode + mux (mp4 with no audio track; video unchanged, audio latents still generated jointly). `--num-generated-keyframes N` (2.5 packs) adds N generated keyframe slots to stage 1 for fast motion. `--dfr` (2.5 packs) adds `--temporal-upscalings {0,1,2}` for post-hoc temporal x2 refine rounds (default 0) and `--spatial-upscalings {1,2}` for a full-res spatial detailing epilogue (default 1). |
-| `keyframe` | Keyframe interpolation | Stable | Two-stage interpolation between start/end frames |
 | `ic-lora` | IC-LoRA | Stable | Two-stage generation with control video conditioning (depth, canny, pose, motion tracks) |
 | `hdr-ic-lora` | HDR IC-LoRA | Experimental | Single-stage ACEScct SDR-to-HDR IC-LoRA (LTX-2.5 packs only): HLG BT.2020 10-bit mp4 + ACEScg EXR frames. Takes `--input`, `--hdr-lora`, `--text-embeddings` (no prompt) |
 | `a2v` | Audio-to-video | Beta | Two-stage audio-conditioned generation (Euler + CFG). Sync quality depends on prompt-audio alignment. `--distilled` (Experimental): the distilled path, no CFG, input audio frozen in both stages; `--dfr` (Experimental, 2.5): the same on the DFR base path |
@@ -441,7 +439,7 @@ Entry point: `uv run ltx-2-mlx <command>`. Available commands:
 | `preprocess` | Data preprocessing | Stable | Encode raw videos into latents + conditions for training |
 | `slice` | Training data | Stable | Slice long videos into normalized training clips (audio retained) |
 
-`generate --one-stage/--two-stage/--two-stages-hq`, `keyframe`, `a2v`, `retake` and `extend` use the dev model with CFG; `generate --distilled/--dfr`, `a2v --distilled`, `retake --distilled`, `extend --distilled`, `ic-lora` (unless `--dev-transformer`), `hdr-ic-lora` and `lipdub` use the distilled model without CFG. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet` (`hdr-ic-lora` has its own set: no `--prompt`). CFG modes (`generate --one-stage/--two-stage/--two-stages-hq`, `keyframe`, `a2v`, `retake`, `extend`) take `--negative-prompt TEXT` (default: upstream `DEFAULT_NEGATIVE_PROMPT`; `""` is encoded verbatim; always one global prompt, even with `--segment`); `generate --distilled` / `--dfr` reject it (no CFG) unless `--nag` applies it through Normalized Attention Guidance (see "Negative prompt without CFG" below), and the distilled-sampler IC-LoRA family (`ic-lora`, `hdr-ic-lora`, `lipdub`) does not expose it. Every denoising stage prints an `[estimate]` work line (steps × passes × tokens = forwards) on stderr before step 1 and a time projection after the first computed step, refined once after the second (`utils/estimate.py`; retake/extend note that cost follows total clip length). Tier semantics + promotion criteria live in [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md).
+`generate --one-stage/--two-stage/--two-stages-hq`, `a2v`, `retake` and `extend` use the dev model with CFG; `generate --distilled/--dfr`, `a2v --distilled`, `retake --distilled`, `extend --distilled`, `ic-lora` (unless `--dev-transformer`), `hdr-ic-lora` and `lipdub` use the distilled model without CFG. Common flags: `--model`, `--prompt`, `--output`, `--seed`, `--quiet` (`hdr-ic-lora` has its own set: no `--prompt`). CFG modes (`generate --one-stage/--two-stage/--two-stages-hq`, `a2v`, `retake`, `extend`) take `--negative-prompt TEXT` (default: upstream `DEFAULT_NEGATIVE_PROMPT`; `""` is encoded verbatim; always one global prompt, even with `--segment`); `generate --distilled` / `--dfr` reject it (no CFG) unless `--nag` applies it through Normalized Attention Guidance (see "Negative prompt without CFG" below), and the distilled-sampler IC-LoRA family (`ic-lora`, `hdr-ic-lora`, `lipdub`) does not expose it. Every denoising stage prints an `[estimate]` work line (steps × passes × tokens = forwards) on stderr before step 1 and a time projection after the first computed step, refined once after the second (`utils/estimate.py`; retake/extend note that cost follows total clip length). Tier semantics + promotion criteria live in [docs/PIPELINE_MATURITY.md](docs/PIPELINE_MATURITY.md).
 
 ### Low-RAM Example
 
@@ -460,7 +458,7 @@ ltx-2-mlx generate --distilled \
   --low-ram -f 97 --frame-rate 24 -o fox.mp4
 ```
 
-`--low-ram` is supported on every `generate` mode (incl. `--distilled` and `--dfr`), `a2v`, `keyframe`, `ic-lora`, `hdr-ic-lora`, `lipdub`, `retake` and `extend`. Bind-time LoRA fusion handles ic-lora's control LoRAs, custom `--distilled-lora-strength`, and `generate --lora` (community LoRAs). See `## Block Streaming` below for details.
+`--low-ram` is supported on every `generate` mode (incl. `--distilled` and `--dfr`), `a2v`, `ic-lora`, `hdr-ic-lora`, `lipdub`, `retake` and `extend`. Bind-time LoRA fusion handles ic-lora's control LoRAs, custom `--distilled-lora-strength`, and `generate --lora` (community LoRAs). See `## Block Streaming` below for details.
 
 ### IC-LoRA Example
 
@@ -753,7 +751,7 @@ All `generate` modes (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distil
 - `auto` (default, `ImageConditioningInput.at`): frame 0 replaces, every other index guides
 - With one token after STRENGTH, `auto`/`replace`/`guide` is the binding and a number is the CRF; with two, the binding comes first. Before 0.18 the binding was implied by the index (0 → replace) and Python callers built `ImageConditioningInput(path, frame_idx, strength, crf)`; tuples passed to `ic-lora` / `lipdub` still go through `.at`
 - Validated (M2 Pro 32 GB, 2.5 q8, `--distilled --low-ram --no-audio`, 512×768×49, seed 5, a start image at 0 and a second image): the `auto` binding is byte-identical (sha256) to main with the second image at 24. Against that second image, `replace` at 25 holds frames 25–32 at 25.9 / 25.7 / 24.1 dB (frames 25 / 28 / 32), where the `auto` guide at 24 peaks at 26.7 dB on its frame and falls to 20.5 dB by frame 32. A `guide` at frame 0 matches the start image at 37.3 dB against 40.1 dB for the default replace
-- Optional last value `CRF`: the H.264 CRF the image is re-compressed at before encoding (`0` = none). Omitted, it resolves from the checkpoint like upstream (`ImageConditioner.resolve_crf`, reading `model_version` from the VAE encoder's safetensors metadata): **33** before LTX-2.4 (2.3 packs carry no version → 33), **18** from 2.4 on (2.5 packs). Applies to every pipeline that takes images, `keyframe` included; an explicit CRF always wins.
+- Optional last value `CRF`: the H.264 CRF the image is re-compressed at before encoding (`0` = none). Omitted, it resolves from the checkpoint like upstream (`ImageConditioner.resolve_crf`, reading `model_version` from the VAE encoder's safetensors metadata): **33** before LTX-2.4 (2.3 packs carry no version → 33), **18** from 2.4 on (2.5 packs). Applies to every pipeline that takes images; an explicit CRF always wins.
 - Image preprocessing mirrors upstream `load_image_and_preprocess` (`utils/media_io.py`): EXIF orientation + embedded ICC profile → sRGB, odd dims cropped to even, the CRF round trip encoded as 4:2:0 (`yuv420p`, bilinear RGB↔YUV, slice threads, as PyAV does upstream), then a PyTorch-style bilinear resize on floats (no antialias, no uint8 re-quantization) and `x / 127.5 - 1`. Until #188's audit we encoded 4:4:4 and resized with PIL Lanczos on uint8 (2.3 q8 latent corr 0.918 vs upstream on a 1672×941 image; 0.9993 after). Control / reference videos (`ic-lora`, `lipdub`, the `ic-lora` attention-mask video) go through the same resize: `media_io.decode_video_by_frame` (native size, no autorotate, like PyAV) + `media_io.video_preprocess` (upstream names), so a control whose aspect differs from the render is center-cropped, not stretched (#194; ffmpeg's `scale` filter used to stretch it, bicubic, on uint8). Torch golden: `tests/parity_video_preprocess_reference.py`. Torch golden: `tests/parity_image_preprocess_reference.py`.
 - `FRAME_IDX` can also be `last` (or `end`) or a negative number counted back from the end (`-1` = last frame). `resolve_frame_indices` (`utils/args.py`) turns it into a pixel index once the pipeline knows the frame count, so an end anchor stays on the final frame when `--auto-duration` picks the length (a fixed `96` would not). Resolved in every pipeline that takes `--image`, before any conditioning is built; a negative `replace` is checked against the latent grid once resolved (`-8`, `-16`, … are latent starts, `last` is not). On `--dfr` it is resolved against the requested length before the clip is padded to whole keyframe segments (`resolve_stage1_frames`, `distilled.py`), so `last` lands on the final frame of the trimmed output. `auto` decides from the literal index, as upstream `.at`, so every negative `auto` index (`-num_frames` included, which resolves to `0`) is a guide. An index outside the clip (before frame 0, or `>= num_frames`) raises a `ValueError` that names the image.
 
@@ -784,7 +782,7 @@ ltx-2-mlx generate \
   --auto-duration 2:6 --frame-rate 24 -o door.mp4
 ```
 
-**Mode recommendations for multi-anchor:** `--two-stage` or `--two-stages-hq` (dev model + CFG) respects anchors most faithfully. `--distilled` (8 steps, no CFG) also honors them — soft keyframe anchors are hints, not law, so the model may drift from them at longer durations, but a distilled start+end smoke test (512×512×25) tracked both anchors cleanly, and so did a 768×512×97 comparison against `keyframe` on 2.5 (see the `keyframe` card in [docs/PIPELINES.md](docs/PIPELINES.md#keyframe)). `--one-stage` works but is slower than `--two-stage` at large resolutions.
+**Mode recommendations for multi-anchor:** `--two-stage` or `--two-stages-hq` (dev model + CFG) respects anchors most faithfully. `--distilled` (8 steps, no CFG) also honors them — soft keyframe anchors are hints, not law, so the model may drift from them at longer durations, but a distilled start+end smoke test (512×512×25) tracked both anchors cleanly, and so did a 768×512×97 comparison against the removed `keyframe` command on 2.5 (see [Interpolating between images](docs/PIPELINES.md#interpolating-between-images)). Interpolating between two images on the dev path is `--two-stage` with both images bound as guides and `--refine-audio` (see "Interpolating between images" below). `--one-stage` works but is slower than `--two-stage` at large resolutions.
 
 **Frame count grid:** frame counts live on the 8k+1 grid; an off-grid request is floored to it with a warning before any latent is sized (`snap_num_frames`, #177; e.g. 87 → 81). `hdr-ic-lora` instead rejects an off-grid source. Valid counts: 9, 17, 25, 33, 41, 49, 57, 65, 73, 81, 89, 97, 105, 113, 121, 129, 137, …
 
@@ -887,7 +885,7 @@ The non-distilled (dev) model uses multi-modal guidance with up to 4 forward pas
 Default reference params (LTX_2_3_PARAMS): `cfg_scale=3.0`, `stg_scale=1.0`, `stg_blocks=[28]`, `rescale_scale=0.7`, `modality_scale=3.0`. Audio: `cfg_scale=7.0`.
 HQ params (LTX_2_3_HQ_PARAMS): `cfg_scale=3.0`, `stg_scale=0.0`, `stg_blocks=[]`, `rescale_scale=0.45`. Audio: `cfg_scale=7.0`, `rescale_scale=1.0`.
 
-**`stg_scale` defaults differ by pipeline**: the dev + CFG pipelines (`--two-stage`, `--one-stage`, `a2v`, `keyframe`, `retake`/`extend`) default to `stg_scale=1.0` (`ti2vid_two_stages.py:417`, `retake.py:64` `DEFAULT_STG_SCALE`; guidance params in `utils/constants.py`); `--two-stages-hq` defaults to `stg_scale=0.0` (`ti2vid_two_stages_hq.py:113`). STG requires a 3rd forward pass per step. On 32GB Mac, this causes OOM for videos longer than ~33 frames at 480x704. Pass `--stg-scale 0` on 32GB machines for long clips.
+**`stg_scale` defaults differ by pipeline**: the dev + CFG pipelines (`--two-stage`, `--one-stage`, `a2v`, `retake`/`extend`) default to `stg_scale=1.0` (`ti2vid_two_stages.py:417`, `retake.py:64` `DEFAULT_STG_SCALE`; guidance params in `utils/constants.py`); `--two-stages-hq` defaults to `stg_scale=0.0` (`ti2vid_two_stages_hq.py:113`). STG requires a 3rd forward pass per step. On 32GB Mac, this causes OOM for videos longer than ~33 frames at 480x704. Pass `--stg-scale 0` on 32GB machines for long clips.
 
 **Memory impact**: Each extra pass doubles/triples/quadruples memory. On 32GB Mac with dev model at 480x704: CFG-only supports ~97 frames at half-res (two-stage), full guidance (4 passes) supports ~17 frames.
 
@@ -897,27 +895,27 @@ HQ params (LTX_2_3_HQ_PARAMS): `cfg_scale=3.0`, `stg_scale=0.0`, `stg_blocks=[]`
 
 ---
 
-## Keyframe Interpolation Pipeline
+## Interpolating between images
 
-Two-stage pipeline requiring the dev (non-distilled) model + CFG. The distilled model hallucinates during interpolation.
-On 2.5 packs, `generate --distilled` with a start and an end `--image` is a faster alternative that tracked both images in a 768×512×97 comparison (numbers on the `keyframe` card in [docs/PIPELINES.md](docs/PIPELINES.md#keyframe)).
+There is no `keyframe` command or `KeyframeInterpolationPipeline`: upstream v1.5.0 removed the pipeline, and so does
+this port. Its replacement (upstream's too) is `TI2VidTwoStagesPipeline` with every image bound as a guide
+(`VideoConditionByKeyframeIndex`, both stages) and the audio refined in stage 2:
 
-### Stage 1: Half Resolution + CFG
-1. Compute half-res latent dims: `H_half = (height//2) // 32`, `W_half = (width//2) // 32`
-2. Encode keyframes at VAE-compatible resolution: `H_half * 32` x `W_half * 32`
-3. Create empty LatentState → apply `VideoConditionByKeyframeIndex` → noise (order matters!)
-4. Denoise with dev model + CFG (30 steps, dynamic schedule)
+```bash
+ltx-2-mlx generate --two-stage -p "..." --image a.png 0 1.0 guide --image b.png last 1.0 guide --refine-audio -f 97 --frame-rate 24 -o out.mp4
+```
 
-### Stage 2: Upscale + Refine
-1. Denormalize latent → neural upsampler (2x spatial) → re-normalize (using VAE encoder stats)
-2. Fuse distilled LoRA into dev model
-3. Re-encode keyframes at upscaled resolution, apply conditioning
-4. Denoise with distilled schedule (3 steps)
+Python: `TI2VidTwoStagesPipeline.generate_and_save(..., images=[ImageConditioningInput.guide("a.png", 0, 1.0),
+ImageConditioningInput.guide("b.png", -1, 1.0)], refine_audio=True)`. The old command defaulted to 20 stage-1 steps
+where upstream used 30; the replacement runs the two-stage default, 30. On 2.5 packs, `generate --distilled` with a
+start and an end `--image` is a faster alternative that tracked both images in a 768×512×97 comparison against the
+old command (numbers in [docs/PIPELINES.md](docs/PIPELINES.md#interpolating-between-images)).
 
-### Key Files
-- `keyframe_interpolation.py` — `KeyframeInterpolationPipeline` (extends `TI2VidTwoStagesPipeline`)
-- `conditioning/types/keyframe_cond.py` — `VideoConditionByKeyframeIndex` (appends tokens, builds attention mask)
-- `model/upsampler/model.py` — `LatentUpsampler` (Conv3d + PixelShuffle2D)
+Old command against the replacement (M2 Pro 32 GB, 2.5 q8, 640×384×49, 30 stage-1 steps, `--stg-scale 0 --low-ram`,
+seed 5, the same two unrelated images and prompt): 858 vs 840 s, peak footprint 23.2 vs 23.3 GB. Both match the
+first image (34.4 / 33.9 dB) and the last (21.5 / 22.4 dB) and cross between the two scenes through a bright fade;
+the replacement's crossing is smoother (largest frame-to-frame change 12.6 against 49.7) and its audio louder
+(−25.4 vs −30.1 dB, the refined stage-2 track).
 
 ---
 
@@ -943,7 +941,7 @@ Two-stage pipeline for higher-resolution generation. Requires the dev model + di
 ### Critical Implementation Details
 
 - **Dev model required**: The distilled model produces flat/low-quality output at half resolution without CFG. Two-stage always uses the dev model.
-- **Upsampler denorm/renorm**: Same as IC-LoRA/keyframe — the neural upsampler operates in un-normalized latent space. Without denorm/renorm, Stage 2 produces grid artifacts.
+- **Upsampler denorm/renorm**: Same as IC-LoRA — the neural upsampler operates in un-normalized latent space. Without denorm/renorm, Stage 2 produces grid artifacts.
 - **Stage 2 dims from upscaled shape**: `H_full = H_half * 2`, not `compute_video_latent_shape(height)`, to avoid RoPE shape mismatch.
 - **Decoders loaded on-demand**: VAE decoder + audio + vocoder loaded in `generate_and_save()` after freeing DiT, keeping peak memory under 32GB.
 - **Text encoding before DiT**: In low_memory mode, Gemma is loaded → encode prompt + negative prompt → free Gemma → load DiT. Both positive and negative embeddings must be materialized before freeing.
@@ -1004,7 +1002,7 @@ vice versa. Use `scripts/calibrate_teacache.py --two-stages-hq` to recalibrate
 res_2s, and edit `LTX2_HQ_TEACACHE_COEFFICIENTS` /
 `LTX2_HQ_TEACACHE_THRESH` in `ti2vid_two_stages_hq.py`.
 
-**Same seed, different sample.** TeaCache skips steps early in stage 1, where the layout is decided, so a TeaCache render is **not** a faster copy of the plain render at the same seed. On unanchored T2V it comes out as a different scene: different subject, outfit and framing (2.3 q8, 384×576×25, seed 5, default thresh: SSIM 0.70 `--two-stage`, 0.73 `--two-stages-hq`). Anchors limit the drift: `keyframe` keeps both anchors and diverges in between (SSIM 0.74). A tight a2v close-up keeps the same face and framing (SSIM 0.89), and its lip-sync follows the speech/silence pattern exactly like the plain render. A wide a2v shot changes composition entirely. Each render is clean on its own. Don't use TeaCache to preview a seed you intend to finish without it.
+**Same seed, different sample.** TeaCache skips steps early in stage 1, where the layout is decided, so a TeaCache render is **not** a faster copy of the plain render at the same seed. On unanchored T2V it comes out as a different scene: different subject, outfit and framing (2.3 q8, 384×576×25, seed 5, default thresh: SSIM 0.70 `--two-stage`, 0.73 `--two-stages-hq`). Anchors limit the drift: the former `keyframe` pipeline (two end anchors) kept both anchors and diverged in between (SSIM 0.74). A tight a2v close-up keeps the same face and framing (SSIM 0.89), and its lip-sync follows the speech/silence pattern exactly like the plain render. A wide a2v shot changes composition entirely. Each render is clean on its own. Don't use TeaCache to preview a seed you intend to finish without it.
 
 **Tuning**: thresh 0.5 is the conservative default. Push higher for more skip / more speed, with quality risk:
 - thresh 1.0 → ~55% skip, ~2× speedup expected
@@ -1099,7 +1097,6 @@ LTX-2.3 bf16 distilled, 480x704x33: confirmed runs end-to-end on M2 Pro 32 GB. W
 - `generate --two-stages-hq` (res_2s + CFG)
 - `generate --distilled` and `generate --dfr` (the DFR detailing LoRA attaches as a `BlockLoraSource`)
 - `a2v` (audio-to-video) and `a2v --distilled` (`a2v --dfr` is wired the same way, not validated under `--low-ram`)
-- `keyframe` (interpolation)
 - `ic-lora` (control video conditioning, via bind-time LoRA fusion)
 - `hdr-ic-lora` (HDR LoRA as a `BlockLoraSource`)
 - `retake` / `extend` (dev model + CFG; mirrors upstream RetakePipeline's `offload_mode`), `retake --distilled` and `extend --distilled`
@@ -1111,7 +1108,7 @@ Validated runs on M2 Pro 32 GB:
 - q8 HQ at 480x704x97 (4 sec): 44:38.
 - q8 one-stage 480x704x33 (1.3 sec): 2:31.
 
-For two-stage / HQ / `a2v` (dev path) / keyframe at default LoRA strength 1.0, the Stage 1 → Stage 2 transition swaps the streamer from ``transformer-dev.safetensors`` to the pre-fused ``transformer-distilled.safetensors`` (mlx-forge produces this at LoRA strength 1.0). For custom ``--distilled-lora-strength`` (or any non-1.0 strength), the streamer keeps the dev model and attaches a ``BlockLoraSource`` that fuses the LoRA delta at each ``bind()`` (dequantize → ``W + B @ A * strength`` → re-quantize for q4/q8).
+For two-stage / HQ / `a2v` (dev path) at default LoRA strength 1.0, the Stage 1 → Stage 2 transition swaps the streamer from ``transformer-dev.safetensors`` to the pre-fused ``transformer-distilled.safetensors`` (mlx-forge produces this at LoRA strength 1.0). For custom ``--distilled-lora-strength`` (or any non-1.0 strength), the streamer keeps the dev model and attaches a ``BlockLoraSource`` that fuses the LoRA delta at each ``bind()`` (dequantize → ``W + B @ A * strength`` → re-quantize for q4/q8).
 
 For `ic-lora`, each control LoRA is attached as a ``BlockLoraSource`` to the streaming wrapper instead of being fused in-place at load time. Stage 2 just clears the source list rather than reloading the whole transformer.
 
@@ -1176,7 +1173,7 @@ Upstream uses ``(B, num_axes, T, 2)`` interval positions per token; we use ``(B,
 
 Total tiles = ``N * M * M``. Default ``1*1*1`` = no tiling.
 
-Coverage: ``generate`` only (one-stage / ``--two-stage`` / ``--two-stages-hq`` / ``--distilled`` / ``--dfr``), via ``TI2VidTwoStagesPipeline.tile_count``. ``a2v``, ``keyframe``, ``ic-lora`` and ``hdr-ic-lora`` don't read ``tile_count``, so their CLIs don't register the ``--tile-*`` flags (they used to accept and silently ignore them).
+Coverage: ``generate`` only (one-stage / ``--two-stage`` / ``--two-stages-hq`` / ``--distilled`` / ``--dfr``), via ``TI2VidTwoStagesPipeline.tile_count``. ``a2v``, ``ic-lora`` and ``hdr-ic-lora`` don't read ``tile_count``, so their CLIs don't register the ``--tile-*`` flags (they used to accept and silently ignore them).
 
 ### Tradeoff
 
@@ -1268,7 +1265,7 @@ that predicts a clip length in seconds from the encoded prompt (+ image,
 when present). `generate`'s `-f/--frames` default changed from a hardcoded
 `97` to `AutoDuration()` (`DEFAULT_AUTO_DURATION`, clamp `[1.0, 20.0]`
 seconds) across the five `generate` modes (`--one-stage`, `--distilled`,
-`--two-stage`, `--two-stages-hq`, `--dfr`). `keyframe`, `a2v` and `ic-lora`
+`--two-stage`, `--two-stages-hq`, `--dfr`). `a2v` and `ic-lora`
 keep `-f 97`. `retake`, `extend`, `lipdub` and `hdr-ic-lora` take their
 length from the source video and have no `-f`.
 
@@ -1571,7 +1568,6 @@ dtype on entry (like the conv decoder) and the same decode peaks at ~12 GB (5.8 
 | `--two-stage` (dev model + CFG) | supported (see above) |
 | `--two-stages-hq` (res_2s + CFG) | supported — validated e2e on 2.5 (deterministic, audio at healthy 2.3-level loudness) |
 | `DurationHead` / auto-duration (`-f` optional) | supported — `-f` defaults to `AutoDuration()` on `--one-stage`/`--distilled`/`--two-stage`/`--two-stages-hq`/`--dfr`; `--auto-duration MIN:MAX` overrides the clamp. Absent on 2.3 packs, where omitting `-f` now raises immediately (see "Auto-Duration" above) |
-| `keyframe` | supported — validated e2e on 2.5 (deterministic, audio -38.3 dB; requires `--dev-transformer transformer-dev.safetensors`) |
 | `a2v` | supported — validated e2e on 2.5 (deterministic, conditioned audio faithfully reconstructed at -36.2 dB). `a2v --distilled` (Experimental): validated e2e on 2.5 q8 at 512×768×49 (± `--low-ram`) and 704×1280×121/241; `a2v --dfr` (Experimental): validated e2e on 2.5 q8 at 768×512×121 and 768×512×113 |
 | `retake`, `extend` | supported — validated e2e on 2.5 (retake deterministic ×2; extend +N latent frames). `--low-ram` wired (mirrors upstream `offload_mode`): 49-frame retake that OOM'd now peaks at 13.8 GB. `retake --distilled` (Experimental): validated e2e on 2.5 q8 at 512×768×49 and 704×1280×121; `extend --distilled` (Experimental): validated e2e on 2.5 q8 at 704×1280, 10 s + 4 s (see Retake / Extend Example) |
 | `ic-lora` | runs with the IC-LoRAs Lightricks has published for 2.5 (`Lightricks/LTX-2.5-22b-IC-LoRA-*`); run end to end with Refine-Details at 768×512×49 (M1 Max, q8, float16: 140 s fused, 127 s with `LTX2_LORA_MODE=unfused`). Upstream's plans that keep the IC-LoRA in stage 2 (`stage_2_ic_lora=True`) are not ported |
@@ -1731,7 +1727,7 @@ float parameters (quantization scales/biases, Linear biases, q/k norm weights) a
 float16 activations against bf16 scales would promote to float32 inside `quantized_matmul` and gain
 nothing. The AdaLN tables keep their F32 dtype. `bfloat16` gives the upstream precision; unset or
 `float32` is today's path, untouched. In-place LoRA fusion (`dfr`'s detailing LoRA, `ic-lora`, and the
-distilled-LoRA fusion that starts stage 2 of `--two-stage`, `--two-stages-hq`, `a2v` and `keyframe`
+distilled-LoRA fusion that starts stage 2 of `--two-stage`, `--two-stages-hq` and `a2v`
 in `TI2VidTwoStagesPipeline._fuse_distilled_lora`) re-quantizes from a float32 weight; `fuse_loras`
 gives the new scales/biases the dtype the old ones had (until that fix they came out float32 on every
 path). Every such call site also calls `BasePipeline._recast_after_inplace_fusion()` afterwards, so a
@@ -1795,7 +1791,7 @@ fails before any work rather than when the first LoRA is attached.
 | `ic-lora` / `hdr-ic-lora` / `lipdub` task LoRAs (`ICLoraPipeline._fuse_loras`) | adapters | Stage 2 of the legacy distilled path detaches them in place instead of reloading the DiT; a second call replaces them |
 | `--dfr` detailing LoRA (`DFRPipeline._attach_detailing_lora`) | adapters | the temporal rounds detach them in place (no DiT reload); the spatial epilogue re-attaches |
 | `generate --lora` on a resident DiT (`_pending_loras`) | adapters | the DiT is loaded as usual, then the LoRAs are attached |
-| distilled LoRA (stage 2 of `--two-stage`, `--two-stages-hq`, `a2v`, `keyframe`; `ic-lora` dev mode) | **fused** | rank 384 / 450 on every block linear: as adapters it would stay resident and add work to every forward |
+| distilled LoRA (stage 2 of `--two-stage`, `--two-stages-hq`, `a2v`; `ic-lora` dev mode) | **fused** | rank 384 / 450 on every block linear: as adapters it would stay resident and add work to every forward |
 | `--low-ram` (task LoRAs: `--lora`, IC-LoRAs, detailing LoRA) | adapters on the streamed block | see "Unfused LoRAs under `--low-ram`" below; the distilled LoRA still fuses at bind |
 
 Cost: per adapted layer, `rank * (in + out)` multiply-adds per token against `in * out` for the layer

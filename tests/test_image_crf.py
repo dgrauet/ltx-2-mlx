@@ -139,21 +139,3 @@ def test_unresolved_crf_is_refused(tmp_path: Path) -> None:
     Image.fromarray(image).save(path)
     with pytest.raises(ValueError, match="resolve_crf"):
         load_image_and_preprocess(path, 8, 8, crf=None)
-
-
-def test_keyframe_encode_forwards_the_crf(monkeypatch: pytest.MonkeyPatch) -> None:
-    import ltx_pipelines_mlx.keyframe_interpolation as kf
-
-    seen = []
-
-    def fake_prepare(image, height, width, crf):
-        seen.append(crf)
-        return mx.zeros((1, 3, height, width))
-
-    class _Encoder:
-        def encode(self, x: mx.array) -> mx.array:
-            return mx.zeros((1, 128, 1, x.shape[3] // 32, x.shape[4] // 32))
-
-    monkeypatch.setattr(kf, "prepare_image_for_encoding", fake_prepare)
-    tokens = kf._encode_keyframe(_Encoder(), "a.png", 64, 64, crf=18)  # type: ignore[arg-type]
-    assert seen == [18] and tokens.shape == (1, 4, 128)

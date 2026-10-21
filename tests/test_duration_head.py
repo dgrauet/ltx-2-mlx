@@ -455,15 +455,13 @@ def test_cli_auto_duration_rejects_inverted_bounds(capsys):
 
 
 def test_cli_other_subcommands_keep_97_default():
-    """keyframe/a2v/ic-lora keep their historical -f default untouched."""
+    """a2v/ic-lora keep their historical -f default untouched."""
     from ltx_pipelines_mlx.cli import _build_parser
 
     parser = _build_parser()
-    kf_args = parser.parse_args(
-        ["keyframe", "-p", "x", "-o", "out.mp4", "--frame-rate", "24", "--start", "a.png", "--end", "b.png"]
-    )
-    assert kf_args.frames == 97
-    assert not hasattr(kf_args, "auto_duration")
+    a2v_args = parser.parse_args(["a2v", "-p", "x", "-o", "out.mp4", "--frame-rate", "24", "--audio", "a.wav"])
+    assert a2v_args.frames == 97
+    assert not hasattr(a2v_args, "auto_duration")
 
 
 @pytest.mark.slow

@@ -10,7 +10,7 @@ is a contradiction the model resolves by inventing content. Anchored I2V/fl2v/l2
 renders drift to the prompt's prior between the pinned ends, and the end anchor lands
 as a snap rather than a landing.
 
-`guided_denoise_loop` (`--two-stage`, a2v, keyframe, retake) is deterministic Euler and
+`guided_denoise_loop` (`--two-stage`, a2v, retake) is deterministic Euler and
 never dirties them; `euler_ancestral_denoising_loop` (distilled) re-pins after its
 noise draw and says why in a comment. res_2s did neither — the fix is the same
 `apply_denoise_mask` call the other two loops already make, after each `_sde_step`.
@@ -144,7 +144,7 @@ class TestRes2sPreservesConditioning:
         assert float(mx.mean(mx.abs(moved)).item()) > 0.0
 
     def test_guided_loop_holds_the_same_contract(self):
-        """`guided_denoise_loop` — what `--two-stage`, a2v, keyframe and retake run —
+        """`guided_denoise_loop` — what `--two-stage`, a2v and retake run —
         already preserves pinned tokens, because its Euler step is deterministic. This
         test passes before AND after the patch on purpose: it pins the invariant
         res_2s is expected to match, so a later refactor of EITHER loop that breaks

@@ -8,7 +8,6 @@ Usage:
     ltx-2-mlx a2v --prompt "music video" --audio music.wav --frame-rate 24 -o a2v.mp4
     ltx-2-mlx retake --prompt "new scene" --video source.mp4 --start 1 --end 3 -o retake.mp4
     ltx-2-mlx extend --prompt "continue" --video source.mp4 --extend-frames 2 -o extended.mp4
-    ltx-2-mlx keyframe --prompt "transition" --start img1.png --end img2.png --frame-rate 24 -o kf.mp4
     ltx-2-mlx ic-lora --prompt "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 \\
         --frame-rate 24 -o out.mp4
     ltx-2-mlx enhance --prompt "a cat walking" --mode t2v
@@ -299,7 +298,7 @@ def _add_generation_args(
     ``frames_default=None`` (used by the ``generate`` subparser only) leaves
     ``--frames`` unset so the auto-duration collapse logic in
     ``_resolve_num_frames_arg`` can distinguish "not given" from an explicit
-    value. Other subcommands (``a2v``, ``keyframe``, ``ic-lora``, ...) keep
+    value. Other subcommands (``a2v``, ``ic-lora``, ...) keep
     their historical ``97`` default.
     """
     _add_base_args(parser)
@@ -367,7 +366,7 @@ def _add_generation_args(
             "mx.compile + per-block sync + Metal heap release. Cuts "
             "transformer peak Metal ~75%% (e.g. q8 ~10-12 GB -> ~2.8 GB). "
             "Targets 16 GB Macs (q8) and 32 GB Macs (bf16). Supported "
-            "on every generate mode (incl. --distilled and --dfr), a2v, keyframe, ic-lora, "
+            "on every generate mode (incl. --distilled and --dfr), a2v, ic-lora, "
             "hdr-ic-lora, lipdub, retake, and extend. Compatible with generate's --lora flag "
             "via per-block BlockLoraSource bind-time fusion. Two-stage at "
             "LoRA strength 1.0 swaps to the pre-fused "
@@ -538,7 +537,6 @@ examples:
   ltx-2-mlx a2v --prompt "music video" --audio music.wav --frame-rate 24 -o a2v.mp4
   ltx-2-mlx retake --prompt "new scene" --video source.mp4 --start 1 --end 3 -o out.mp4
   ltx-2-mlx extend --prompt "continue" --video source.mp4 --extend-frames 2 -o out.mp4
-  ltx-2-mlx keyframe --prompt "transition" --start img1.png --end img2.png --frame-rate 24 -o out.mp4
   ltx-2-mlx ic-lora --prompt "scene" --lora lora.safetensors 1.0 --video-conditioning depth.mp4 1.0 --frame-rate 24 -o out.mp4
   ltx-2-mlx enhance --prompt "a cat walking" --mode t2v
   ltx-2-mlx info --model dgrauet/ltx-2.3-mlx-q4
@@ -960,40 +958,6 @@ examples:
         help="STG guidance scale (default: 1.0 — upstream LTX_2_3_PARAMS; rejected by --distilled)",
     )
 
-    # --- keyframe ---
-    kf = sub.add_parser("keyframe", help="Interpolate between keyframe images")
-    _add_generation_args(kf, modality_tiling=False)
-    kf.add_argument("--start", required=True, help="Start keyframe image path")
-    kf.add_argument("--end", required=True, help="End keyframe image path")
-    kf.add_argument(
-        "--start-strength",
-        type=float,
-        default=1.0,
-        help="Start keyframe conditioning strength in [0, 1] (default: 1.0 — upstream-iso)",
-    )
-    kf.add_argument(
-        "--end-strength",
-        type=float,
-        default=1.0,
-        help="End keyframe conditioning strength in [0, 1] (default: 1.0 — upstream-iso). Lower values give the prompt more freedom to diverge from the end fixture.",
-    )
-    kf.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
-    kf.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
-    kf.add_argument("--cfg-scale", type=float, default=None, help="Override CFG scale (default: 3.0 video, 7.0 audio)")
-    _add_negative_prompt_arg(kf, rejected_by=None)
-    kf.add_argument("--stg-scale", type=float, default=None, help="Override STG scale (default: 1.0)")
-    kf.add_argument(
-        "--dev-transformer",
-        default=None,
-        help="Dev (non-distilled) transformer filename for higher quality stage 1 (e.g. transformer-dev.safetensors)",
-    )
-    kf.add_argument(
-        "--distilled-lora",
-        default=None,
-        help="Distilled LoRA filename for stage 2 refinement (e.g. ltx-2.3-22b-distilled-lora-384.safetensors)",
-    )
-    kf.add_argument("--lora-strength", type=float, default=1.0, help="Distilled LoRA strength (default: 1.0)")
-
     # --- ic-lora ---
     ic = sub.add_parser("ic-lora", help="Generate video with IC-LoRA control conditioning")
     _add_generation_args(ic, modality_tiling=False)
@@ -1328,7 +1292,6 @@ def main() -> None:
         "a2v": _cmd_a2v,
         "retake": _cmd_retake,
         "extend": _cmd_extend,
-        "keyframe": _cmd_keyframe,
         "ic-lora": _cmd_ic_lora,
         "lipdub": _cmd_lipdub,
         "hdr-ic-lora": _cmd_hdr_ic_lora,
@@ -1865,74 +1828,6 @@ def _cmd_extend_distilled(args: argparse.Namespace, t0: float) -> None:
     )
 
     _decode_and_save(pipe, video_latent, audio_latent, args)
-    _print_result(args.output, t0, args.quiet)
-
-
-# =============================================================================
-# Keyframe interpolation
-# =============================================================================
-
-
-def _cmd_keyframe(args: argparse.Namespace) -> None:
-    """Interpolate between two keyframe images."""
-    t0 = time.time()
-
-    from ltx_pipelines_mlx.keyframe_interpolation import KeyframeInterpolationPipeline
-
-    if not args.quiet:
-        print("Mode: Keyframe Interpolation (two-stage)")
-        print(f"Start: {args.start}, End: {args.end}")
-
-    last_pixel_frame = args.frames - 1
-
-    pipe = KeyframeInterpolationPipeline(
-        model_dir=args.model,
-        gemma_model_id=args.gemma,
-        low_ram_streaming=getattr(args, "low_ram", False),
-        dev_transformer=args.dev_transformer,
-        distilled_lora=args.distilled_lora,
-        distilled_lora_strength=args.lora_strength,
-    )
-    pipe.verbose = not args.quiet
-    pipe.stepwise = _build_stepwise(args)
-    # Build guider params (defaults match reference LTX_2_3_PARAMS)
-    from ltx_core_mlx.components.guiders import MultiModalGuiderParams
-
-    cfg = args.cfg_scale if args.cfg_scale is not None else 3.0
-    stg = args.stg_scale if args.stg_scale is not None else 1.0
-    video_gp = MultiModalGuiderParams(
-        cfg_scale=cfg,
-        stg_scale=stg,
-        rescale_scale=0.7,
-        modality_scale=3.0,
-        stg_blocks=[28],
-    )
-    audio_gp = MultiModalGuiderParams(
-        cfg_scale=7.0,
-        stg_scale=stg,
-        rescale_scale=0.7,
-        modality_scale=3.0,
-        stg_blocks=[28],
-    )
-
-    pipe.generate_and_save(
-        prompt=args.prompt,
-        output_path=args.output,
-        keyframe_images=[args.start, args.end],
-        keyframe_indices=[0, last_pixel_frame],
-        keyframe_strengths=[args.start_strength, args.end_strength],
-        height=args.height,
-        width=args.width,
-        num_frames=args.frames,
-        frame_rate=args.frame_rate,
-        seed=args.seed,
-        stage1_steps=args.stage1_steps,
-        stage2_steps=args.stage2_steps,
-        cfg_scale=cfg,
-        negative_prompt=args.negative_prompt,
-        video_guider_params=video_gp,
-        audio_guider_params=audio_gp,
-    )
     _print_result(args.output, t0, args.quiet)
 
 

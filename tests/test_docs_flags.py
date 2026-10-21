@@ -11,7 +11,7 @@ import pytest
 from ltx_pipelines_mlx.cli import _build_parser
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "PIPELINES.md"
-SUBCOMMANDS = ("generate", "a2v", "keyframe", "ic-lora", "hdr-ic-lora", "lipdub", "retake", "extend")
+SUBCOMMANDS = ("generate", "a2v", "ic-lora", "hdr-ic-lora", "lipdub", "retake", "extend")
 FLAG_RE = re.compile(r"`(--[a-z0-9][a-z0-9-]*)")
 
 

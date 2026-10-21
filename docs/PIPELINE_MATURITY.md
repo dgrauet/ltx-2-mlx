@@ -15,10 +15,9 @@ zero known quality regressions. Safe to rely on in production.
 | Pipeline | CLI subcommand | Notes |
 |---|---|---|
 | `TI2VidOneStagePipeline` | `generate --one-stage` | Dev one-stage at target res |
-| `TI2VidTwoStagesPipeline` | `generate --two-stage` | Dev + CFG + 2x upscale + distilled refine |
+| `TI2VidTwoStagesPipeline` | `generate --two-stage` | Dev + CFG + 2x upscale + distilled refine. Also interpolates between images (guide-bound `--image` + `--refine-audio`), which replaces the `keyframe` command removed with upstream v1.5.0 |
 | `TI2VidTwoStagesHQPipeline` | `generate --two-stages-hq` | Same as `--two-stage` with res_2s sampler |
 | `DistilledPipeline` | `generate --distilled` | Distilled-only two-stage; fastest |
-| `KeyframeInterpolationPipeline` | `keyframe` | Two-stage interp dev + CFG |
 | `ICLoraPipeline` | `ic-lora` | IC-LoRA reference video conditioning |
 
 ### 🟡 Beta

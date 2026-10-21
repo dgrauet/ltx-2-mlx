@@ -70,14 +70,24 @@ GOLDENS: dict[str, dict] = {
         ],
     },
     "g3b_hedgehog": {
+        # Captured with the removed `keyframe` command (post_fix_2_kf); now its upstream v1.5.0
+        # replacement, so re-capture before comparing against that tag.
         "cli_args": [
-            "keyframe",
+            "generate",
+            "--two-stage",
             "--prompt",
             KF_HEDGEHOG_PROMPT,
-            "--start",
+            "--image",
             KF_HEDGEHOG_START,
-            "--end",
+            "0",
+            "1.0",
+            "guide",
+            "--image",
             KF_HEDGEHOG_END,
+            "last",
+            "1.0",
+            "guide",
+            "--refine-audio",
             "--seed",
             str(KF_HEDGEHOG_SEED),
             "-f",
