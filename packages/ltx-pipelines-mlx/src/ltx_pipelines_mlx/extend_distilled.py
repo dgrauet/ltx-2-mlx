@@ -89,6 +89,11 @@ def _pin_prefix(tokens: mx.array, tokens_per_frame: int) -> VideoConditionByLate
     )
 
 
+def _as_guide(image: ImageConditioningInput) -> ImageConditioningInput:
+    """The same anchor as a guide (resolved on the new frames, where a replace's latent grid does not apply)."""
+    return ImageConditioningInput.guide(image.path, image.frame_idx, image.strength, image.crf)
+
+
 class ExtendDistilledPipeline(DistilledPipeline):
     """Append frames to a clip with the distilled transformer (``extend --distilled``).
 
@@ -190,9 +195,10 @@ class ExtendDistilledPipeline(DistilledPipeline):
         if extend_frames < 1:
             raise ValueError(f"extend_frames must be >= 1, got {extend_frames}")
         # Anchors are given on the new frames; in the window they come after the carried ones.
+        # Every anchor guides (the window starts with the pinned carry), whatever its binding.
         window_images = [
-            image._replace(frame_idx=image.frame_idx + EXTEND_CARRY_PIXEL_FRAMES)
-            for image in resolve_frame_indices(list(images or []), 8 * extend_frames)
+            image.with_frame_idx(image.frame_idx + EXTEND_CARRY_PIXEL_FRAMES)
+            for image in resolve_frame_indices([_as_guide(image) for image in images or []], 8 * extend_frames)
         ]
         video_path = str(video_path)
         info = probe_video_info(video_path)

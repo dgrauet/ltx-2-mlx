@@ -616,12 +616,12 @@ examples:
         default=None,
         metavar="ARG",
         help=(
-            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. "
+            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [BINDING] [CRF]]. "
             "PATH alone defaults to FRAME_IDX=0 STRENGTH=1.0 (legacy single-image I2V). "
             "Repeatable to anchor multiple frames (e.g. --image foo.jpg 0 1.0 "
             "--image foo.jpg 96 1.0 to anchor both ends and preserve identity). "
-            "FRAME_IDX is the pixel frame index (0-based); 0 replaces the first latent "
-            "frame directly, others guide via VideoConditionByKeyframeIndex. "
+            "FRAME_IDX is the pixel frame index (0-based). "
+            "BINDING is auto (default when omitted: FRAME_IDX 0 replaces the first latent, later frames guide), replace (pins the still on a causal latent start: pixel frame 0 or 1 + 8 * k) or guide (a keyframe at any pixel frame); with one trailing token, a binding keyword selects BINDING and an integer selects CRF. "
             "FRAME_IDX may be 'last' or negative (counted from the end), so an end "
             "anchor follows the frame count --auto-duration picks. "
             "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4. "
@@ -683,6 +683,14 @@ examples:
         help=(
             "Two-stage pipeline: dev model + CFG at half-res, upscale, distilled LoRA refine "
             "(needs a pack with the dev transformer and the distilled LoRA)"
+        ),
+    )
+    gen.add_argument(
+        "--refine-audio",
+        action="store_true",
+        help=(
+            "--two-stage only: denoise the audio in stage 2 with the video instead of keeping "
+            "the stage-1 audio (upstream refine_audio)"
         ),
     )
     gen.add_argument(
@@ -849,9 +857,10 @@ examples:
         default=None,
         metavar="ARG",
         help=(
-            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. "
+            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [BINDING] [CRF]]. "
             "Repeatable to anchor multiple frames. PATH alone defaults to "
             "FRAME_IDX=0 STRENGTH=1.0 (legacy single-image). "
+            "BINDING is auto (default when omitted: FRAME_IDX 0 replaces the first latent, later frames guide), replace (pins the still on a causal latent start: pixel frame 0 or 1 + 8 * k) or guide (a keyframe at any pixel frame); with one trailing token, a binding keyword selects BINDING and an integer selects CRF. "
             "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4."
         ),
     )
@@ -933,10 +942,10 @@ examples:
         default=None,
         metavar="ARG",
         help=(
-            "[--distilled only] Image anchor for the new frames. Form: PATH [FRAME_IDX STRENGTH [CRF]], repeatable, "
+            "[--distilled only] Image anchor for the new frames. Form: PATH [FRAME_IDX STRENGTH [BINDING] [CRF]], repeatable, "
             "as generate --distilled --image. FRAME_IDX counts the appended frames only: 0 is the first new frame, "
             "'last' or -1 the last one (8 x --extend-frames new frames). Every anchor is a guide "
-            "(VideoConditionByKeyframeIndex), applied in both stages. PATH alone means FRAME_IDX=0 STRENGTH=1.0."
+            "(VideoConditionByKeyframeIndex), applied in both stages, whatever its BINDING. PATH alone means FRAME_IDX=0 STRENGTH=1.0."
         ),
     )
     ext.add_argument("--steps", type=int, default=None, help="Denoising steps (default: 30; rejected by --distilled)")
@@ -1017,7 +1026,8 @@ examples:
         default=None,
         metavar="ARG",
         help=(
-            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [CRF]]. Repeatable to anchor multiple frames. "
+            "Reference image for I2V. Form: PATH [FRAME_IDX STRENGTH [BINDING] [CRF]]. Repeatable to anchor "
+            "multiple frames. BINDING is auto (default when omitted: FRAME_IDX 0 replaces the first latent, later frames guide), replace (pins the still on a causal latent start: pixel frame 0 or 1 + 8 * k) or guide (a keyframe at any pixel frame); with one trailing token, a binding keyword selects BINDING and an integer selects CRF. "
             "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4."
         ),
     )
@@ -1386,6 +1396,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
 
     if sum(map(bool, (args.two_stages_hq, args.two_stage, args.distilled, args.one_stage, args.dfr))) > 1:
         raise SystemExit("Choose at most one of --two-stage, --two-stages-hq, --distilled, --one-stage, --dfr.")
+    if args.refine_audio and not args.two_stage:
+        raise SystemExit("--refine-audio requires --two-stage.")
     if args.dfr:
         if args.num_generated_keyframes:
             raise SystemExit("--dfr places its keyframe slots from the canvas; drop --num-generated-keyframes.")
@@ -1620,6 +1632,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
             kwargs["prompt_relay"] = relay
         if args.negative_prompt is not None:
             kwargs["negative_prompt"] = args.negative_prompt
+        if args.refine_audio:
+            kwargs["refine_audio"] = True
         pipe.generate_and_save(**kwargs)
 
     else:

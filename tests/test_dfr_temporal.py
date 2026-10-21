@@ -79,13 +79,13 @@ def test_lead_in_latent_is_the_plane_then_the_previous_tiles_cells():
 
 
 def test_rebase_image_conditionings_scales_filters_and_rebases():
-    imgs = [ImageConditioningInput("a.png", 0, 1.0), ImageConditioningInput("b.png", 60, 0.8)]
+    imgs = [ImageConditioningInput.at("a.png", 0, 1.0), ImageConditioningInput.at("b.png", 60, 0.8)]
     assert rebase_image_conditionings(imgs, pixel_scale=2, pixel_start=0, pixel_end=144) == [
-        ImageConditioningInput("a.png", 0, 1.0),
-        ImageConditioningInput("b.png", 120, 0.8),
+        ImageConditioningInput.at("a.png", 0, 1.0),
+        ImageConditioningInput.at("b.png", 120, 0.8),
     ]
     assert rebase_image_conditionings(imgs, pixel_scale=2, pixel_start=96, pixel_end=240) == [
-        ImageConditioningInput("b.png", 24, 0.8)
+        ImageConditioningInput.at("b.png", 24, 0.8)
     ]
 
 
@@ -277,7 +277,7 @@ def test_rounds_rebase_images_into_their_tiles(tmp_path, monkeypatch):
     # stages 1/2 import the helper locally from _orchestration at call time; the rounds use dfr's import
     monkeypatch.setattr(orch, "combined_image_conditionings", lambda imgs, **kw: [])
     monkeypatch.setattr(dfr_mod, "combined_image_conditionings", lambda imgs, **kw: seen.append(list(imgs)) or [])
-    _run(pipe, num_frames=121, images=[ImageConditioningInput("a.png", 60, 1.0)])
+    _run(pipe, num_frames=121, images=[ImageConditioningInput.at("a.png", 60, 1.0)])
     # 60 * 2 = 120: inside tile 0 [0, 144] and tile 1, which starts on the plane at 120 and spans
     # [120, 240] -> local 120 and 0. Upstream rebases on the whole tile window, prefix included.
     assert [[i.frame_idx for i in s] for s in seen] == [[120], [0]]
@@ -294,7 +294,7 @@ def test_rounds_carry_the_checkpoint_image_crf(tmp_path, monkeypatch):
 
     monkeypatch.setattr(orch, "combined_image_conditionings", lambda imgs, **kw: seen.append(list(imgs)) or [])
     monkeypatch.setattr(dfr_mod, "combined_image_conditionings", lambda imgs, **kw: seen.append(list(imgs)) or [])
-    images = [ImageConditioningInput("a.png", 0, 1.0), ImageConditioningInput("b.png", 60, 1.0, 0)]
+    images = [ImageConditioningInput.at("a.png", 0, 1.0), ImageConditioningInput.at("b.png", 60, 1.0, 0)]
     _run(pipe, num_frames=121, images=images)
     assert len(seen) >= 3  # stage 1, stage 2, the round tiles
     crfs = {(i.path, i.crf) for s in seen for i in s}

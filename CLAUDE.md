@@ -360,7 +360,7 @@ When conditioning (I2V, retake, extend), use per-token timesteps `sigma * denois
 - `frozen`: `True` marks a stream that is conditioning only (upstream `LatentState.frozen`); it always carries an
   all-zero `denoise_mask`. `create_noised_state(..., frozen=True)` builds one. Set where upstream sets
   `frozen=True`: a2v audio (both stages), lipdub stage-2 audio, `--two-stage` stage-2 audio (upstream v1.4.0
-  `freeze_audio=True`), retake audio with `--no-regen-audio`.
+  `freeze_audio=True`; not with `--refine-audio`), retake audio with `--no-regen-audio`.
 
 ### Frozen streams and per-modality sigma
 Upstream gives each modality its own `Modality.sigma` and forces it to 0 for a frozen stream
@@ -558,7 +558,7 @@ ltx-2-mlx generate \
   --distilled --auto-duration 2:6 --frame-rate 24 -o output.mp4
 ```
 
-Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 1.0; 0.0 on `--two-stages-hq`), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3; a shorter count takes the **last** N sigmas of the stage-2 table via `scheduler.shorten_schedule(..., keep="tail")`, so it always ends at σ=0 — a stage 1 on the fixed distilled table uses `keep="start"`: σ=1.0 then the last N sigmas), `--image`, `-f/--frames` (required on 2.3 packs; optional on 2.5 packs — auto-predicted when omitted), `--auto-duration MIN:MAX` (2.5 packs only — overrides the predictor's clamp range; explicit `-f` wins over `--auto-duration` if both are given, with a warning).
+Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 1.0; 0.0 on `--two-stages-hq`), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3; a shorter count takes the **last** N sigmas of the stage-2 table via `scheduler.shorten_schedule(..., keep="tail")`, so it always ends at σ=0 — a stage 1 on the fixed distilled table uses `keep="start"`: σ=1.0 then the last N sigmas), `--refine-audio` (`--two-stage` only: denoise the audio in stage 2 too, see below), `--image`, `-f/--frames` (required on 2.3 packs; optional on 2.5 packs — auto-predicted when omitted), `--auto-duration MIN:MAX` (2.5 packs only — overrides the predictor's clamp range; explicit `-f` wins over `--auto-duration` if both are given, with a warning).
 
 ### Prompt Relay (`--segment`)
 
@@ -609,7 +609,7 @@ second) do not map to whole latent frames, so token *i* of `Na` sits at `i * F /
 video mask, its own `--relay-audio-strength` (default 1.0 on the distilled paths, the reference's `audio_strength`,
 independent of `--relay-strength`; 0 on the CFG modes, see below; `PromptRelayInput.audio_strength=None` lets the
 pipeline pick, `_prompt_relay_audio_mask_builder(..., default_audio_strength=...)`) and `--relay-audio-epsilon` (default: inherit, as the reference's `audio_epsilon=0`). Inert on a
-frozen audio stream (`--two-stage` stage 2, a2v): `_prompt_relay_audio_mask_builder` builds nothing for it and the
+frozen audio stream (`--two-stage` stage 2 without `--refine-audio`, a2v): `_prompt_relay_audio_mask_builder` builds nothing for it and the
 four loops drop the kwarg (`_audio_relay_mask`). `--relay-audio-strength 0` passes `None`, so a video-only relay is
 byte-identical to the relay before this flag existed.
 
@@ -746,13 +746,16 @@ Key files: `guidance/nag.py` (`NAGConfig`, `NAGGuidance`, `normalized_attention_
 
 ### Multi-Anchor I2V (`--image` repeatable)
 
-All `generate` modes (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distilled`, `--dfr`) support multiple `--image` flags. Each anchor takes `PATH FRAME_IDX STRENGTH` where `FRAME_IDX` is the **pixel frame index** (0-based; for a 97-frame video the last frame is 96).
+All `generate` modes (`--one-stage`, `--two-stage`, `--two-stages-hq`, `--distilled`, `--dfr`) support multiple `--image` flags. Each anchor takes `PATH FRAME_IDX STRENGTH [BINDING] [CRF]` where `FRAME_IDX` is the **pixel frame index** (0-based; for a 97-frame video the last frame is 96). The binding (upstream v1.5.0 `ImageReplace` / `ImageGuide`, `utils/types.py`; `ImageConditioningInput(path, strength, binding, crf)` is a frozen dataclass built with `.at` / `.replace` / `.guide`):
 
-- `frame_idx=0` → `VideoConditionByLatentIndex`: hard-replaces the first latent frame (strongly preserved)
-- `frame_idx>0` → `VideoConditionByKeyframeIndex`: appends soft reference tokens at that temporal position
-- Optional 4th value `CRF`: the H.264 CRF the image is re-compressed at before encoding (`0` = none). Omitted, it resolves from the checkpoint like upstream (`ImageConditioner.resolve_crf`, reading `model_version` from the VAE encoder's safetensors metadata): **33** before LTX-2.4 (2.3 packs carry no version → 33), **18** from 2.4 on (2.5 packs). Applies to every pipeline that takes images, `keyframe` included; an explicit CRF always wins.
+- `replace` → `VideoConditionByLatentIndex`: hard-replaces the latent that starts at that pixel frame (strongly preserved). Only pixel frame 0 or `1 + 8k` starts a latent under the causal VAE; frame `1 + 8k` is latent `k + 1` (`replacement_latent_index`), any other frame is refused (`ImageReplace frame_idx must be 0 or 1 + 8 * k, got N`)
+- `guide` → `VideoConditionByKeyframeIndex`: appends soft reference tokens at that temporal position, any frame (frame 0 included)
+- `auto` (default, `ImageConditioningInput.at`): frame 0 replaces, every other index guides
+- With one token after STRENGTH, `auto`/`replace`/`guide` is the binding and a number is the CRF; with two, the binding comes first. Before 0.18 the binding was implied by the index (0 → replace) and Python callers built `ImageConditioningInput(path, frame_idx, strength, crf)`; tuples passed to `ic-lora` / `lipdub` still go through `.at`
+- Validated (M2 Pro 32 GB, 2.5 q8, `--distilled --low-ram --no-audio`, 512×768×49, seed 5, a start image at 0 and a second image): the `auto` binding is byte-identical (sha256) to main with the second image at 24. Against that second image, `replace` at 25 holds frames 25–32 at 25.9 / 25.7 / 24.1 dB (frames 25 / 28 / 32), where the `auto` guide at 24 peaks at 26.7 dB on its frame and falls to 20.5 dB by frame 32. A `guide` at frame 0 matches the start image at 37.3 dB against 40.1 dB for the default replace
+- Optional last value `CRF`: the H.264 CRF the image is re-compressed at before encoding (`0` = none). Omitted, it resolves from the checkpoint like upstream (`ImageConditioner.resolve_crf`, reading `model_version` from the VAE encoder's safetensors metadata): **33** before LTX-2.4 (2.3 packs carry no version → 33), **18** from 2.4 on (2.5 packs). Applies to every pipeline that takes images, `keyframe` included; an explicit CRF always wins.
 - Image preprocessing mirrors upstream `load_image_and_preprocess` (`utils/media_io.py`): EXIF orientation + embedded ICC profile → sRGB, odd dims cropped to even, the CRF round trip encoded as 4:2:0 (`yuv420p`, bilinear RGB↔YUV, slice threads, as PyAV does upstream), then a PyTorch-style bilinear resize on floats (no antialias, no uint8 re-quantization) and `x / 127.5 - 1`. Until #188's audit we encoded 4:4:4 and resized with PIL Lanczos on uint8 (2.3 q8 latent corr 0.918 vs upstream on a 1672×941 image; 0.9993 after). Control / reference videos (`ic-lora`, `lipdub`, the `ic-lora` attention-mask video) go through the same resize: `media_io.decode_video_by_frame` (native size, no autorotate, like PyAV) + `media_io.video_preprocess` (upstream names), so a control whose aspect differs from the render is center-cropped, not stretched (#194; ffmpeg's `scale` filter used to stretch it, bicubic, on uint8). Torch golden: `tests/parity_video_preprocess_reference.py`. Torch golden: `tests/parity_image_preprocess_reference.py`.
-- `FRAME_IDX` can also be `last` (or `end`) or a negative number counted back from the end (`-1` = last frame). `resolve_frame_indices` (`utils/args.py`) turns it into a pixel index once the pipeline knows the frame count, so an end anchor stays on the final frame when `--auto-duration` picks the length (a fixed `96` would not). Resolved in every pipeline that takes `--image`, before the keyframe-token bookkeeping that tests `frame_idx > 0`. On `--dfr` it is resolved against the requested length before the clip is padded to whole keyframe segments (`resolve_stage1_frames`, `distilled.py`), so `last` lands on the final frame of the trimmed output. `-num_frames` resolves to `0` and therefore gets the hard first-latent replace above, not a soft keyframe. An index outside the clip (before frame 0, or `>= num_frames`) raises a `ValueError` that names the image.
+- `FRAME_IDX` can also be `last` (or `end`) or a negative number counted back from the end (`-1` = last frame). `resolve_frame_indices` (`utils/args.py`) turns it into a pixel index once the pipeline knows the frame count, so an end anchor stays on the final frame when `--auto-duration` picks the length (a fixed `96` would not). Resolved in every pipeline that takes `--image`, before any conditioning is built; a negative `replace` is checked against the latent grid once resolved (`-8`, `-16`, … are latent starts, `last` is not). On `--dfr` it is resolved against the requested length before the clip is padded to whole keyframe segments (`resolve_stage1_frames`, `distilled.py`), so `last` lands on the final frame of the trimmed output. `auto` decides from the literal index, as upstream `.at`, so every negative `auto` index (`-num_frames` included, which resolves to `0`) is a guide. An index outside the clip (before frame 0, or `>= num_frames`) raises a `ValueError` that names the image.
 
 ```bash
 # Anchor both ends — model animates the transition
@@ -933,7 +936,9 @@ Two-stage pipeline for higher-resolution generation. Requires the dev model + di
   - `STAGE_2_SIGMAS` (default 3 steps)
   - I2V conditioning re-encoded at full resolution
   - Denormalize → neural upsampler 2x → re-normalize before Stage 2
-  - Audio: on `--two-stage`, stage 2 keeps stage 1's audio as a frozen conditioning stream (upstream v1.4.0 `freeze_audio=True`, #173); on `--two-stages-hq` stage 2 re-noises the stage-1 audio and refines it with the video, as upstream does
+  - Audio: on `--two-stage`, stage 2 keeps stage 1's audio as a frozen conditioning stream (upstream v1.4.0 `freeze_audio=True`, #173); `--refine-audio` (`refine_audio=True`, upstream v1.5.0) re-noises it at the first stage-2 sigma, denoises it with the video and ships stage 2's audio (2.5 q8, 640×384×121, `--stg-scale 0 --low-ram`, seed 5, a
+    speech prompt: same time, 1322 vs 1330 s, peak footprint 23.2 vs 22.8 GB; the same pauses at the same times, audio
+    −16.0 vs −17.9 dB RMS; the video changes too, 22.6 dB PSNR, since stage 2 no longer sees a frozen track); on `--two-stages-hq` stage 2 re-noises the stage-1 audio and refines it with the video, as upstream does
 
 ### Critical Implementation Details
 
@@ -1456,7 +1461,7 @@ entries bracketing 4 steps) via ancestral Euler
 Conditioning per tile: the carried keyframes after the tile's resume point (seam + 1) anchor it at
 `ANCHOR_KEYFRAME_STRENGTH = 0.95` (soft, not a hard replace; anchors inside the pinned prefix are
 dropped), plus fresh generated-keyframe slots at the *canvas* segment midpoints that fall in the tile,
-and user images rebased on the tile window (prefix included). Audio is **frozen**, not re-denoised: stage 1's audio latent is windowed to the tile's
+and user images rebased on the tile window (prefix included; the binding is kept, as upstream v1.5.0 `map_frame_index`, so a guide on the tile's first frame stays a guide; a `replace` off frame 0 is refused before any model work, since the doubled timeline moves it off the latent grid, where upstream raises after stage 2). Audio is **frozen**, not re-denoised: stage 1's audio latent is windowed to the tile's
 time range and resampled to the tile's new token count (`resample_audio_time`,
 `audio_latent_for_tile`) as a `frozen` state (all-zero `denoise_mask`, sigma 0 for the audio prompt
 AdaLN and the A→V gate — see "Frozen streams and per-modality sigma"), as upstream. The

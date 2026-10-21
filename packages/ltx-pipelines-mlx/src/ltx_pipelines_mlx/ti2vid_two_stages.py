@@ -425,6 +425,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         enable_teacache: bool = False,
         teacache_thresh: float | None = None,
         tap: callable | None = None,
+        refine_audio: bool = False,
     ) -> tuple[mx.array, mx.array]:
         """Generate video using two-stage pipeline.
 
@@ -459,6 +460,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
                 lossier. Ignored when ``enable_teacache=False``.
             tap: Optional per-step instrumentation hook forwarded to
                 ``guided_denoise_loop``. Used by the calibration script.
+            refine_audio: Denoise the audio in stage 2 with the video (re-noised
+                at the first stage-2 sigma) and return stage 2's audio. Default
+                ``False`` keeps stage 1's audio as frozen conditioning (upstream
+                ``refine_audio``, ``freeze_audio=not refine_audio``).
 
         Returns:
             Tuple of (video_latent, audio_latent) at full resolution.
@@ -516,7 +521,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         enc_w_half = W_half * 32
         resolved_images = list(images) if images else []
         if image is not None and not resolved_images:
-            resolved_images = [ImageConditioningInput(path=image, frame_idx=0, strength=1.0)]
+            resolved_images = [ImageConditioningInput.at(image, 0, 1.0)]
         resolved_images = resolve_frame_indices(resolved_images, num_frames)
         # Unset CRFs take the checkpoint generation's value (upstream ``resolve_crf``).
         resolved_images = self.image_conditioner.resolve_crf(resolved_images)
@@ -686,11 +691,12 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             legacy_scalar_blend=True,
         )
 
-        # Stage 2 audio: frozen conditioning, as upstream v1.4.0
-        # (``denoise_chunks(..., freeze_audio=True)``). The model sees stage 1's
-        # audio clean (sigma 0 for the audio prompt AdaLN and the A->V gate)
-        # instead of a copy re-noised at ``start_sigma``; ``frozen=True`` forces
-        # the zero noise scale and the all-zero denoise mask.
+        # Stage 2 audio: frozen conditioning by default, as upstream
+        # (``denoise_chunks(..., freeze_audio=not refine_audio)``). The model sees
+        # stage 1's audio clean (sigma 0 for the audio prompt AdaLN and the A->V
+        # gate); ``frozen=True`` forces the zero noise scale and the all-zero
+        # denoise mask. With ``refine_audio`` it is re-noised at ``start_sigma``
+        # and denoised with the video.
         audio_tokens_1 = output_1.audio_latent
         audio_state_2 = create_noised_state(
             base_shape=audio_tokens_1.shape,
@@ -700,7 +706,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             seed=seed + 2,
             sigma=start_sigma,
             initial_latent=audio_tokens_1,
-            frozen=True,
+            frozen=not refine_audio,
         )
 
         # Stage 2 reuses the same x0_model as stage 1 by default. With
@@ -730,10 +736,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         gen_tokens_2 = output_2.video_latent[:, : F * H_full * W_full, :]
         video_latent = self.video_patchifier.unpatchify(gen_tokens_2, (F, H_full, W_full))
-        # Stage 2 refines video only; its audio is frozen context, so keep
-        # stage 1's latent rather than the loop's copy of it (upstream keeps
-        # ``chunk.audio`` for a frozen modality).
-        audio_latent = self.audio_patchifier.unpatchify(audio_tokens_1)
+        # A frozen audio is context, so keep stage 1's latent rather than the
+        # loop's copy of it (upstream keeps ``chunk.audio`` for a frozen modality);
+        # a refined audio is stage 2's output.
+        audio_latent = self.audio_patchifier.unpatchify(output_2.audio_latent if refine_audio else audio_tokens_1)
 
         return video_latent, audio_latent
 
@@ -761,6 +767,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         generated_keyframes: int | Sequence[int] = 0,
         negative_prompt: str | None = None,
         nag: NAGConfig | None = None,
+        refine_audio: bool = False,
     ) -> str:
         """Generate two-stage video+audio and save to file.
 
@@ -776,7 +783,7 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         subclasses (distilled, DFR) raise ``ValueError`` when it is set without ``nag``.
 
         ``nag`` (Normalized Attention Guidance, the CFG-less subclasses only) is forwarded
-        only when set, too.
+        only when set, too, and so is ``refine_audio`` (``TI2VidTwoStagesPipeline`` only).
         """
         gen_kwargs: dict = dict(
             prompt=prompt,
@@ -803,6 +810,8 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             gen_kwargs["negative_prompt"] = negative_prompt
         if nag is not None:
             gen_kwargs["nag"] = nag
+        if refine_audio:
+            gen_kwargs["refine_audio"] = True
         if has_generated_keyframes(generated_keyframes):
             gen_kwargs["generated_keyframes"] = generated_keyframes
         video_latent, audio_latent = self.generate_two_stage(**gen_kwargs)

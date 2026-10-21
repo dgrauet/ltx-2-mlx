@@ -43,6 +43,7 @@ import logging
 import os
 import sys
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -319,7 +320,7 @@ class ImageConditioner:
         Returns:
             The inputs with every ``crf`` set.
         """
-        return [image if image.crf is not None else image._replace(crf=self.default_image_crf) for image in images]
+        return [image if image.crf is not None else replace(image, crf=self.default_image_crf) for image in images]
 
     def load(self) -> _VideoVAEEncoder:
         """Build the VAE encoder (cached)."""
