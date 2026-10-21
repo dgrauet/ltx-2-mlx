@@ -41,3 +41,7 @@ Thumbs.db
 
 # Local benchmark / regression test artifacts
 regression_tests/
+
+# Local scratch (renders, downloaded tools) — never ship
+output/
+tools-local/

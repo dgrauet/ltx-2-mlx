@@ -102,6 +102,9 @@ exclude = [
   "tests/parity_keyframe/**",
   "tests/parity_*_reference.py",
   "packages/ltx-trainer/**",
+  # Local scratch dirs (also gitignored); Blender/tool trees break ty when present.
+  "tools-local/**",
+  "output/**",
 ]
 
 [tool.ty.rules]
