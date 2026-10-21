@@ -360,7 +360,7 @@ When conditioning (I2V, retake, extend), use per-token timesteps `sigma * denois
 - `frozen`: `True` marks a stream that is conditioning only (upstream `LatentState.frozen`); it always carries an
   all-zero `denoise_mask`. `create_noised_state(..., frozen=True)` builds one. Set where upstream sets
   `frozen=True`: a2v audio (both stages), lipdub stage-2 audio, `--two-stage` stage-2 audio (upstream v1.4.0
-  `freeze_audio=True`), retake audio with `--no-regen-audio`.
+  `freeze_audio=True`; not with `--refine-audio`), retake audio with `--no-regen-audio`.
 
 ### Frozen streams and per-modality sigma
 Upstream gives each modality its own `Modality.sigma` and forces it to 0 for a frozen stream
@@ -558,7 +558,7 @@ ltx-2-mlx generate \
   --distilled --auto-duration 2:6 --frame-rate 24 -o output.mp4
 ```
 
-Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 1.0; 0.0 on `--two-stages-hq`), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3; a shorter count takes the **last** N sigmas of the stage-2 table via `scheduler.shorten_schedule(..., keep="tail")`, so it always ends at σ=0 — a stage 1 on the fixed distilled table uses `keep="start"`: σ=1.0 then the last N sigmas), `--image`, `-f/--frames` (required on 2.3 packs; optional on 2.5 packs — auto-predicted when omitted), `--auto-duration MIN:MAX` (2.5 packs only — overrides the predictor's clamp range; explicit `-f` wins over `--auto-duration` if both are given, with a warning).
+Flags: `--two-stage` (Euler), `--two-stages-hq` (res_2s), `--cfg-scale` (default 3.0), `--stg-scale` (default 1.0; 0.0 on `--two-stages-hq`), `--stage1-steps` (default 30 standard, 15 HQ), `--stage2-steps` (default 3; a shorter count takes the **last** N sigmas of the stage-2 table via `scheduler.shorten_schedule(..., keep="tail")`, so it always ends at σ=0 — a stage 1 on the fixed distilled table uses `keep="start"`: σ=1.0 then the last N sigmas), `--refine-audio` (`--two-stage` only: denoise the audio in stage 2 too, see below), `--image`, `-f/--frames` (required on 2.3 packs; optional on 2.5 packs — auto-predicted when omitted), `--auto-duration MIN:MAX` (2.5 packs only — overrides the predictor's clamp range; explicit `-f` wins over `--auto-duration` if both are given, with a warning).
 
 ### Prompt Relay (`--segment`)
 
@@ -609,7 +609,7 @@ second) do not map to whole latent frames, so token *i* of `Na` sits at `i * F /
 video mask, its own `--relay-audio-strength` (default 1.0 on the distilled paths, the reference's `audio_strength`,
 independent of `--relay-strength`; 0 on the CFG modes, see below; `PromptRelayInput.audio_strength=None` lets the
 pipeline pick, `_prompt_relay_audio_mask_builder(..., default_audio_strength=...)`) and `--relay-audio-epsilon` (default: inherit, as the reference's `audio_epsilon=0`). Inert on a
-frozen audio stream (`--two-stage` stage 2, a2v): `_prompt_relay_audio_mask_builder` builds nothing for it and the
+frozen audio stream (`--two-stage` stage 2 without `--refine-audio`, a2v): `_prompt_relay_audio_mask_builder` builds nothing for it and the
 four loops drop the kwarg (`_audio_relay_mask`). `--relay-audio-strength 0` passes `None`, so a video-only relay is
 byte-identical to the relay before this flag existed.
 
@@ -936,7 +936,9 @@ Two-stage pipeline for higher-resolution generation. Requires the dev model + di
   - `STAGE_2_SIGMAS` (default 3 steps)
   - I2V conditioning re-encoded at full resolution
   - Denormalize → neural upsampler 2x → re-normalize before Stage 2
-  - Audio: on `--two-stage`, stage 2 keeps stage 1's audio as a frozen conditioning stream (upstream v1.4.0 `freeze_audio=True`, #173); on `--two-stages-hq` stage 2 re-noises the stage-1 audio and refines it with the video, as upstream does
+  - Audio: on `--two-stage`, stage 2 keeps stage 1's audio as a frozen conditioning stream (upstream v1.4.0 `freeze_audio=True`, #173); `--refine-audio` (`refine_audio=True`, upstream v1.5.0) re-noises it at the first stage-2 sigma, denoises it with the video and ships stage 2's audio (2.5 q8, 640×384×121, `--stg-scale 0 --low-ram`, seed 5, a
+    speech prompt: same time, 1322 vs 1330 s, peak footprint 23.2 vs 22.8 GB; the same pauses at the same times, audio
+    −16.0 vs −17.9 dB RMS; the video changes too, 22.6 dB PSNR, since stage 2 no longer sees a frozen track); on `--two-stages-hq` stage 2 re-noises the stage-1 audio and refines it with the video, as upstream does
 
 ### Critical Implementation Details
 

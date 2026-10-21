@@ -305,6 +305,59 @@ def test_two_stage_freezes_stage2_audio(tmp_path, monkeypatch, ltx25):
     assert mx.array_equal(audio, pipe.audio_patchifier.unpatchify(stage1_tokens)).item()
 
 
+@pytest.mark.parametrize("ltx25", [False, True])
+def test_two_stage_refine_audio_denoises_stage2_audio(tmp_path, monkeypatch, ltx25):
+    """Upstream v1.5.0 ``refine_audio=True`` (``freeze_audio=not refine_audio``): stage 2
+    re-noises stage 1's audio at its first sigma, denoises it with the video, and the
+    shipped audio is stage 2's."""
+    pipe = _make_two_stage(tmp_path, monkeypatch, ltx25=ltx25)
+    stage1, stage2 = _stub_generate(pipe, monkeypatch, _ts_mod, "guided_denoise_loop")
+    _video, audio = pipe.generate_two_stage(
+        prompt="a fox", height=128, width=128, num_frames=9, frame_rate=24.0, seed=7, refine_audio=True
+    )
+    stage1_tokens = stage1.calls[0]["audio_state"].latent
+    stage2_state = stage2.calls[0]["audio_state"]
+    assert stage2_state.frozen is False
+    assert mx.array_equal(stage2_state.denoise_mask, mx.ones_like(stage2_state.denoise_mask)).item()
+    assert not mx.array_equal(stage2_state.latent, stage1_tokens).item(), "refined audio must be re-noised"
+    assert mx.array_equal(audio, pipe.audio_patchifier.unpatchify(stage2_state.latent)).item()
+
+
+def _run_cli_generate(monkeypatch, *mode_args: str) -> dict:
+    """Parse real argv through ``generate``; capture the pipeline's ``generate_and_save`` kwargs."""
+    import ltx_pipelines_mlx.cli as cli
+
+    captured: dict = {}
+
+    class _FakePipe:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def generate_and_save(self, **kwargs) -> str:
+            captured.update(kwargs)
+            return "out.mp4"
+
+    monkeypatch.setattr(_ts_mod, "TI2VidTwoStagesPipeline", _FakePipe)
+    monkeypatch.setattr(cli, "_print_result", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["ltx-2-mlx", "generate", *mode_args, "--prompt", "a fox", "-f", "9", "--frame-rate", "24", "-o", "out.mp4"],
+    )
+    cli.main()
+    return captured
+
+
+def test_cli_refine_audio_reaches_two_stage(monkeypatch):
+    assert _run_cli_generate(monkeypatch, "--two-stage", "--refine-audio")["refine_audio"] is True
+    assert "refine_audio" not in _run_cli_generate(monkeypatch, "--two-stage")
+
+
+@pytest.mark.parametrize("mode", ["--two-stages-hq", "--distilled", "--one-stage", "--dfr"])
+def test_cli_refine_audio_refused_off_two_stage(monkeypatch, mode):
+    with pytest.raises(SystemExit, match="--refine-audio requires --two-stage"):
+        _run_cli_generate(monkeypatch, mode, "--refine-audio")
+
+
 def test_two_stage_hq_returns_stage1_audio(tmp_path, monkeypatch):
     pipe = _make_two_stage_hq(tmp_path, monkeypatch, ltx25=False)
     res2s, _euler = _stub_generate(pipe, monkeypatch, _hq_mod, "res2s_denoise_loop")
