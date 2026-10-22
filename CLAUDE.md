@@ -112,7 +112,6 @@ packages/
 │           ├── weights.py     # load_split_safetensors, apply_quantization
 │           ├── memory.py      # aggressive_cleanup, get_memory_stats
 │           ├── image.py       # prepare_image_for_encoding
-│           ├── video.py       # Video processing utilities
 │           ├── audio.py       # Audio processing utilities
 │           └── ffmpeg.py      # find_ffmpeg, probe_video_info
 │

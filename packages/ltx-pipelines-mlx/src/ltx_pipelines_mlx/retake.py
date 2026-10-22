@@ -64,7 +64,6 @@ from ltx_core_mlx.utils.positions import (
 )
 from ltx_pipelines_mlx._base import BasePipeline, reject_negative_prompt
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, ltx2_schedule, shorten_schedule
-from ltx_pipelines_mlx.utils.progress import phase
 from ltx_pipelines_mlx.utils.samplers import DenoiseOutput, denoise_loop, guided_denoise_loop
 
 _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags mx.eval pattern
@@ -430,7 +429,7 @@ class RetakePipeline(BasePipeline):
         if self.distilled:
             reject_negative_prompt(negative_prompt, type(self).__name__)
             # --- Text encoding (positive only, no CFG) + distilled transformer ---
-            video_embeds, audio_embeds = self._encode_positive_prompt(prompt)
+            ((video_embeds, audio_embeds),) = self._encode_prompts(prompt)
             neg_video_embeds = neg_audio_embeds = None
             if self.dit is None:
                 self.dit = self._load_distilled_transformer()
@@ -521,21 +520,6 @@ class RetakePipeline(BasePipeline):
         audio_latent = self.audio_patchifier.unpatchify(output.audio_latent)
 
         return video_latent, audio_latent
-
-    def _encode_positive_prompt(self, prompt: str) -> tuple[mx.array, mx.array]:
-        """Load the text encoder, encode the prompt alone, materialize, free the encoder.
-
-        The positive half of :meth:`_encode_text_with_negative`, for the distilled
-        mode (upstream encodes ``[prompt]`` only when ``distilled``).
-        """
-        self._load_text_encoder()
-        with phase("Encoding prompt", verbose=self.verbose):
-            video_embeds, audio_embeds = self._encode_text(prompt)
-            _materialize(video_embeds, audio_embeds)
-        self.text_encoder = None
-        self.feature_extractor = None
-        aggressive_cleanup()
-        return video_embeds, audio_embeds
 
     def _load_distilled_transformer(self) -> LTXModel:
         """Load the distilled transformer, resolved as :meth:`DistilledPipeline.load` does."""

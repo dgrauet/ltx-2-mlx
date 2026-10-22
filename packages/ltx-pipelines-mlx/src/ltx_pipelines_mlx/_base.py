@@ -468,23 +468,36 @@ class BasePipeline:
         Returns:
             Tuple of (video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds).
         """
+        negative = DEFAULT_NEGATIVE_PROMPT if negative_prompt is None else negative_prompt
+        (video_embeds, audio_embeds), (neg_video_embeds, neg_audio_embeds) = self._encode_prompts(prompt, negative)
+        return video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds
+
+    def _encode_prompts(self, *prompts: str) -> list[tuple[mx.array, mx.array]]:
+        """Load the text encoder, encode each prompt, materialize it, free the encoder.
+
+        Each prompt is materialized on its own (see :meth:`_encode_text_with_negative`). The
+        distilled paths that encode the prompt alone call it with one prompt.
+
+        Returns:
+            One ``(video_embeds, audio_embeds)`` pair per prompt, in order.
+        """
         _materialize = getattr(mx, "eval")  # noqa: B009 -- security hook flags mx.eval pattern
 
         self._load_text_encoder()
 
+        encoded = []
         with phase("Encoding prompt", verbose=self.verbose):
-            video_embeds, audio_embeds = self._encode_text(prompt)
-            _materialize(video_embeds, audio_embeds)
-            negative = DEFAULT_NEGATIVE_PROMPT if negative_prompt is None else negative_prompt
-            neg_video_embeds, neg_audio_embeds = self._encode_text(negative)
-            _materialize(neg_video_embeds, neg_audio_embeds)
+            for text in prompts:
+                video_embeds, audio_embeds = self._encode_text(text)
+                _materialize(video_embeds, audio_embeds)
+                encoded.append((video_embeds, audio_embeds))
 
         # Free text encoder before loading heavy components
         self.text_encoder = None
         self.feature_extractor = None
         aggressive_cleanup()
 
-        return video_embeds, audio_embeds, neg_video_embeds, neg_audio_embeds
+        return encoded
 
     def _load_vae_encoder(self) -> None:
         """Load VAE encoder via the :class:`ImageConditioner` block."""
@@ -739,31 +752,6 @@ class BasePipeline:
         self._load_decoders()
 
         self._loaded = True
-
-    def _encode_text_and_load(self, prompt: str) -> tuple[mx.array, mx.array]:
-        """Encode text, then finish loading remaining components.
-
-        In low_memory mode this ensures Gemma is freed before the
-        transformer is loaded, keeping peak memory under control.
-        """
-        # Load text encoder + connector if not already loaded
-        self._load_text_encoder()
-
-        # Encode text
-        video_embeds, audio_embeds = self._encode_text(prompt)
-        # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
-        mx.eval(video_embeds, audio_embeds)
-
-        # Free text encoder before loading heavy components
-        if self.low_memory:
-            self.text_encoder = None
-            self.feature_extractor = None
-            aggressive_cleanup()
-
-        # Load remaining components (DiT, VAE, vocoder)
-        self.load()
-
-        return video_embeds, audio_embeds
 
     def _encode_nag(self, negative_prompt: str, config: NAGConfig) -> NAGGuidance:
         """Encode the NAG negative prompt and bind it to ``config`` (text encoder already loaded).

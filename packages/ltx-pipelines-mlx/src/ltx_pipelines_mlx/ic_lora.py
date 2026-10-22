@@ -482,9 +482,8 @@ class ICLoraPipeline(BasePipeline):
             )
         num_frames = snap_num_frames(num_frames)
 
-        # Load text encoder, encode, free, then load generation components.
-        # Done manually instead of _encode_text_and_load() to avoid loading
-        # decoders (which we don't need until generate_and_save).
+        # Load text encoder, encode, free, then load generation components
+        # (not the decoders, which wait for generate_and_save).
         self._load_text_encoder()
         video_embeds, audio_embeds = self._encode_text(prompt)
         # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
