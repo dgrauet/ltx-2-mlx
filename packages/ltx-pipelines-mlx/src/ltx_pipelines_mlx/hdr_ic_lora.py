@@ -295,8 +295,9 @@ class HDRICLoraPipeline(BasePipeline):
     def load(self) -> None:
         """Load the distilled DiT with the HDR IC-LoRA (no decoders: the decode loads its own)."""
         if self.dit is None:
-            path = self._resolve_safetensors(self.model_dir, "transformer-distilled")
-            self.dit = self._load_transformer_with_optional_streaming(path)
+            self.dit = self._load_transformer_with_optional_streaming(
+                self._resolve_distilled_transformer(self.model_dir)
+            )
         self._loaded = True
 
     # ------------------------------------------------------------------

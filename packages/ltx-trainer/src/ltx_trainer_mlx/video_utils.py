@@ -1,8 +1,7 @@
 """Video I/O utilities using ffmpeg subprocess.
 
 Ported from ltx-trainer (Lightricks). Replaces PyAV with ffmpeg subprocess
-calls, matching the patterns in ``ltx_core_mlx/utils/ffmpeg.py`` and
-``ltx_core_mlx/utils/video.py``.
+calls, matching the patterns in ``ltx_core_mlx/utils/ffmpeg.py``.
 """
 
 from __future__ import annotations
