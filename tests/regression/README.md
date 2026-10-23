@@ -10,7 +10,7 @@ Two goldens (see `config.py`):
 | ID            | Pipeline                | Covers                                |
 |---------------|-------------------------|----------------------------------------|
 | `g1_two_stage`| `generate --two-stage`  | DiT, VAE, Vocoder, BWE, Euler+CFG     |
-| `g2_hq`       | `generate --hq`         | + res_2s sampler                       |
+| `g2_hq`       | `generate --two-stages-hq` | + res_2s sampler                    |
 
 Heavy artifacts (`.mp4`, `.wav`) are gitignored. Only `manifest.json`
 (stats per tag) is committed.

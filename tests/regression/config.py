@@ -51,6 +51,8 @@ GOLDENS: dict[str, dict] = {
             str(GEN_WIDTH),
             "-f",
             str(GEN_FRAMES),
+            "--frame-rate",
+            str(FPS),
         ],
     },
     "g2_hq": {
@@ -58,7 +60,7 @@ GOLDENS: dict[str, dict] = {
             "generate",
             "--prompt",
             PROMPT,
-            "--hq",
+            "--two-stages-hq",
             "--seed",
             str(SEED),
             "-H",
@@ -67,6 +69,8 @@ GOLDENS: dict[str, dict] = {
             str(GEN_WIDTH),
             "-f",
             str(GEN_FRAMES),
+            "--frame-rate",
+            str(FPS),
         ],
     },
     "g3b_hedgehog": {
