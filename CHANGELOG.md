@@ -10,6 +10,33 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.18.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.17.0...v0.18.0) (2026-10-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* `ltx_core_mlx.utils.video` (`load_video_frames_normalized`, `load_video_for_encoding`) is removed. Use `ltx_pipelines_mlx.utils.media_io.decode_video_by_frame` + `video_preprocess`, which match upstream's preprocessing.
+* `ltx-2-mlx keyframe` and `KeyframeInterpolationPipeline` are removed, as upstream. Use `ltx-2-mlx generate --two-stage --image start.png 0 1.0 guide --image end.png last 1.0 guide --refine-audio` (Python: `TI2VidTwoStagesPipeline` with `ImageConditioningInput.guide(...)` images and `refine_audio=True`). It runs 30 stage-1 steps where `keyframe` defaulted to 20.
+* `ImageConditioningInput` is now a frozen dataclass `(path, strength, binding, crf)`. Build it with `ImageConditioningInput.at(path, frame_idx, strength, crf)` (the old rule: frame 0 replaces, later frames guide), `.replace(...)` or `.guide(...)` instead of `ImageConditioningInput(path, frame_idx, strength, crf)`. On the CLI, `--image PATH FRAME_IDX STRENGTH [BINDING] [CRF]` takes `auto` (default, unchanged), `replace` or `guide`; an `auto` anchor at a negative index (`-num_frames` included) is now a guide.
+
+### Features
+
+* **pipelines:** add --refine-audio to generate --two-stage (upstream v1.5.0) ([#226](https://github.com/dgrauet/ltx-2-mlx/issues/226)) ([69b1cda](https://github.com/dgrauet/ltx-2-mlx/commit/69b1cdaaf152da31c100b632ca18f7a061e591db))
+* **pipelines:** export A2VidDistilledPipeline, A2VidDFRPipeline and ExtendDistilledPipeline from ltx_pipelines_mlx ([#233](https://github.com/dgrauet/ltx-2-mlx/issues/233)) ([1d61027](https://github.com/dgrauet/ltx-2-mlx/commit/1d61027c63caa5aa4adc1edd050476e79036cf43))
+* remove the keyframe command and KeyframeInterpolationPipeline (upstream v1.5.0) ([#229](https://github.com/dgrauet/ltx-2-mlx/issues/229)) ([17ff317](https://github.com/dgrauet/ltx-2-mlx/commit/17ff317cb6a9d54e440219723afa88f7c7d71688))
+* replace and guide bindings for --image (upstream v1.5.0) ([#227](https://github.com/dgrauet/ltx-2-mlx/issues/227)) ([03597a9](https://github.com/dgrauet/ltx-2-mlx/commit/03597a9e5675b5e3b62b84856023c597b65c1c0a))
+
+
+### Bug Fixes
+
+* **pipelines:** close the gaps found by the v1.5.0 sync audit ([#232](https://github.com/dgrauet/ltx-2-mlx/issues/232)) ([8efbfef](https://github.com/dgrauet/ltx-2-mlx/commit/8efbfef427afd873f25d976231a87922786fe39e))
+* **pipelines:** tile the DFR spatial epilogue on one grid of tiles up to 32 cells, as upstream v1.5.0 (`--spatial-upscalings 2` renders change; about 2x faster at 1536x1024) ([#228](https://github.com/dgrauet/ltx-2-mlx/issues/228)) ([1d67857](https://github.com/dgrauet/ltx-2-mlx/commit/1d678573e36380c6a730b38f42b5372032831c1a))
+
+
+### Code Refactoring
+
+* drop the dead ltx_core_mlx.utils.video module and fold the prompt-encode helpers ([#233](https://github.com/dgrauet/ltx-2-mlx/issues/233)) ([1d61027](https://github.com/dgrauet/ltx-2-mlx/commit/1d61027c63caa5aa4adc1edd050476e79036cf43))
+
 ## [0.17.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.16.3...v0.17.0) (2026-10-20)
 
 
