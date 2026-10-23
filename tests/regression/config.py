@@ -51,6 +51,8 @@ GOLDENS: dict[str, dict] = {
             str(GEN_WIDTH),
             "-f",
             str(GEN_FRAMES),
+            "--frame-rate",
+            str(FPS),
         ],
     },
     "g2_hq": {
@@ -58,7 +60,7 @@ GOLDENS: dict[str, dict] = {
             "generate",
             "--prompt",
             PROMPT,
-            "--hq",
+            "--two-stages-hq",
             "--seed",
             str(SEED),
             "-H",
@@ -67,11 +69,13 @@ GOLDENS: dict[str, dict] = {
             str(GEN_WIDTH),
             "-f",
             str(GEN_FRAMES),
+            "--frame-rate",
+            str(FPS),
         ],
     },
     "g3b_hedgehog": {
-        # Captured with the removed `keyframe` command (post_fix_2_kf); now its upstream v1.5.0
-        # replacement, so re-capture before comparing against that tag.
+        # The removed `keyframe` command's upstream v1.5.0 replacement; compare against the
+        # `v0_18_0` tag (older tags were captured with `keyframe`).
         "cli_args": [
             "generate",
             "--two-stage",
@@ -92,6 +96,8 @@ GOLDENS: dict[str, dict] = {
             str(KF_HEDGEHOG_SEED),
             "-f",
             str(KF_HEDGEHOG_FRAMES),
+            "--frame-rate",
+            str(FPS),
             "--dev-transformer",
             "transformer-dev.safetensors",
             "--distilled-lora",

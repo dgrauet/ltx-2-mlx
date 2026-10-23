@@ -10,7 +10,7 @@ Two goldens (see `config.py`):
 | ID            | Pipeline                | Covers                                |
 |---------------|-------------------------|----------------------------------------|
 | `g1_two_stage`| `generate --two-stage`  | DiT, VAE, Vocoder, BWE, Euler+CFG     |
-| `g2_hq`       | `generate --hq`         | + res_2s sampler                       |
+| `g2_hq`       | `generate --two-stages-hq` | + res_2s sampler                    |
 
 Heavy artifacts (`.mp4`, `.wav`) are gitignored. Only `manifest.json`
 (stats per tag) is committed.
@@ -26,7 +26,11 @@ persisted with only a ~5% reduction in cut amplitude — confirming the
 regression was not localised to keyframe RoPE positions. The `keyframe`
 command has since been removed (upstream v1.5.0); `g3b_hedgehog` now runs
 its replacement, `generate --two-stage` with both images bound as guides
-and `--refine-audio`, so it must be re-captured before any comparison.
+and `--refine-audio`. Compare against the `v0_18_0` tag (captured on that
+release); the older tags come from the `keyframe` command. The replacement
+holds the first image for 25 frames and cuts to the second at frame 25
+(the model's behaviour on these two unrelated images, not a smooth
+interpolation).
 
 ## Per-fix workflow
 
