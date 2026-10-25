@@ -6,13 +6,13 @@ Ported from ltx-pipelines denoising loop.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import mlx.core as mx
 from mlx_arsenal.diffusion import euler_step
 from tqdm import tqdm
 
-from ltx_core_mlx.components.diffusion_steps import EulerAncestralDiffusionStep
+from ltx_core_mlx.components.diffusion_steps import EulerAncestralDiffusionStep, EulerCfgPpDiffusionStep
 from ltx_core_mlx.components.guiders import MultiModalGuiderFactory
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState, apply_denoise_mask
 from ltx_core_mlx.guidance.nag import NAGGuidance
@@ -165,6 +165,10 @@ def denoise_loop(
     show_progress: bool = True,
     on_step: OnStepFn | None = None,
     nag: NAGGuidance | None = None,
+    cfg_pp: EulerCfgPpDiffusionStep | None = None,
+    uncond_video_text_embeds: mx.array | None = None,
+    uncond_audio_text_embeds: mx.array | None = None,
+    noise_seed: int = 0,
 ) -> DenoiseOutput:
     """Run the Euler denoising loop for joint audio+video.
 
@@ -192,12 +196,24 @@ def denoise_loop(
             effect on control flow.
         nag: Optional Normalized Attention Guidance (distilled negative prompt), passed to
             every forward; its audio context is dropped when the audio state is frozen.
+        cfg_pp: Optional ancestral CFG++ stepper at CFG scale 1. Requires negative
+            embeddings and an extra unconditional prediction, even at CFG 1.
+        uncond_video_text_embeds: Encoded negative prompt for CFG++.
+        uncond_audio_text_embeds: Audio negative prompt for joint CFG++ sampling.
+        noise_seed: Local ancestral noise seed; does not reset the global RNG.
 
     Returns:
         DenoiseOutput with final video and audio latents.
     """
     if sigmas is None:
         sigmas = DISTILLED_SIGMAS
+    if cfg_pp is not None:
+        if uncond_video_text_embeds is None or (audio_state is not None and uncond_audio_text_embeds is None):
+            raise ValueError("CFG++ requires negative text embeddings for each generated modality")
+        if nag is not None:
+            raise ValueError("CFG++ and NAG cannot be combined")
+        noise_key = mx.random.key(noise_seed)
+        sigma_schedule = mx.array(sigmas, dtype=mx.float32)
 
     # Resolve positions: explicit params override, then fall back to state
     if video_positions is None and video_state.positions is not None:
@@ -218,11 +234,11 @@ def denoise_loop(
     # sigmas already includes the terminal value (e.g. 0.0), so iterate
     # consecutive pairs directly — no extra phantom step.
     steps = list(zip(sigmas[:-1], sigmas[1:]))
-    estimator = StepEstimator(
-        describe_work(video_state=video_state, audio_state=audio_state, sigmas=sigmas),
-        show=show_progress,
-        label="denoising",
-    )
+    work = describe_work(video_state=video_state, audio_state=audio_state, sigmas=sigmas)
+    if cfg_pp is not None:
+        passes = tuple(2 if next_sigma > 0 else 1 for _, next_sigma in steps)
+        work = replace(work, forwards=sum(passes), passes_per_step=passes)
+    estimator = StepEstimator(work, show=show_progress, label="denoising")
     estimator.announce()
     iterator = tqdm(steps, desc="Denoising", disable=not show_progress)
 
@@ -269,6 +285,23 @@ def denoise_loop(
         # Predict x0
         video_x0, audio_x0 = model(**call_kwargs)
 
+        # CFG++ uses the unconditioned prediction in its noise direction, even
+        # though the guided prediction at scale 1 is just the positive pass.
+        # The terminal step returns positive x0 directly and needs no extra pass.
+        if cfg_pp is not None and sigma_next > 0:
+            mx.eval(video_x0) if audio_x0 is None else mx.eval(video_x0, audio_x0)
+            uncond_kwargs = dict(call_kwargs)
+            uncond_kwargs.update(
+                video_text_embeds=uncond_video_text_embeds,
+                audio_text_embeds=uncond_audio_text_embeds,
+            )
+            uncond_kwargs.pop("video_cross_attention_mask", None)
+            uncond_kwargs.pop("audio_cross_attention_mask", None)
+            video_uncond, audio_uncond = model(**uncond_kwargs)
+            video_uncond = apply_denoise_mask(video_uncond, video_state.clean_latent, video_state.denoise_mask)
+            if has_audio:
+                audio_uncond = apply_denoise_mask(audio_uncond, audio_state.clean_latent, audio_state.denoise_mask)
+
         # Apply denoise mask: blend with clean latent
         video_x0 = apply_denoise_mask(video_x0, video_state.clean_latent, video_state.denoise_mask)
         if has_audio:
@@ -277,10 +310,37 @@ def denoise_loop(
         if on_step is not None:
             on_step(step_idx, len(steps), video_x0, sigma)
 
-        # Euler step
-        video_x = euler_step(video_x, video_x0, sigma, sigma_next)
-        if has_audio:
-            audio_x = euler_step(audio_x, audio_x0, sigma, sigma_next)
+        if cfg_pp is None:
+            video_x = euler_step(video_x, video_x0, sigma, sigma_next)
+            if has_audio:
+                audio_x = euler_step(audio_x, audio_x0, sigma, sigma_next)
+        elif sigma_next == 0:
+            video_x = video_x0.astype(video_x.dtype)
+            if has_audio:
+                audio_x = audio_x0.astype(audio_x.dtype)
+        else:
+            noise_key, video_key, audio_key = mx.random.split(noise_key, 3)
+            video_x = cfg_pp.step(
+                video_x,
+                video_x0,
+                sigma_schedule,
+                step_idx,
+                video_uncond,
+                noise=mx.random.normal(video_x.shape, key=video_key),
+            )
+            # Re-apply conditioning after noise injection so reference/first-frame
+            # tokens cannot drift. Mirrors the existing ancestral loop contract.
+            video_x = apply_denoise_mask(video_x, video_state.clean_latent, video_state.denoise_mask)
+            if has_audio:
+                audio_x = cfg_pp.step(
+                    audio_x,
+                    audio_x0,
+                    sigma_schedule,
+                    step_idx,
+                    audio_uncond,
+                    noise=mx.random.normal(audio_x.shape, key=audio_key),
+                )
+                audio_x = apply_denoise_mask(audio_x, audio_state.clean_latent, audio_state.denoise_mask)
 
         # Force computation for memory efficiency
         mx.async_eval(video_x) if audio_x is None else mx.async_eval(video_x, audio_x)

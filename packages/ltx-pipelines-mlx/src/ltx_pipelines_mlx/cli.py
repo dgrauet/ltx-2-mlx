@@ -998,6 +998,13 @@ examples:
     ic.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
     ic.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
     ic.add_argument(
+        "--sampler",
+        choices=("euler", "euler_ancestral_cfg_pp"),
+        default="euler",
+        help="Single-stage sampler. CFG++ uses an extra negative prediction at each nonterminal step.",
+    )
+    ic.add_argument("--negative-prompt", default="", help="Negative prompt for single-stage CFG++ (default: empty)")
+    ic.add_argument(
         "--conditioning-strength",
         type=float,
         default=1.0,
@@ -1896,6 +1903,8 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         stage2_steps=args.stage2_steps,
         images=args.images,
         conditioning_attention_strength=args.conditioning_strength,
+        sampler=args.sampler,
+        negative_prompt=args.negative_prompt,
         skip_stage_2=args.skip_stage_2,
         single_stage=args.single_stage,
         upsample_only=args.upsample_only,
