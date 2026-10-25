@@ -18,6 +18,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
+from ltx_core_mlx.components.diffusion_steps import EulerCfgPpDiffusionStep
 from ltx_core_mlx.components.patchifiers import (
     compute_video_latent_shape,
     snap_output_dimensions,
@@ -431,6 +432,8 @@ class ICLoraPipeline(BasePipeline):
         single_stage: bool = False,
         upsample_only: bool = False,
         refine_steps: int | None = None,
+        sampler: str = "euler",
+        negative_prompt: str = "",
     ) -> tuple[mx.array, mx.array]:
         """Generate video with IC-LoRA reference conditioning.
 
@@ -462,6 +465,10 @@ class ICLoraPipeline(BasePipeline):
                 is encoded at half res, so fine-detail adherence sits between
                 two-stage and native single-stage. Ignored if ``single_stage`` or
                 ``skip_stage_2`` is set.
+            sampler: "euler" (default) or "euler_ancestral_cfg_pp" at CFG 1.
+                CFG++ currently requires single_stage and evaluates a negative
+                prediction at every nonterminal step.
+            negative_prompt: Negative text for CFG++, empty by default.
             refine_steps: Only meaningful with ``upsample_only``. When > 0, run a
                 *control-aware* refine after the upsample instead of decoding raw:
                 the control reference is re-encoded at full resolution and re-appended
@@ -480,6 +487,12 @@ class ICLoraPipeline(BasePipeline):
             raise ValueError(
                 f"conditioning_attention_strength must be in [0.0, 1.0], got {conditioning_attention_strength}"
             )
+        if sampler not in {"euler", "euler_ancestral_cfg_pp"}:
+            raise ValueError(f"Unsupported IC-LoRA sampler: {sampler}")
+        if sampler != "euler" and not single_stage:
+            raise ValueError("IC-LoRA CFG++ currently requires single_stage=True")
+        if sampler == "euler" and negative_prompt:
+            raise ValueError("IC-LoRA negative_prompt requires euler_ancestral_cfg_pp")
         num_frames = snap_num_frames(num_frames)
 
         # Load text encoder, encode, free, then load generation components
@@ -488,6 +501,16 @@ class ICLoraPipeline(BasePipeline):
         video_embeds, audio_embeds = self._encode_text(prompt)
         # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
         mx.eval(video_embeds, audio_embeds)
+        sampler_kwargs = {}
+        if sampler == "euler_ancestral_cfg_pp":
+            negative_video, negative_audio = self._encode_text(negative_prompt)
+            mx.eval(negative_video, negative_audio)
+            sampler_kwargs = dict(
+                cfg_pp=EulerCfgPpDiffusionStep(),
+                uncond_video_text_embeds=negative_video,
+                uncond_audio_text_embeds=negative_audio,
+                noise_seed=seed,
+            )
         if self.low_memory:
             self.prompt_encoder.free()
             aggressive_cleanup()
@@ -574,6 +597,7 @@ class ICLoraPipeline(BasePipeline):
             audio_text_embeds=audio_embeds,
             sigmas=sigmas_1,
             on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
+            **sampler_kwargs,
         )
         if self.low_memory:
             aggressive_cleanup()
@@ -774,6 +798,8 @@ class ICLoraPipeline(BasePipeline):
         single_stage: bool = False,
         upsample_only: bool = False,
         refine_steps: int | None = None,
+        sampler: str = "euler",
+        negative_prompt: str = "",
     ) -> str:
         """Generate IC-LoRA conditioned video+audio and save to file.
 
@@ -794,6 +820,8 @@ class ICLoraPipeline(BasePipeline):
             upsample_only: Half-res gen + latent upsample, no refine (full-res output).
             refine_steps: With upsample_only, run an N-step control-aware refine
                 after the upsample (full-res control re-applied, IC-LoRA fused).
+            sampler: Single-stage sampler, as in generate().
+            negative_prompt: Negative text for CFG++, empty by default.
 
         Returns:
             Path to the output video file.
@@ -814,6 +842,8 @@ class ICLoraPipeline(BasePipeline):
             single_stage=single_stage,
             upsample_only=upsample_only,
             refine_steps=refine_steps,
+            sampler=sampler,
+            negative_prompt=negative_prompt,
         )
 
         # Free generation components to make room for decoders
