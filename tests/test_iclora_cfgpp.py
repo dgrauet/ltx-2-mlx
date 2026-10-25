@@ -215,3 +215,50 @@ def test_work_estimate_counts_the_extra_negative_predictions(monkeypatch):
     run()
     assert counts[0].passes_per_step == (2, 2, 1)
     assert counts[0].forwards == 5
+
+
+@pytest.mark.parametrize("sampler,negative", [("euler", ""), ("euler_ancestral_cfg_pp", "blur")])
+def test_real_cli_export_wrapper_forwards_sampler_to_inference(tmp_path, monkeypatch, sampler, negative):
+    from ltx_pipelines_mlx.cli import _cmd_ic_lora
+
+    lora = tmp_path / "control.safetensors"
+    mx.save_safetensors(str(lora), {"test": mx.ones((1,))})
+    received = []
+
+    def generate(self, **kwargs):
+        received.append(kwargs)
+        return mx.zeros((1,)), mx.zeros((1,))
+
+    monkeypatch.setattr(ICLoraPipeline, "generate", generate)
+    monkeypatch.setattr(ICLoraPipeline, "_load_decoders", lambda self: None)
+    monkeypatch.setattr(ICLoraPipeline, "_decode_and_save_video", lambda self, v, a, path, **kw: path)
+    args = _build_parser().parse_args(
+        [
+            "ic-lora",
+            "--quiet",
+            "--model",
+            str(tmp_path),
+            "--prompt",
+            "scene",
+            "--output",
+            str(tmp_path / "out.mp4"),
+            "--lora",
+            str(lora),
+            "1",
+            "--video-conditioning",
+            "motion.mp4",
+            "1",
+            "--frame-rate",
+            "24",
+            "--single-stage",
+            "--sampler",
+            sampler,
+            "--negative-prompt",
+            negative,
+        ]
+    )
+    _cmd_ic_lora(args)
+    assert len(received) == 1
+    assert received[0]["sampler"] == sampler
+    assert received[0]["negative_prompt"] == negative
+    assert received[0]["single_stage"] is True
