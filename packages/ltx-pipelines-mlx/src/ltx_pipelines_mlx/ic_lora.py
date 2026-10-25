@@ -798,6 +798,8 @@ class ICLoraPipeline(BasePipeline):
         single_stage: bool = False,
         upsample_only: bool = False,
         refine_steps: int | None = None,
+        sampler: str = "euler",
+        negative_prompt: str = "",
     ) -> str:
         """Generate IC-LoRA conditioned video+audio and save to file.
 
@@ -818,6 +820,8 @@ class ICLoraPipeline(BasePipeline):
             upsample_only: Half-res gen + latent upsample, no refine (full-res output).
             refine_steps: With upsample_only, run an N-step control-aware refine
                 after the upsample (full-res control re-applied, IC-LoRA fused).
+            sampler: Single-stage sampler, as in generate().
+            negative_prompt: Negative text for CFG++, empty by default.
 
         Returns:
             Path to the output video file.
@@ -838,6 +842,8 @@ class ICLoraPipeline(BasePipeline):
             single_stage=single_stage,
             upsample_only=upsample_only,
             refine_steps=refine_steps,
+            sampler=sampler,
+            negative_prompt=negative_prompt,
         )
 
         # Free generation components to make room for decoders
