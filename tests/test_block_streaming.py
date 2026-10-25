@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 
 import mlx.core as mx
+import mlx.nn as nn
+import pytest
 
 from ltx_core_mlx.loader.block_streaming import BlockStreamer
 from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
@@ -254,6 +256,102 @@ class TestStreamingLTXModel:
 
 
 class TestBlockLoraSource:
+    @pytest.mark.parametrize("fuse", [True, False])
+    @pytest.mark.parametrize("bits", [4, 8])
+    def test_resident_quantized_lora_matches_math_and_replacement(self, tmp_path, fuse, bits):
+        from ltx_core_mlx.loader.block_streaming import BlockLoraSource, StreamingLTXModel
+
+        cfg = _tiny_config(num_layers=1)
+        model = LTXModel(cfg)
+        model.proj_out = nn.QuantizedLinear.from_linear(model.proj_out, group_size=32, bits=bits)
+        base = model.proj_out
+        originals = dict(base.parameters())
+        original_float = mx.dequantize(base.weight, base.scales, base.biases, group_size=32, bits=bits)
+        blocks = tmp_path / "blocks.safetensors"
+        _save_block_weights_to_safetensors(model, blocks, prefix="transformer_blocks.")
+        out_dim, in_dim = original_float.shape
+        a = mx.full((2, in_dim), 0.2)
+        b = mx.full((out_dim, 2), 0.3)
+        path = tmp_path / "lora.safetensors"
+        mx.save_safetensors(str(path), {"proj_out.lora_A.weight": a, "proj_out.lora_B.weight": b})
+        source = BlockLoraSource(path, "transformer_blocks.", strength=0.5, fuse=fuse)
+        streamer = BlockStreamer(blocks, block_prefix="transformer_blocks.")
+        wrapped = StreamingLTXModel(model, streamer, [source])
+        x = mx.random.normal((3, in_dim))
+        baseline = base(x)
+        mx.eval(baseline)
+        for strength in (0.5, 1.0):
+            source.strength = strength
+            wrapped._sync_non_block_loras()
+            if fuse:
+                q, scales, biases = mx.quantize(
+                    original_float.astype(mx.float32) + (b * strength) @ a, group_size=32, bits=bits
+                )
+                scales = scales.astype(originals["scales"].dtype)
+                biases = biases.astype(originals["biases"].dtype)
+                assert mx.array_equal(model.proj_out.weight, q).item()
+                assert mx.array_equal(model.proj_out.scales, scales).item()
+                assert mx.array_equal(model.proj_out.biases, biases).item()
+                expected = mx.quantized_matmul(x, q, scales, biases, transpose=True, group_size=32, bits=bits)
+                expected = expected + originals.get("bias", 0)
+            else:
+                expected = baseline + (x @ a.T) @ (b * strength).T
+                assert mx.array_equal(model.proj_out.weight, originals["weight"]).item()
+            actual = model.proj_out(x)
+            mx.eval(actual, expected)
+            assert mx.allclose(actual, expected, atol=1e-5, rtol=1e-5).item()
+        object.__setattr__(wrapped, "_lora_sources", [])
+        wrapped._sync_non_block_loras()
+        restored = model.proj_out(x)
+        mx.eval(restored)
+        assert mx.array_equal(restored, baseline).item()
+        assert "lora_a" not in model.proj_out
+        streamer.close()
+        source.close()
+
+    def test_streamed_lora_applies_resident_output_projection(self, tmp_path):
+        """Distilled LoRAs include resident projections, not only repeated blocks."""
+        from ltx_core_mlx.loader.block_streaming import BlockLoraSource, StreamingLTXModel
+        from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
+
+        cfg = _tiny_config(num_layers=2)
+        mx.random.seed(73)
+        model = LTXModel(cfg)
+        blocks_path = tmp_path / "blocks.safetensors"
+        _save_block_weights_to_safetensors(model, blocks_path, prefix="transformer_blocks.")
+        before = model.proj_out.weight
+        out_dim, in_dim = before.shape
+        a = mx.ones((2, in_dim), dtype=before.dtype) * 0.2
+        b = mx.ones((out_dim, 2), dtype=before.dtype) * 0.3
+        lora_path = tmp_path / "distilled.safetensors"
+        mx.save_safetensors(
+            str(lora_path),
+            {
+                "diffusion_model.proj_out.lora_A.weight": a,
+                "diffusion_model.proj_out.lora_B.weight": b,
+            },
+        )
+        source = BlockLoraSource(lora_path, "transformer_blocks.", strength=0.5, sd_ops=LTXV_LORA_COMFY_RENAMING_MAP)
+        streamer = BlockStreamer(blocks_path, block_prefix="transformer_blocks.")
+        model.transformer_blocks = [model.transformer_blocks[0]]
+        wrapped = StreamingLTXModel(model, streamer, lora_sources=[source])
+        common = TestBlockProvider()._build_inputs(cfg)
+        expected = before + 0.5 * (b @ a)
+        wrapped(**common)
+        mx.eval(model.proj_out.weight, expected)
+        assert mx.allclose(model.proj_out.weight, expected, atol=1e-6).item()
+        # Applying the same source on the next denoise step must not stack it.
+        wrapped(**common)
+        mx.eval(model.proj_out.weight)
+        assert mx.allclose(model.proj_out.weight, expected, atol=1e-6).item()
+        # Stage 2 clears sources; resident weights must become clean again too.
+        object.__setattr__(wrapped, "_lora_sources", [])
+        wrapped(**common)
+        mx.eval(model.proj_out.weight)
+        assert mx.array_equal(model.proj_out.weight, before).item()
+        streamer.close()
+        source.close()
+
     def _build_synthetic_lora(self, model: LTXModel, path: Path, prefix: str) -> None:
         """Save a minimal A+B pair targeting block 0's attn1.to_q.weight."""
         block0 = model.transformer_blocks[0]

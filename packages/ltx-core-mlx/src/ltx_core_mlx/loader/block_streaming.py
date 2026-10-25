@@ -93,9 +93,16 @@ class BlockLoraSource:
 
         # block_idx -> param_name -> {"a": full_key, "b": full_key}
         self._block_keys: dict[int, dict[str, dict[str, str]]] = {}
+        self._non_block_keys: dict[str, dict[str, str]] = {}
         for raw_key in self._lora_data:
             model_key = sd_ops.apply_to_key(raw_key) if sd_ops is not None else raw_key
-            if model_key is None or not model_key.startswith(block_prefix):
+            if model_key is None:
+                continue
+            if not model_key.startswith(block_prefix):
+                for suffix, slot in ((".lora_A.weight", "a"), (".lora_B.weight", "b")):
+                    if model_key.endswith(suffix):
+                        self._non_block_keys.setdefault(model_key[: -len(suffix)], {})[slot] = raw_key
+                        break
                 continue
             rest = model_key[len(block_prefix) :]
             idx_str, _, param_path = rest.partition(".")
@@ -144,6 +151,15 @@ class BlockLoraSource:
             self._ranks = ranks
         return self._ranks
 
+    def get_non_block_lora_dict(self) -> dict[str, mx.array]:
+        """Resident projection/AdaLN factors, in the inner model's namespace."""
+        out: dict[str, mx.array] = {}
+        for path, slots in self._non_block_keys.items():
+            if "a" in slots and "b" in slots:
+                out[f"{path}.lora_A.weight"] = self._lora_data[slots["a"]]
+                out[f"{path}.lora_B.weight"] = self._lora_data[slots["b"]]
+        return out
+
     def factor_dtype(self) -> mx.Dtype:
         """Storage dtype of the LoRA factors (the dtype the adapters are laid out in)."""
         for block in self._block_keys.values():
@@ -163,6 +179,7 @@ class BlockLoraSource:
     def close(self) -> None:
         self._lora_data = {}
         self._block_keys = {}
+        self._non_block_keys = {}
         self._ranks = None
 
 
@@ -451,6 +468,9 @@ class StreamingLTXModel(nn.Module):
         object.__setattr__(self, "_cast_dtype", None)
         object.__setattr__(self, "_lora_adapters", None)
         object.__setattr__(self, "_lora_layout", ())
+        object.__setattr__(self, "_non_block_lora_layout", ())
+        object.__setattr__(self, "_non_block_lora_originals", {})
+        object.__setattr__(self, "_non_block_lora_adapters", None)
         # The inner model's overflow guard drops the compute dtype through this wrapper,
         # so that later binds stop casting too (weak: the wrapper owns the model).
         object.__setattr__(model, "_compute_dtype_owner", weakref.ref(self))
@@ -511,7 +531,56 @@ class StreamingLTXModel(nn.Module):
         object.__setattr__(self, "_lora_layout", layout)
         object.__setattr__(self, "_compiled_block", mx.compile(shared, inputs=shared))
 
+    def _sync_non_block_loras(self) -> None:
+        """Apply resident LoRA factors once, and restore them when sources change.
+
+        BlockStreamer only visits repeated blocks. Distilled LoRAs also update
+        input/output projections and AdaLN; dropping those silently changes the
+        model. Keep only their original resident arrays so clearing/replacing
+        sources restores the base, just as rebinding a streamed block does.
+        """
+        from mlx.utils import tree_flatten
+
+        from ltx_core_mlx.loader.fuse_loras import apply_loras
+        from ltx_core_mlx.loader.lora_adapters import attach_loras
+        from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
+
+        sources = object.__getattribute__(self, "_lora_sources")
+        layout = tuple((src, src.strength, src.fuse) for src in sources)
+        if layout == object.__getattribute__(self, "_non_block_lora_layout"):
+            return
+        inner = super().__getattr__("inner")
+        handle = object.__getattribute__(self, "_non_block_lora_adapters")
+        if handle is not None:
+            handle.detach()
+        originals = object.__getattribute__(self, "_non_block_lora_originals")
+        if originals:
+            inner.load_weights(list(originals.items()), strict=False)
+
+        fused, unfused = [], []
+        targets: set[str] = set()
+        for src in sources:
+            sd = src.get_non_block_lora_dict()
+            if not sd:
+                continue
+            item = LoraStateDictWithStrength(StateDict(sd=sd, size=0, dtype=set()), src.strength)
+            (fused if src.fuse else unfused).append(item)
+            for key in sd:
+                if key.endswith(".lora_A.weight"):
+                    path = key[: -len(".lora_A.weight")]
+                    targets.update(f"{path}.{suffix}" for suffix in ("weight", "scales", "biases"))
+
+        originals = {k: v for k, v in tree_flatten(inner.parameters()) if k in targets} if targets else {}
+        if fused:
+            result = apply_loras(StateDict(sd=originals, size=0, dtype=set()), fused)
+            inner.load_weights(list(result.sd.items()), strict=False)
+        handle = attach_loras(inner, unfused) if unfused else None
+        object.__setattr__(self, "_non_block_lora_originals", originals)
+        object.__setattr__(self, "_non_block_lora_adapters", handle)
+        object.__setattr__(self, "_non_block_lora_layout", layout)
+
     def __call__(self, *args, **kwargs):
+        self._sync_non_block_loras()
         # Inject block_provider unless caller already passed one.
         if kwargs.get("block_provider") is None:
             self._sync_lora_adapters()
