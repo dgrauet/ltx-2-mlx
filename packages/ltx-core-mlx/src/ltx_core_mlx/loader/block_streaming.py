@@ -251,6 +251,18 @@ class BlockStreamer:
             raise KeyError(f"block {idx} not in streamer (have {sorted(self._block_key_map)})")
         return [param_name for _full, param_name in self._block_key_map[idx]]
 
+    def resident_weights(self, prefix: str) -> dict[str, mx.array]:
+        """The weights under ``prefix`` that are not block weights, with ``prefix`` stripped.
+
+        These stay resident in the streamed model (AdaLN, input/output projections, ...).
+        The arrays are the mmap'd ones: nothing is read until they are evaluated.
+        """
+        return {
+            key[len(prefix) :]: value
+            for key, value in self._weights.items()
+            if key.startswith(prefix) and not key.startswith(self._block_prefix)
+        }
+
     def bind(
         self,
         block: nn.Module,
@@ -578,6 +590,47 @@ class StreamingLTXModel(nn.Module):
         object.__setattr__(self, "_non_block_lora_originals", originals)
         object.__setattr__(self, "_non_block_lora_adapters", handle)
         object.__setattr__(self, "_non_block_lora_layout", layout)
+
+    def swap_checkpoint(self, streamer: BlockStreamer) -> None:
+        """Run another checkpoint of the same model: stream its blocks and load its resident weights.
+
+        ``--low-ram`` stage 2 swaps the dev transformer for the pre-fused distilled one, which also
+        differs outside the blocks (AdaLN, input/output projections). Replacing only the streamer
+        kept the first checkpoint's resident weights. LoRA sources stay attached: their resident
+        factors are applied again, on the new weights, at the next forward.
+
+        Args:
+            streamer: Streamer over the new checkpoint; it replaces (and closes) the current one.
+                Its block prefix must end in ``transformer_blocks.``; what precedes it is the
+                prefix of the resident weights.
+
+        Raises:
+            ValueError: If the new checkpoint's resident weights are not the model's.
+        """
+        from mlx.utils import tree_flatten
+
+        inner = super().__getattr__("inner")
+        # Detach the resident LoRA adapters and forget the pre-LoRA arrays: the next forward
+        # applies the sources again on top of the new weights.
+        handle = object.__getattribute__(self, "_non_block_lora_adapters")
+        if handle is not None:
+            handle.detach()
+        object.__setattr__(self, "_non_block_lora_adapters", None)
+        object.__setattr__(self, "_non_block_lora_originals", {})
+        object.__setattr__(self, "_non_block_lora_layout", ())
+
+        resident_prefix = streamer.block_prefix.removesuffix("transformer_blocks.")
+        weights = streamer.resident_weights(resident_prefix)
+        expected = {key for key, _ in tree_flatten(inner.parameters()) if not key.startswith("transformer_blocks.")}
+        if weights.keys() != expected:
+            missing, extra = sorted(expected - weights.keys()), sorted(weights.keys() - expected)
+            raise ValueError(
+                f"New checkpoint's resident weights do not match the model: missing {missing}, unexpected {extra}"
+            )
+        inner.load_weights(list(weights.items()), strict=False)
+        old = object.__getattribute__(self, "_streamer")
+        object.__setattr__(self, "_streamer", streamer)
+        old.close()
 
     def __call__(self, *args, **kwargs):
         self._sync_non_block_loras()
