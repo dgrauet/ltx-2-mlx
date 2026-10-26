@@ -232,7 +232,7 @@ class EulerCfgPpDiffusionStep:
         sigma_s = sigmas[step_index].astype(mx.float32)
         sigma_t = sigmas[step_index + 1].astype(mx.float32)
         # Same epsilon clamp as upstream (avoid div-by-zero when sigma == 1.0).
-        _eps = 1e-7
+        _eps = mx.finfo(mx.float32).eps
         alpha_s = mx.maximum(1.0 - sigma_s, _eps)
         alpha_t = mx.maximum(1.0 - sigma_t, _eps)
 

@@ -6,13 +6,13 @@ Ported from ltx-pipelines denoising loop.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import mlx.core as mx
 from mlx_arsenal.diffusion import euler_step
 from tqdm import tqdm
 
-from ltx_core_mlx.components.diffusion_steps import EulerAncestralDiffusionStep
+from ltx_core_mlx.components.diffusion_steps import EulerAncestralDiffusionStep, EulerCfgPpDiffusionStep
 from ltx_core_mlx.components.guiders import MultiModalGuiderFactory
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState, apply_denoise_mask
 from ltx_core_mlx.guidance.nag import NAGGuidance
@@ -294,16 +294,24 @@ def denoise_loop(
 # --- Ancestral (SDE) Euler sampler ---
 
 
-def euler_ancestral_denoising_loop(
+# Per-modality step of the ancestral driver, called as
+# ``step_fn(sample=, denoised_sample=, step_index=, noise=, uncond_denoised=)``.
+AncestralStepFn = Callable[..., mx.array]
+
+
+def _ancestral_euler_denoising_loop(
     sigmas: list[float] | None,
     video_state: LatentState,
     audio_state: LatentState,
-    stepper: EulerAncestralDiffusionStep,
     transformer: X0Model,
     video_text_embeds: mx.array,
     audio_text_embeds: mx.array,
     *,
     noise_seed: int,
+    draw_noise: bool,
+    step_fn: AncestralStepFn,
+    label: str,
+    negative_text_embeds: tuple[mx.array, mx.array] | None = None,
     video_positions: mx.array | None = None,
     audio_positions: mx.array | None = None,
     video_attention_mask: mx.array | None = None,
@@ -314,13 +322,12 @@ def euler_ancestral_denoising_loop(
     on_step: OnStepFn | None = None,
     nag: NAGGuidance | None = None,
 ) -> DenoiseOutput:
-    """Run the ancestral (SDE) Euler denoising loop for joint audio+video.
+    """Shared driver for the ancestral (noise-injecting) Euler denoising loops.
 
+    Mirrors upstream ``ltx_pipelines.utils.samplers._ancestral_euler_denoising_loop``.
     Structurally identical to :func:`denoise_loop` (per-token timesteps,
     ``X0Model`` call contract, ``apply_denoise_mask`` blending) but advances
-    the sample with :class:`EulerAncestralDiffusionStep` instead of a plain
-    Euler step. Mirrors upstream ``ltx_pipelines.utils.samplers.
-    euler_ancestral_denoising_loop`` / ``_ancestral_euler_denoising_loop``.
+    the sample with ``step_fn`` instead of a plain Euler step.
 
     Noise semantics (upstream-iso):
       - ``mx.random.seed(noise_seed)`` is set once before the loop (MLX
@@ -329,10 +336,9 @@ def euler_ancestral_denoising_loop(
         stays consistent across modalities.
       - Noise is drawn raw: ``mx.random.normal(shape).astype(mx.float32)`` —
         no channel-wise normalization (that variant is reserved for res2s).
-      - ``draw_noise = stepper.eta > 0``.
       - Stepping happens in float32. On a terminal sigma (``sigma_next ==
         0``) the latent short-circuits to the (already mask-blended) x0
-        prediction. Otherwise the stepper advances the sample and, only when
+        prediction. Otherwise ``step_fn`` advances the sample and, only when
         ``draw_noise``, the conditioning mask is re-applied *after* the
         noise injection (``apply_denoise_mask(x_next, clean_latent,
         denoise_mask)``) before casting back to the model dtype.
@@ -342,12 +348,21 @@ def euler_ancestral_denoising_loop(
             includes the terminal ``0.0``.
         video_state: Video latent state.
         audio_state: Audio latent state.
-        stepper: ``EulerAncestralDiffusionStep`` instance carrying ``eta``
-            and ``s_noise``.
         transformer: ``X0Model`` wrapping the LTX transformer.
         video_text_embeds: Text embeddings for video conditioning.
         audio_text_embeds: Text embeddings for audio conditioning.
         noise_seed: Seed for the ancestral noise draws.
+        draw_noise: Whether to draw a noise tensor per modality per step; when
+            False, ``noise=None`` is passed to ``step_fn``.
+        step_fn: The per-modality step, see :data:`AncestralStepFn`.
+            ``uncond_denoised`` is ``None`` unless ``negative_text_embeds`` is set.
+        label: Progress label (``"ancestral"``, ``"CFG++"``).
+        negative_text_embeds: ``(video, audio)`` negative context. When set,
+            every non-terminal step also runs the model on it (upstream's
+            ``force_uncond_pass``: no Prompt Relay mask, no NAG) and hands its
+            mask-blended x0 to ``step_fn`` as ``uncond_denoised``. The terminal
+            step returns the positive x0, so it skips that forward (upstream
+            runs it and discards it).
         video_positions: Positional embeddings for video.
         audio_positions: Positional embeddings for audio.
         video_attention_mask: Attention mask for video.
@@ -383,37 +398,47 @@ def euler_ancestral_denoising_loop(
     audio_dtype = audio_x.dtype
 
     steps = list(zip(sigmas[:-1], sigmas[1:]))
-    estimator = StepEstimator(
-        describe_work(video_state=video_state, audio_state=audio_state, sigmas=sigmas),
-        show=show_progress,
-        label="denoising (ancestral)",
-    )
+    work = describe_work(video_state=video_state, audio_state=audio_state, sigmas=sigmas)
+    if negative_text_embeds is not None:
+        passes = tuple(2 if sigma_next > 0 else 1 for _, sigma_next in steps)
+        work = replace(work, forwards=sum(passes), passes_per_step=passes)
+    estimator = StepEstimator(work, show=show_progress, label=f"denoising ({label})")
     estimator.announce()
-    iterator = tqdm(steps, desc="Denoising (ancestral)", disable=not show_progress)
+    iterator = tqdm(steps, desc=f"Denoising ({label})", disable=not show_progress)
 
     audio_cross_attention_mask = _audio_relay_mask(audio_cross_attention_mask, audio_state)
     nag = _nag_for_states(nag, audio_state)
     video_uniform = _is_uniform_mask(video_state.denoise_mask)
     audio_uniform = _is_uniform_mask(audio_state.denoise_mask)
 
-    draw_noise = stepper.eta > 0
     mx.random.seed(noise_seed)
 
     for step_idx, (sigma, sigma_next) in enumerate(iterator):
         sigma_arr = mx.array([sigma], dtype=mx.bfloat16)
         B = video_x.shape[0]
+        terminal_step = sigma_next == 0
 
-        call_kwargs: dict = dict(
+        base_kwargs: dict = dict(
             video_latent=video_x,
             audio_latent=audio_x,
             sigma=mx.broadcast_to(sigma_arr, (B,)),
-            video_text_embeds=video_text_embeds,
-            audio_text_embeds=audio_text_embeds,
             video_positions=video_positions,
             audio_positions=audio_positions,
             video_attention_mask=video_attention_mask,
             video_keyframes_mask=video_state.keyframes_mask,
             audio_attention_mask=audio_attention_mask,
+        )
+        # Pass per-token timesteps when mask is not uniform
+        if not video_uniform:
+            base_kwargs["video_timesteps"] = _compute_per_token_timesteps(sigma, video_state.denoise_mask)
+        if not audio_uniform:
+            base_kwargs["audio_timesteps"] = _compute_per_token_timesteps(sigma, audio_state.denoise_mask)
+        base_kwargs.update(_frozen_sigma_kwargs(video_state, audio_state, B))
+
+        call_kwargs: dict = dict(
+            base_kwargs,
+            video_text_embeds=video_text_embeds,
+            audio_text_embeds=audio_text_embeds,
         )
         if video_cross_attention_mask is not None:
             call_kwargs["video_cross_attention_mask"] = video_cross_attention_mask
@@ -421,13 +446,6 @@ def euler_ancestral_denoising_loop(
             call_kwargs["audio_cross_attention_mask"] = audio_cross_attention_mask
         if nag is not None:
             call_kwargs["nag"] = nag
-
-        # Pass per-token timesteps when mask is not uniform
-        if not video_uniform:
-            call_kwargs["video_timesteps"] = _compute_per_token_timesteps(sigma, video_state.denoise_mask)
-        if not audio_uniform:
-            call_kwargs["audio_timesteps"] = _compute_per_token_timesteps(sigma, audio_state.denoise_mask)
-        call_kwargs.update(_frozen_sigma_kwargs(video_state, audio_state, B))
 
         # Predict x0
         video_x0, audio_x0 = transformer(**call_kwargs)
@@ -439,29 +457,37 @@ def euler_ancestral_denoising_loop(
         if on_step is not None:
             on_step(step_idx, len(steps), video_x0, sigma)
 
-        terminal_step = sigma_next == 0
         if terminal_step:
             # Terminal step: short-circuit to the (already mask-blended) x0 prediction.
             video_x = video_x0.astype(video_dtype)
             audio_x = audio_x0.astype(audio_dtype)
         else:
+            video_uncond = audio_uncond = None
+            if negative_text_embeds is not None:
+                negative_video, negative_audio = negative_text_embeds
+                video_uncond, audio_uncond = transformer(
+                    **base_kwargs, video_text_embeds=negative_video, audio_text_embeds=negative_audio
+                )
+                video_uncond = apply_denoise_mask(video_uncond, video_state.clean_latent, video_state.denoise_mask)
+                audio_uncond = apply_denoise_mask(audio_uncond, audio_state.clean_latent, audio_state.denoise_mask)
+
             # Video draw first, then audio, from the same seeded generator.
             video_noise = mx.random.normal(video_x.shape).astype(mx.float32) if draw_noise else None
             audio_noise = mx.random.normal(audio_x.shape).astype(mx.float32) if draw_noise else None
 
-            video_x_next = stepper.step(
+            video_x_next = step_fn(
                 sample=video_x.astype(mx.float32),
                 denoised_sample=video_x0,
-                sigmas=sigmas,
                 step_index=step_idx,
                 noise=video_noise,
+                uncond_denoised=video_uncond,
             )
-            audio_x_next = stepper.step(
+            audio_x_next = step_fn(
                 sample=audio_x.astype(mx.float32),
                 denoised_sample=audio_x0,
-                sigmas=sigmas,
                 step_index=step_idx,
                 noise=audio_noise,
+                uncond_denoised=audio_uncond,
             )
 
             if draw_noise:
@@ -483,6 +509,160 @@ def euler_ancestral_denoising_loop(
     aggressive_cleanup()
 
     return DenoiseOutput(video_latent=video_x, audio_latent=audio_x)
+
+
+def euler_ancestral_denoising_loop(
+    sigmas: list[float] | None,
+    video_state: LatentState,
+    audio_state: LatentState,
+    stepper: EulerAncestralDiffusionStep,
+    transformer: X0Model,
+    video_text_embeds: mx.array,
+    audio_text_embeds: mx.array,
+    *,
+    noise_seed: int,
+    video_positions: mx.array | None = None,
+    audio_positions: mx.array | None = None,
+    video_attention_mask: mx.array | None = None,
+    audio_attention_mask: mx.array | None = None,
+    video_cross_attention_mask: mx.array | None = None,
+    audio_cross_attention_mask: mx.array | None = None,
+    show_progress: bool = True,
+    on_step: OnStepFn | None = None,
+    nag: NAGGuidance | None = None,
+) -> DenoiseOutput:
+    """Run the ancestral (SDE) Euler denoising loop for joint audio+video.
+
+    Mirrors upstream ``ltx_pipelines.utils.samplers.euler_ancestral_denoising_loop``:
+    :func:`_ancestral_euler_denoising_loop` with :class:`EulerAncestralDiffusionStep`
+    and ``draw_noise = stepper.eta > 0`` (at ``s_noise = 0`` the step still applies
+    its variance-preserving rescale). The arguments are the driver's, minus
+    ``stepper`` (carrying ``eta`` and ``s_noise``).
+
+    Returns:
+        DenoiseOutput with final video and audio latents.
+    """
+    if sigmas is None:
+        sigmas = DISTILLED_SIGMAS
+
+    def step_fn(*, uncond_denoised: mx.array | None, **kwargs) -> mx.array:
+        return stepper.step(sigmas=sigmas, **kwargs)
+
+    return _ancestral_euler_denoising_loop(
+        sigmas,
+        video_state,
+        audio_state,
+        transformer,
+        video_text_embeds,
+        audio_text_embeds,
+        noise_seed=noise_seed,
+        draw_noise=stepper.eta > 0,
+        step_fn=step_fn,
+        label="ancestral",
+        video_positions=video_positions,
+        audio_positions=audio_positions,
+        video_attention_mask=video_attention_mask,
+        audio_attention_mask=audio_attention_mask,
+        video_cross_attention_mask=video_cross_attention_mask,
+        audio_cross_attention_mask=audio_cross_attention_mask,
+        show_progress=show_progress,
+        on_step=on_step,
+        nag=nag,
+    )
+
+
+def euler_cfg_pp_denoising_loop(
+    sigmas: list[float] | None,
+    video_state: LatentState,
+    audio_state: LatentState,
+    stepper: EulerCfgPpDiffusionStep,
+    transformer: X0Model,
+    video_text_embeds: mx.array,
+    audio_text_embeds: mx.array,
+    negative_video_text_embeds: mx.array,
+    negative_audio_text_embeds: mx.array,
+    *,
+    noise_seed: int,
+    video_positions: mx.array | None = None,
+    audio_positions: mx.array | None = None,
+    video_attention_mask: mx.array | None = None,
+    audio_attention_mask: mx.array | None = None,
+    video_cross_attention_mask: mx.array | None = None,
+    audio_cross_attention_mask: mx.array | None = None,
+    show_progress: bool = True,
+    on_step: OnStepFn | None = None,
+) -> DenoiseOutput:
+    """Run the CFG++ corrected Euler denoising loop for joint audio+video.
+
+    Mirrors upstream ``ltx_pipelines.utils.samplers.euler_cfg_pp_denoising_loop``
+    (CFG++, https://arxiv.org/abs/2406.08070): :func:`_ancestral_euler_denoising_loop`
+    with :class:`EulerCfgPpDiffusionStep`, whose ODE direction comes from the
+    unconditioned prediction while the conditioned one stays the target, plus
+    an ancestral DDIM noise injection in the rescaled sigma space.
+    ``draw_noise = stepper.eta > 0 and stepper.s_noise > 0``.
+
+    Upstream takes the unconditioned prediction from its guided denoiser. This
+    port covers the configuration with no other guidance, upstream's
+    ``force_uncond_pass=True`` at CFG scale 1: each non-terminal step runs the
+    model on the positive context (the target) and on the negative one (the
+    direction), i.e. two forwards per step. The negative pass never gets the
+    Prompt Relay masks, as on the CFG pipelines. NAG is not offered: it is the
+    distilled paths' other use of a negative prompt.
+
+    Args:
+        sigmas: Sigma schedule (defaults to ``DISTILLED_SIGMAS``). Already
+            includes the terminal ``0.0``.
+        video_state: Video latent state.
+        audio_state: Audio latent state.
+        stepper: ``EulerCfgPpDiffusionStep`` carrying ``eta`` and ``s_noise``.
+        transformer: ``X0Model`` wrapping the LTX transformer.
+        video_text_embeds: Positive text embeddings for video.
+        audio_text_embeds: Positive text embeddings for audio.
+        negative_video_text_embeds: Negative text embeddings for video.
+        negative_audio_text_embeds: Negative text embeddings for audio.
+        noise_seed: Seed for the ancestral noise draws.
+        video_positions: Positional embeddings for video.
+        audio_positions: Positional embeddings for audio.
+        video_attention_mask: Attention mask for video.
+        audio_attention_mask: Attention mask for audio.
+        video_cross_attention_mask: Optional video->text cross-attention mask
+            (positive pass only).
+        audio_cross_attention_mask: Optional audio->text cross-attention mask
+            (positive pass only; dropped when the audio state is frozen).
+        show_progress: Whether to show tqdm progress bar.
+        on_step: Optional per-step preview hook, see :func:`denoise_loop`.
+
+    Returns:
+        DenoiseOutput with final video and audio latents.
+    """
+    if sigmas is None:
+        sigmas = DISTILLED_SIGMAS
+    sigma_schedule = mx.array(sigmas, dtype=mx.float32)
+
+    def step_fn(*, uncond_denoised: mx.array | None, **kwargs) -> mx.array:
+        return stepper.step(sigmas=sigma_schedule, uncond_denoised=uncond_denoised, **kwargs)
+
+    return _ancestral_euler_denoising_loop(
+        sigmas,
+        video_state,
+        audio_state,
+        transformer,
+        video_text_embeds,
+        audio_text_embeds,
+        noise_seed=noise_seed,
+        draw_noise=stepper.eta > 0 and stepper.s_noise > 0,
+        step_fn=step_fn,
+        label="CFG++",
+        negative_text_embeds=(negative_video_text_embeds, negative_audio_text_embeds),
+        video_positions=video_positions,
+        audio_positions=audio_positions,
+        video_attention_mask=video_attention_mask,
+        audio_attention_mask=audio_attention_mask,
+        video_cross_attention_mask=video_cross_attention_mask,
+        audio_cross_attention_mask=audio_cross_attention_mask,
+        show_progress=show_progress,
+        on_step=on_step,
+    )
 
 
 # --- Res2s second-order sampler ---
