@@ -136,7 +136,7 @@ packages/
 │       ├── cli.py                         # CLI entry point
 │       ├── scripts/                       # TeaCache calibration + polyfit
 │       └── utils/
-│           ├── samplers.py                # Sampling loops (Euler, ancestral, res_2s, guided)
+│           ├── samplers.py                # Sampling loops (Euler, ancestral, CFG++, res_2s, guided)
 │           ├── constants.py               # Pipeline constants (guidance params)
 │           ├── res2s.py                   # res_2s second-order solver coefficients (phi functions)
 │           ├── blocks.py                  # Model-component blocks (encoders, decoders, DurationPredictor)
