@@ -255,6 +255,116 @@ class TestStreamingLTXModel:
             streamer.close()
 
 
+def _save_checkpoint(model: LTXModel, path: Path) -> None:
+    """Save every parameter under ``transformer.``, the pack layout ``load_transformer`` reads."""
+    mx.save_safetensors(str(path), {f"transformer.{k}": v for k, v in _flatten_params(model)})
+
+
+def _streamed(cfg: LTXModelConfig, checkpoint: Path):
+    """Build a streamed model from ``checkpoint`` the way ``load_transformer(low_ram_streaming=True)`` does."""
+    from ltx_core_mlx.loader.block_streaming import StreamingLTXModel
+
+    streamer = BlockStreamer(checkpoint, block_prefix="transformer.transformer_blocks.")
+    model = LTXModel(cfg)
+    model.transformer_blocks = [model.transformer_blocks[0]]
+    model.load_weights(list(streamer.resident_weights("transformer.").items()), strict=False)
+    return StreamingLTXModel(model, streamer)
+
+
+class TestSwapCheckpoint:
+    """``StreamingLTXModel.swap_checkpoint``: the ``--low-ram`` dev -> distilled swap of stage 2."""
+
+    def _two_checkpoints(self, tmp_path: Path) -> tuple[LTXModelConfig, LTXModel, Path, Path]:
+        cfg = _tiny_config(num_layers=2)
+        mx.random.seed(1)
+        dev = LTXModel(cfg)
+        mx.random.seed(2)
+        distilled = LTXModel(cfg)
+        mx.eval(dev.parameters(), distilled.parameters())
+        dev_path, distilled_path = tmp_path / "dev.safetensors", tmp_path / "distilled.safetensors"
+        _save_checkpoint(dev, dev_path)
+        _save_checkpoint(distilled, distilled_path)
+        return cfg, distilled, dev_path, distilled_path
+
+    def test_swap_runs_the_new_checkpoint_blocks_and_resident_weights(self, tmp_path):
+        cfg, distilled, dev_path, distilled_path = self._two_checkpoints(tmp_path)
+        wrapped = _streamed(cfg, dev_path)
+        common = TestBlockProvider()._build_inputs(cfg)
+
+        wrapped.swap_checkpoint(BlockStreamer(distilled_path, block_prefix="transformer.transformer_blocks."))
+
+        assert mx.array_equal(wrapped.inner.proj_out.weight, distilled.proj_out.weight).item()
+        assert mx.array_equal(wrapped.inner.adaln_single.linear.weight, distilled.adaln_single.linear.weight).item()
+        expected_v, expected_a = distilled(**common)
+        streamed_v, streamed_a = wrapped(**common)
+        mx.eval(expected_v, expected_a, streamed_v, streamed_a)
+        assert mx.allclose(expected_v, streamed_v, atol=1e-5, rtol=1e-5).item()
+        assert mx.allclose(expected_a, streamed_a, atol=1e-5, rtol=1e-5).item()
+
+    @pytest.mark.parametrize("fuse", [True, False])
+    def test_resident_lora_is_reapplied_on_the_new_weights(self, tmp_path, fuse):
+        from ltx_core_mlx.loader.block_streaming import BlockLoraSource
+
+        cfg, distilled, dev_path, distilled_path = self._two_checkpoints(tmp_path)
+        out_dim, in_dim = distilled.proj_out.weight.shape
+        a = mx.full((2, in_dim), 0.2)
+        b = mx.full((out_dim, 2), 0.3)
+        lora_path = tmp_path / "lora.safetensors"
+        mx.save_safetensors(str(lora_path), {"proj_out.lora_A.weight": a, "proj_out.lora_B.weight": b})
+        source = BlockLoraSource(lora_path, "transformer_blocks.", strength=0.5, fuse=fuse)
+        wrapped = _streamed(cfg, dev_path)
+        object.__setattr__(wrapped, "_lora_sources", [source])
+        common = TestBlockProvider()._build_inputs(cfg)
+        wrapped(**common)  # stage 1: the LoRA is applied on the dev weights
+
+        wrapped.swap_checkpoint(BlockStreamer(distilled_path, block_prefix="transformer.transformer_blocks."))
+        wrapped(**common)
+
+        x = mx.random.normal((3, in_dim))
+        expected = distilled.proj_out(x) + 0.5 * (x @ a.T) @ b.T
+        actual = wrapped.inner.proj_out(x)
+        mx.eval(expected, actual)
+        assert mx.allclose(actual, expected, atol=1e-5, rtol=1e-5).item()
+        # Clearing the sources restores the distilled weights, not the dev ones.
+        object.__setattr__(wrapped, "_lora_sources", [])
+        wrapped(**common)
+        assert mx.array_equal(wrapped.inner.proj_out.weight, distilled.proj_out.weight).item()
+        assert "lora_a" not in wrapped.inner.proj_out
+        source.close()
+
+    def test_mismatched_resident_weights_are_refused(self, tmp_path):
+        cfg, distilled, dev_path, distilled_path = self._two_checkpoints(tmp_path)
+        weights = dict(mx.load(str(distilled_path)))
+        del weights["transformer.proj_out.bias"]
+        truncated_path = tmp_path / "truncated.safetensors"
+        mx.save_safetensors(str(truncated_path), weights)
+        wrapped = _streamed(cfg, dev_path)
+
+        with pytest.raises(ValueError, match=r"missing \['proj_out.bias'\]"):
+            wrapped.swap_checkpoint(BlockStreamer(truncated_path, block_prefix="transformer.transformer_blocks."))
+
+    def test_two_stage_low_ram_swap_loads_the_distilled_resident_weights(self, tmp_path):
+        """The strength-1.0 stage-2 swap of ``--two-stage`` / ``--two-stages-hq`` / ``a2v`` under ``--low-ram``."""
+        from ltx_pipelines_mlx.ti2vid_two_stages import TI2VidTwoStagesPipeline
+
+        cfg, distilled, dev_path, distilled_path = self._two_checkpoints(tmp_path)
+        distilled_path.rename(tmp_path / "transformer-distilled.safetensors")
+        pipe = object.__new__(TI2VidTwoStagesPipeline)
+        pipe.model_dir = tmp_path
+        pipe.low_ram_streaming = True
+        pipe._distilled_lora_strength = 1.0
+        pipe.dit = _streamed(cfg, dev_path)
+
+        pipe._fuse_distilled_lora(pipe.dit)
+
+        assert mx.array_equal(pipe.dit.inner.proj_out.weight, distilled.proj_out.weight).item()
+        common = TestBlockProvider()._build_inputs(cfg)
+        expected_v, _ = distilled(**common)
+        streamed_v, _ = pipe.dit(**common)
+        mx.eval(expected_v, streamed_v)
+        assert mx.allclose(expected_v, streamed_v, atol=1e-5, rtol=1e-5).item()
+
+
 class TestBlockLoraSource:
     @pytest.mark.parametrize("fuse", [True, False])
     @pytest.mark.parametrize("bits", [4, 8])

@@ -228,8 +228,10 @@ class TI2VidTwoStagesPipeline(BasePipeline):
 
         - **strength == 1.0**: swap to the pre-fused
           ``transformer-distilled.safetensors`` (mlx-forge produces it
-          at LoRA strength 1.0). Cheaper — just opens a different
-          mmap'd file, no per-block fusion at bind time.
+          at LoRA strength 1.0): its blocks are streamed and its
+          resident (non-block) weights replace the dev ones. Cheaper —
+          just opens a different mmap'd file, no per-block fusion at
+          bind time.
 
         - **strength != 1.0**: keep streaming the dev model and
           attach a ``BlockLoraSource`` to the wrapper. Each bind() now
@@ -253,10 +255,9 @@ class TI2VidTwoStagesPipeline(BasePipeline):
                     "low_ram_streaming for two-stage at LoRA strength 1.0 requires "
                     "the distilled file. Use: --model dgrauet/ltx-2.3-mlx-q8"
                 )
-            new_streamer = BlockStreamer(distilled_path, block_prefix="transformer.transformer_blocks.")
-            old_streamer = object.__getattribute__(self.dit, "_streamer")
-            object.__setattr__(self.dit, "_streamer", new_streamer)
-            old_streamer.close()
+            # The distilled checkpoint differs outside the blocks too (AdaLN, projections):
+            # swap the resident weights with the streamed ones.
+            self.dit.swap_checkpoint(BlockStreamer(distilled_path, block_prefix="transformer.transformer_blocks."))
             aggressive_cleanup()
             return
 
