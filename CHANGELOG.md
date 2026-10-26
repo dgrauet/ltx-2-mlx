@@ -10,6 +10,19 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.18.1](https://github.com/dgrauet/ltx-2-mlx/compare/v0.18.0...v0.18.1) (2026-10-26)
+
+
+### Features
+
+* **pipelines:** port euler_cfg_pp_denoising_loop ([#239](https://github.com/dgrauet/ltx-2-mlx/issues/239)) ([895201d](https://github.com/dgrauet/ltx-2-mlx/commit/895201df379b079c2154738bcf92005b7a371923))
+
+
+### Bug Fixes
+
+* **core:** apply resident LoRA weights during block streaming ([#235](https://github.com/dgrauet/ltx-2-mlx/issues/235)) ([f14dbf9](https://github.com/dgrauet/ltx-2-mlx/commit/f14dbf930626eafd86b9f29030ac7a23b4e914b8))
+* **pipelines:** load the distilled resident weights in the --low-ram stage-2 swap ([#238](https://github.com/dgrauet/ltx-2-mlx/issues/238)) ([598b842](https://github.com/dgrauet/ltx-2-mlx/commit/598b842f056e3cde52bfbf9841080bebe1fdf45f))
+
 ## [0.18.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.17.0...v0.18.0) (2026-10-22)
 
 
