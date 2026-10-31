@@ -54,7 +54,7 @@ jobs:
           "
 
   test:
-    runs-on: macos-14
+    runs-on: macos-15
     # A wedged Metal command buffer on the M1 runners once burned the full 6 h
     # default; the suite normally finishes in ~2 min.
     timeout-minutes: 45
