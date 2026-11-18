@@ -389,7 +389,7 @@ _SUM_BODY = r"""
 _KERNELS: dict[str, Callable[..., Any]] = {}
 #: Probe result per dtype: ``mx.fast.metal_kernel`` builds a separate kernel for each ``T``.
 _AVAILABLE: dict[mx.Dtype, bool] = {}
-#: Probe tolerance against ``mx.fast.scaled_dot_product_attention``, per dtype.
+#: Probe tolerance against exact float32 attention (see ``kernel_available``), per dtype.
 _PROBE_ATOL = {mx.float16: 2e-3, mx.bfloat16: 1.6e-2, mx.float32: 1e-4}
 #: Probe length: 9 blocks, the last one partial. ``mx.fast.metal_kernel`` passes inputs with fewer than 8 elements in
 #: ``constant`` memory, which builds a different kernel; with 9 blocks every array input but ``ip`` and ``sc`` (always
@@ -430,7 +430,13 @@ def kernel_available(dtype: mx.Dtype = mx.float16) -> bool:
     The check runs the kernel variant a real call in ``dtype`` runs: q, k, v laid out as in ``attn1`` (heads transposed
     out of ``(B, N, H, D)``) and long enough that every array input is in device memory (see ``_PROBE_TOKENS``).
     False when the installed MLX lacks the steel headers this module compiles against, or the kernel errors or does
-    not match dense attention; callers then stay on the dense kernel and a warning is printed once per dtype.
+    not match exact attention; callers then stay on the dense kernel and a warning is printed once per dtype.
+
+    The reference is dense attention on float32 copies of the inputs, run on the CPU stream: the GPU's dense kernel
+    is not a fixed reference. On GPUs with neural accelerators (Apple ``applegpu_g17`` and later, macOS 26.2+) MLX
+    sends ``scaled_dot_product_attention`` to its NAX kernels, in float32 too unless ``MLX_ENABLE_TF32=0`` (MLX's
+    default is on). There float32 dense attention keeps ~10 mantissa bits (3e-3 off exact on the probe), while this
+    kernel is exact float32 (1e-6): comparing against it rejected a correct kernel and left float32 renders dense.
     """
     if dtype not in _AVAILABLE:
         try:
@@ -439,7 +445,9 @@ def kernel_available(dtype: mx.Dtype = mx.float16) -> bool:
                 for i in range(3)
             )
             out = sparse_self_attention(q, k, v, 128**-0.5, tau=-math.inf, check=False)
-            ref = mx.fast.scaled_dot_product_attention(q, k, v, scale=128**-0.5).transpose(0, 2, 1, 3)
+            q32, k32, v32 = (a.astype(mx.float32) for a in (q, k, v))
+            ref = mx.fast.scaled_dot_product_attention(q32, k32, v32, scale=128**-0.5, stream=mx.cpu)
+            ref = ref.transpose(0, 2, 1, 3)
             atol = _PROBE_ATOL.get(dtype, 2e-3)
             ok = bool(mx.allclose(out.astype(mx.float32), ref.astype(mx.float32), atol=atol).item())
             if not ok:
