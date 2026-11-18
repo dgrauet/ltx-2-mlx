@@ -1,7 +1,8 @@
 """Block-sparse video self-attention (Sol routing) for the distilled stage 2, opt-in through ``LTX2_SOL_TAU``.
 
 The kernel is checked against MLX's dense attention (``tau = -inf`` routes every block, so the two must agree bit for
-bit at head_dim 128, where both run the same steel loop) and against a plain-MLX reference of the Sol formula at finite
+bit at head_dim 128 wherever both run the same steel loop; on GPUs where MLX sends dense attention to its NAX kernels
+they agree to one rounding of the dtype, see ``_dense_attention_is_steel``) and against a plain-MLX reference of the Sol formula at finite
 tau. The module, model, streaming and pipeline tests pin where it applies: the video self-attention of blocks 1 and up,
 plain calls only (no mask, no STG perturbation), stage 2 only, one tau per step picked by sigma.
 """
@@ -9,6 +10,11 @@ plain calls only (no mask, no STG perturbation), stage 2 only, one tau per step 
 from __future__ import annotations
 
 import math
+import os
+import platform
+import re
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -63,6 +69,32 @@ def _reference(q, k, v, scale: float, tau: float, tokens_per_frame: int = 0, tem
     return (p @ values).transpose(0, 2, 1, 3)
 
 
+def _dense_attention_is_steel(dtype: mx.Dtype) -> bool:
+    """Whether ``mx.fast.scaled_dot_product_attention`` at head_dim 128 runs the steel loop the Sol kernel is built on.
+
+    Mirrors MLX 0.32's dispatch (``is_nax_available`` in ``backend/metal/device.cpp``, the NAX branch of
+    ``sdpa_full_self_attention_metal``): on macOS 26.2+ with an ``applegpu_g17`` or later GPU (``g18`` for the ``p``
+    variants) dense attention runs ``steel_attention_nax`` in float16 / bfloat16, and in float32 too unless
+    ``MLX_ENABLE_TF32=0``, which ``conftest.py`` sets for the suite. That kernel tiles and accumulates differently, so
+    the results can differ by one rounding.
+    """
+    mac = tuple(int(x) for x in (platform.mac_ver()[0] or "0").split(".")[:2])
+    match = re.fullmatch(r"applegpu_g(\d+)([a-z])", str(mx.device_info().get("architecture", "")))
+    if mac < (26, 2) or match is None or int(match[1]) < (18 if match[2] == "p" else 17):
+        return True
+    assert os.environ.get("MLX_ENABLE_TF32") == "0", "conftest.py pins exact float32 attention"
+    return dtype == mx.float32
+
+
+def _assert_matches_dense(out: mx.array, dense: mx.array) -> None:
+    """Bit for bit when dense attention runs the same steel loop; otherwise within one rounding of the dtype."""
+    if _dense_attention_is_steel(out.dtype):
+        assert mx.array_equal(out, dense).item()
+    else:
+        eps = {mx.float16: 2.0**-10, mx.bfloat16: 2.0**-7}[out.dtype]  # one rounding at |x| < 1
+        assert mx.allclose(out.astype(mx.float32), dense.astype(mx.float32), rtol=eps, atol=eps).item()
+
+
 def _rel_err(a: mx.array, ref: mx.array) -> float:
     a, ref = a.astype(mx.float32), ref.astype(mx.float32)
     return (mx.sqrt(mx.sum((a - ref) ** 2)) / mx.sqrt(mx.sum(ref**2))).item()
@@ -104,7 +136,7 @@ def test_every_block_routed_is_dense_attention_bit_for_bit(dtype, n):
     out = sparse_self_attention(q, k, v, scale, tau=-math.inf)
     dense = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale).transpose(0, 2, 1, 3)
     assert out.shape == (2, n, 2, 128) and out.dtype == dtype
-    assert mx.array_equal(out, dense).item()
+    _assert_matches_dense(out, dense)
 
 
 @pytest.mark.parametrize(("dtype", "tol"), [(mx.float32, 1e-5), (mx.float16, 1e-3), (mx.bfloat16, 5e-3)])
@@ -223,7 +255,7 @@ def test_attention_runs_sparse_only_on_plain_self_attention_calls():
     dense = attn(x)
 
     attn.sparse_attention = _state(-math.inf)
-    assert mx.array_equal(attn(x), dense).item()  # every block routed: the dense result, bit for bit
+    _assert_matches_dense(attn(x), dense)  # every block routed: the dense result
     assert attn.sparse_attention.calls == 1
 
     attn.sparse_attention = state = _state(1.0)
@@ -574,6 +606,20 @@ def test_probe_runs_the_kernel_variant_of_a_real_call(monkeypatch):
     assert all(sizes[name] >= 8 for name in names[:7]), sizes
     assert dict(call["template"])["T"] == mx.float32
     assert call["inputs"][0].shape == (1, 2, sa._PROBE_TOKENS, 128)
+
+
+def test_float32_probe_passes_when_mlx_runs_dense_attention_in_tf32():
+    """With MLX's default ``MLX_ENABLE_TF32=1`` a NAX GPU runs float32 dense attention at ~10 mantissa bits; the probe
+    must still accept the (exact) kernel. A fresh process, since MLX reads the variable once."""
+    code = (
+        "import mlx.core as mx\n"
+        "from ltx_core_mlx.model.transformer.sparse_attention import kernel_available\n"
+        "assert kernel_available(mx.float32)\n"
+    )
+    env = {**os.environ, "MLX_ENABLE_TF32": "1"}
+    result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert "staying on dense attention" not in result.stderr
 
 
 @pytest.mark.parametrize("broken", [mx.float32, mx.bfloat16])

@@ -1,6 +1,16 @@
 """Shared test fixtures and helpers."""
 
+import os
 from pathlib import Path
+
+# Exact float32 matmuls on GPUs with neural accelerators. MLX (0.32) sends float32 GEMM and attention to its NAX
+# kernels on macOS 26.2+ with an applegpu_g17 or later GPU (M5) unless MLX_ENABLE_TF32=0; those keep ~10 mantissa
+# bits (rel. error ~7e-4 on a plain ``a @ b``, against ~1e-7 on the CPU or with the variable at 0). The float32 tests
+# compare against exact references at 1e-5 to catch logic errors (NA window masks, LoRA algebra, weight swaps), which
+# a tolerance wide enough for TF32 would hide. MLX reads the variable once, at the first matmul, so it is set here,
+# before any test runs. No effect on GPUs without NAX (the CI runners). Tests that need MLX's default path set the
+# variable in a subprocess (``test_sparse_attention.py``).
+os.environ["MLX_ENABLE_TF32"] = "0"
 
 _HUB_DIR = Path.home() / ".cache/huggingface/hub"
 _Q8_CANDIDATES = [
