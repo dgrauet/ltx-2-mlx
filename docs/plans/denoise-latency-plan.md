@@ -31,6 +31,22 @@ STG prefix sharing alone (baseline, float16): 8.24 → 7.68 s/step (−7 %, half
 
 Deferred: item 3's AdaLN dedupe grouping cache (touches the exactness-verification code for a few host syncs per I2V pass), item 3's all-ones-mask drop (after the mask correctness fix), item 5 (async eval guard: needs a watchdog test with the display active).
 
+Second batch (same branch):
+- Self-attention mask correctness fix (log-space bias, upstream `_prepare_self_attention_mask`); changes `ic-lora` with `--conditioning-strength` < 1 only. Not render-checked (Union-Control LoRA not local).
+- Item 7: Sol in the dev stage 2 (`--two-stage`, `--two-stages-hq` with res_2s substep sigmas, `a2v`). `--two-stages-hq` 704×1024×49 (4,928 stage-2 tokens): 329 of 329 attention calls ran sparse (7 evaluations × 47 blocks); whole render 155 s dense vs 163 s sparse: no gain at this size (Sol pays off from ~9k tokens). Quality not measured.
+- Item 6: `--compute-dtype` (CLI form of `LTX2_COMPUTE_DTYPE`; no `auto`, float16 is already the default).
+- Item 9: fused (mx.compile) AdaLN modulations and gated residuals, bit-identical.
+
+sha256 e2e after the second batch: the same five renders are still byte-identical to `e0dc64d`. Full suite: 1985 passed, 118 skipped. Bench (one run per arm, s/step), `e0dc64d` → first batch → second batch:
+
+| run | float16 | float32 |
+|---|---:|---:|
+| distilled I2V 4,992 tokens | 12.18 → 11.64 → 9.38 (−23 %) | 19.44 → 16.25 → 14.61 (−25 %) |
+| distilled I2V 9,216 tokens | 24.66 → 22.71 → 19.15 (−22 %) | 34.05 → 31.28 → 30.81 (−10 %) |
+| guided stage 1, 780 tokens | 7.68 → 6.61 → 5.85 (−24 %) | 9.34 → 8.64 → 8.93 (−4 %) |
+
+The fused helpers helped float16 far more than float32 (where the matmuls dominate); the guided float32 arm moving back up (8.64 → 8.93) is within run-to-run noise. Repeat runs are needed before quoting any single figure.
+
 Earlier review notes:
 - **Item 1 (STG prefix sharing): implemented** (now committed). `BlockPrefix`, `capture_prefix` / `resume_prefix` on `LTXModel.__call__`, `stg_block_prefix` in `samplers.py`, `LTX2_STG_PREFIX_REUSE`, `tests/test_stg_prefix_reuse.py`.
 - **Item 6 overtaken: float16 is now the default compute dtype in the working tree** (`LTX2_COMPUTE_DTYPE` unset → float16; `float32` restores the old path). That flip skipped this plan's gate: measured on `--distilled`, `--dfr` and the relay/NAG runs only. Before it ships (as `feat!:`, a 0.y bump), run the quality gate on `--two-stage` stage 1 (CFG + STG), `a2v`, `retake` / `extend`, `ic-lora` and `lipdub`.
