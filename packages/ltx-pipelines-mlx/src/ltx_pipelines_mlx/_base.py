@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
 
 def apply_compute_dtype_from_env(dit: LTXModel) -> LTXModel:
-    """Apply ``LTX2_COMPUTE_DTYPE`` to a freshly loaded DiT (unset: no change).
+    """Apply ``LTX2_COMPUTE_DTYPE`` to a freshly loaded DiT (unset: float16; ``float32``: no change).
 
     Args:
         dit: The loaded ``LTXModel`` or ``StreamingLTXModel``.
@@ -655,7 +655,16 @@ class BasePipeline:
         dit = self.dit if dit is None else dit
         dtype = getattr(dit, "compute_dtype", None)
         if dit is not None and dtype is not None:
+            # Evaluates the fused graph block by block as it casts.
             dit.set_compute_dtype(dtype)
+        elif dit is not None:
+            # No compute dtype (float32 path): still evaluate the fused weights here, one block at
+            # a time, instead of leaving the whole fusion graph to the first forward of the next
+            # stage (same values; it bounds the transition's memory and keeps the fusion out of
+            # the first denoising step).
+            for block in getattr(dit, "transformer_blocks", ()):
+                mx.eval(block.parameters())
+            mx.eval(dit.parameters())
 
     def _stepwise_hook(
         self,

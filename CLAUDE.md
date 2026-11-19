@@ -355,6 +355,7 @@ When conditioning (I2V, retake, extend), use per-token timesteps `sigma * denois
 - `denoise_mask`: `1.0` = denoise (generate), `0.0` = preserve (keep clean)
 - `positions`: (B, N, num_axes) pixel-space positions for RoPE
 - `attention_mask`: (B, N, N) optional self-attention mask [0,1]
+  (1 = attend, 0 = blocked, fractions = attention strength). `LTXModel` turns it into the additive bias the kernel takes once per forward (`self_attention_bias`: `log(p)`, `p <= 0` -> float32 min), as upstream `_prepare_self_attention_mask`. Until this fix the raw weights were added as a bias (a 0 lowered a logit by 1), so `ic-lora` renders with `--conditioning-strength` below 1 (or a `conditioning_attention_mask` video, Python API) change; renders without a self-attention mask (every other path) are byte-identical. Tests: `tests/test_self_attention_mask.py`.
 - `frozen`: `True` marks a stream that is conditioning only (upstream `LatentState.frozen`); it always carries an
   all-zero `denoise_mask`. `create_noised_state(..., frozen=True)` builds one. Set where upstream sets
   `frozen=True`: a2v audio (both stages), lipdub stage-2 audio, `--two-stage` stage-2 audio (upstream v1.4.0
@@ -884,7 +885,7 @@ The non-distilled (dev) model uses multi-modal guidance with up to 4 forward pas
 Default reference params (LTX_2_3_PARAMS): `cfg_scale=3.0`, `stg_scale=1.0`, `stg_blocks=[28]`, `rescale_scale=0.7`, `modality_scale=3.0`. Audio: `cfg_scale=7.0`.
 HQ params (LTX_2_3_HQ_PARAMS): `cfg_scale=3.0`, `stg_scale=0.0`, `stg_blocks=[]`, `rescale_scale=0.45`. Audio: `cfg_scale=7.0`, `rescale_scale=1.0`.
 
-**`stg_scale` defaults differ by pipeline**: the dev + CFG pipelines (`--two-stage`, `--one-stage`, `a2v`, `retake`/`extend`) default to `stg_scale=1.0` (`ti2vid_two_stages.py:417`, `retake.py:64` `DEFAULT_STG_SCALE`; guidance params in `utils/constants.py`); `--two-stages-hq` defaults to `stg_scale=0.0` (`ti2vid_two_stages_hq.py:113`). STG requires a 3rd forward pass per step. On 32GB Mac, this causes OOM for videos longer than ~33 frames at 480x704. Pass `--stg-scale 0` on 32GB machines for long clips.
+**`stg_scale` defaults differ by pipeline**: the dev + CFG pipelines (`--two-stage`, `--one-stage`, `a2v`, `retake`/`extend`) default to `stg_scale=1.0` (`ti2vid_two_stages.py:417`, `retake.py:64` `DEFAULT_STG_SCALE`; guidance params in `utils/constants.py`); `--two-stages-hq` defaults to `stg_scale=0.0` (`ti2vid_two_stages_hq.py:113`). STG requires a 3rd forward pass per step, but that pass only recomputes from the first perturbed block: the conditioned pass captures the hidden states entering it (`BlockPrefix`, `capture_prefix` / `resume_prefix` on `LTXModel.__call__`; `stg_block_prefix` in `utils/samplers.py`), so with `stg_blocks=[28]` the STG pass runs 20 of the 48 blocks. Same output (the skipped blocks see the same inputs; under `--low-ram` the shared prefix comes from the compiled block, ~1 ULP from the old eager recompute). Not with modality tiling (`TiledLTXModel.supports_block_prefix = False`), TeaCache or a calibration tap; `LTX2_STG_PREFIX_REUSE=0` turns it off. Tests: `tests/test_stg_prefix_reuse.py`. The passes of one evaluation that attend to the same text context (conditioned, STG, isolated modality, and an unconditional pass without a negative prompt) also share the text cross-attention keys and values (`TextKVCache` in `attention.py`, `text_kv_cache` on `LTXModel.__call__`, `text_kv_cache_for` in `utils/samplers.py`): the first pass projects them, the others reuse them, bit-identical; one cache per evaluation, bound to the first pass's context arrays and compute dtype. It holds every block's K/V for the evaluation (~1.2 GB float16 on the 2.5 pack); not under `--low-ram` (the compiled block) or modality tiling; `LTX2_TEXT_KV_CACHE=0` turns it off. Tests: `tests/test_text_kv_cache.py`. On 32GB Mac, this causes OOM for videos longer than ~33 frames at 480x704. Pass `--stg-scale 0` on 32GB machines for long clips.
 
 **Memory impact**: Each extra pass doubles/triples/quadruples memory. On 32GB Mac with dev model at 480x704: CFG-only supports ~97 frames at half-res (two-stage), full guidance (4 passes) supports ~17 frames.
 
@@ -1693,6 +1694,15 @@ LTX-2 mitigates both by inserting `mx.eval` at strategic points so each command 
 
 Mac Studio / M-series Ultra users who have never seen a watchdog crash may recover full lazy-graph pipelining by setting `LTX2_GEMMA_EVAL_EVERY=0` and `LTX2_DIT_EVAL_EVERY=0`. This disables all eval guards and restores maximum throughput at the cost of watchdog safety on machines where those guards were needed.
 
+### Fused elementwise helpers (`LTX2_COMPILE_ELEMENTWISE`)
+
+The block's AdaLN modulations (`rms(x) * (1 + scale) + shift`, and the A↔V ones on the shared norms) and gated residuals
+(`h + out * gate`) each ran as several full-size elementwise passes. `transformer.py` runs them through `mx.compile`d
+helpers (`_norm_modulate`, `_modulate`, `_gated_residual`), one fused kernel each, bit-identical to the eager ops
+(`tests/test_exact_denoise_speedups.py`, resident, float16 and per-token AdaLN). Micro-benchmark (M5 Pro, 4,992 tokens ×
+4,096, per-token params): modulation 3.3 → 2.0 ms, residual 2.5 → 1.3 ms; 9 such calls per block. The STG / modality
+perturbation masks keep the eager path. `LTX2_COMPILE_ELEMENTWISE=0` (read at import) runs them eagerly.
+
 ### AdaLN dedupe switches (per-token timesteps only)
 
 The per-token AdaLN path deduplicates identical sigma rows into one shrunken
@@ -1711,21 +1721,22 @@ blocks. Both are on by default and bit-identical by construction:
 
 ### DiT compute dtype (`LTX2_COMPUTE_DTYPE`)
 
-The DiT runs in float32 by default, although its weights are bf16: the `scale_shift_table`s are
+Default since 0.19: **float16** (unset). `LTX2_COMPUTE_DTYPE=float32` gives the old path described
+next. Without a compute dtype the DiT runs in float32, although its weights are bf16: the `scale_shift_table`s are
 stored F32 and the per-token AdaLN parameters are F32 (the sinusoidal timestep embedding is
 float32), so `rms(x) * (1 + scale) + shift` promotes the modulated activations, the residual stream
 becomes float32 after block 0, and every projection and attention call follows. Upstream PyTorch
 casts the tables to the timestep dtype and runs the whole block in bf16.
 
-`LTX2_COMPUTE_DTYPE=float16` (Python: `LTXModel.set_compute_dtype(mx.float16)`; pipelines apply the
-variable when they load a DiT, including `--low-ram`, where `BlockStreamer.bind` casts each block as
+`LTX2_COMPUTE_DTYPE=float16` (the default; Python: `LTXModel.set_compute_dtype(mx.float16)` -- a bare
+`LTXModel` stays float32 until it is called; pipelines apply the variable when they load a DiT, including `--low-ram`, where `BlockStreamer.bind` casts each block as
 it is bound) runs the inside of every attention and feed-forward module in float16: projections,
 q/k norms, RoPE and the attention kernel. The residual stream and the AdaLN modulation stay float32,
 and the float32 gate multiply promotes each module output back before the residual add. The modules'
 float parameters (quantization scales/biases, Linear biases, q/k norm weights) are cast at load:
 float16 activations against bf16 scales would promote to float32 inside `quantized_matmul` and gain
-nothing. The AdaLN tables keep their F32 dtype. `bfloat16` gives the upstream precision; unset or
-`float32` is today's path, untouched. In-place LoRA fusion (`dfr`'s detailing LoRA, `ic-lora`, and the
+nothing. The AdaLN tables keep their F32 dtype. `bfloat16` gives the upstream precision; `float32`
+is the pre-0.19 path, untouched. In-place LoRA fusion (`dfr`'s detailing LoRA, `ic-lora`, and the
 distilled-LoRA fusion that starts stage 2 of `--two-stage`, `--two-stages-hq` and `a2v`
 in `TI2VidTwoStagesPipeline._fuse_distilled_lora`) re-quantizes from a float32 weight; `fuse_loras`
 gives the new scales/biases the dtype the old ones had (until that fix they came out float32 on every
@@ -1743,6 +1754,32 @@ Measured on an M1 Max 64 GB, 2.5 q8 pack, `--distilled` I2V 576×1024×241, seed
 | float32 (default) | 141 s | 701 s | — |
 | `bfloat16` | 136 s | 698 s | rel. L2 6.4e-2, cos 0.99796 |
 | `float16` | 107 s | 563 s | rel. L2 1.7e-2, cos 0.99985 |
+
+Float16-default quality gate (M5 Pro 48 GB, 512×768×49, seed 5, the commands' default steps and guidance, one
+render per dtype; prompt "a woman in a kitchen smiles at the camera and says good morning, static camera"; retake /
+extend / ic-lora sources: a 2.5 `--distilled` render of that prompt):
+
+| run | wall-clock float32 → float16 | PSNR / SSIM float16 vs float32 | verdict |
+|---|---:|---:|---|
+| `--two-stage` 2.5 | 224 → 176 s (−21 %) | 20.8 dB / 0.73 | another sample, clean |
+| `--two-stage` 2.3 | 239 → 185 s (−22 %) | 21.6 dB / 0.69 | another sample, clean |
+| `--two-stages-hq` 2.5 | 309 → 246 s (−20 %) | 20.9 dB / 0.78 | another sample (same framing), clean |
+| `a2v` 2.5 (speech) | 257 → 197 s (−24 %) | 20.8 dB / 0.77 | another sample, clean |
+| `retake` 2.5 (latent frames 2-4) | 777 → 561 s (−28 %) | 43.2 dB / 0.98 | same render |
+| `extend` 2.5 (+2 latent frames) | 1424 → 810 s (−43 %) | 43.3 dB / 0.98 | same render |
+| `ic-lora` 2.3, Union-Control, canny control | 83 → 61 s (−27 %) | 24.8 dB / 0.87 | same layout and person, clean; control edges matched 0.34 / 0.36 |
+| same, `--conditioning-strength 0.7` (self-attention mask path) | 83 → 71 s (−15 %) | 23.4 dB / 0.83 | same layout, clean; control edges matched 0.35 / 0.35 |
+| `lipdub` 2.3, Dub-It 0.9 (reference: the `--two-stage` 2.3 render with new speech muxed in) | 158 → 110 s (−30 %) | 44.8 dB / 0.99 | same render; mouth re-synced the same way in both |
+
+The 30-step CFG paths diverge into a different sample at the same seed (the gap compounds over the guided steps);
+neither dtype shows artifacts, banding, burn or flicker, and brightness, contrast, saturation, sharpness and
+frame-to-frame motion stay within the spread between two seeds (no systematic shift: sharpness lower on two of the
+four, higher on one). `retake` / `extend` keep most of the clip and differ by ~43 dB. `ic-lora` was gated on 2.3 (no 2.5 Union-Control
+exists) with a grayscale canny control extracted from the `--two-stage` 2.3 render; "control edges matched" is the share
+of control edge pixels with a render edge within 2 px (the source render itself scores 0.99), and float16 keeps it.
+The 2.5 Pixel-Spatial-Upscaler LoRA (a stage-2 detailing LoRA, used by `--dfr`) gives a grid pattern as an `ic-lora`
+task LoRA in both dtypes and on `main` in float32: not float16's. `lipdub`: both dtypes reshape the mouth the same way
+(face crops); the reconstructed audio level matches (−19.8 / −20.6 dB). One seed per arm.
 
 Float16 margin: on every forward of two full renders (I2V 576×1024×121 and a flat-sky T2V
 1024×576×97, all 11 forwards each) the largest value inside any attention/FF op was 2,512, against
@@ -1852,8 +1889,14 @@ How it works (`model/transformer/sparse_attention.py`):
   perturbation, cross-attention, or fewer than 4096 tokens stay dense.
 - `DistilledPipeline._stage2` turns it on around the stage-2 loop and off afterwards (also on error), so it covers
   the stage 2 of every pipeline built on it: `generate --distilled`, `generate --dfr`, `a2v --distilled`, `a2v --dfr` and
-  `extend --distilled`. Stage 1, the DFR temporal rounds and spatial epilogue, and
-  the other pipelines (single-stage `retake --distilled` included) are untouched. Under `--low-ram` the streamed model attaches the state to whichever block is bound
+  `extend --distilled`. The dev two-stage stage 2 (distilled LoRA fused, no CFG) of `--two-stage`, `--two-stages-hq`
+  and `a2v` is switched the same way (`TI2VidTwoStagesPipeline._start_stage2_sparse_attention`, where the helpers now
+  live). On `--two-stages-hq` res_2s evaluates twice per step, the second time at the substep
+  `sqrt(sigma_i * sigma_i+1)`, and ends with an evaluation at 0.0011: the table lists every evaluation
+  (`res2s_evaluation_sigmas` in `utils/samplers.py`), each with its step's tau, so none falls back to dense. Tests:
+  `tests/test_sparse_attention_dev_stage2.py`. Not measured on the dev stage 2 yet (quality or speed). Stage 1, the DFR
+  temporal rounds and spatial epilogue, and the other pipelines (single-stage `retake --distilled` included) are
+  untouched. Under `--low-ram` the streamed model attaches the state to whichever block is bound
   and runs the eager shared block while it is on (the compiled block would replay the tau and routing of the step it
   was traced on).
 

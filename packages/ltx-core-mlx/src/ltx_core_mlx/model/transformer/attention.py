@@ -24,6 +24,52 @@ from ltx_core_mlx.model.transformer.rope import apply_rope_interleaved, apply_ro
 from ltx_core_mlx.model.transformer.sparse_attention import SparseAttentionState, sparse_self_attention
 
 
+class TextKVCache:
+    """Keys / values of the text cross-attentions, shared by the forwards of one denoising evaluation.
+
+    The guided loops run up to four forwards per evaluation (conditioned, unconditional, STG,
+    isolated modality) at the same sigma. Every one of them that attends to the same text
+    context computes the same text K/V in every block: same context, same per-step prompt
+    AdaLN modulation (it depends on the sigma only), same weights; the STG and modality
+    perturbations and the Prompt Relay masks act elsewhere. The first such forward stores
+    them here and the others reuse them.
+
+    A sampler creates one cache per evaluation (never across sigmas) and passes it to every
+    pass. ``LTXModel`` binds it to the first forward's text contexts and compute dtype, and
+    uses it only in forwards whose contexts are those very arrays (``is``) and whose compute
+    dtype matches; a pass with another context (the negative prompt) runs without it.
+    Entries are keyed by ``(block_idx, modality)``.
+    """
+
+    def __init__(self) -> None:
+        self.bound = False
+        self.video_context: mx.array | None = None
+        self.audio_context: mx.array | None = None
+        self.dtype: mx.Dtype | None = None
+        self.entries: dict = {}
+
+    def usable_for(self, video_context: mx.array | None, audio_context: mx.array | None, dtype) -> bool:
+        """Bind on first use; afterwards True only for the same context arrays and compute dtype."""
+        if not self.bound:
+            self.bound = True
+            self.video_context, self.audio_context, self.dtype = video_context, audio_context, dtype
+            return True
+        same_dtype = dtype is self.dtype or (dtype is not None and self.dtype is not None and dtype == self.dtype)
+        return video_context is self.video_context and audio_context is self.audio_context and same_dtype
+
+
+def cast_attention_mask(dtype: mx.Dtype, mask: mx.array) -> mx.array:
+    """Clamp an additive attention mask to ``dtype``'s finite range and cast it (boolean masks unchanged).
+
+    A large negative bias (e.g. -1e9, or -inf) becomes the dtype minimum rather than -inf: a
+    row that is fully masked then still softmaxes to a finite result, as in float32.
+    """
+    if mask.dtype == mx.bool_:
+        return mask
+    info = mx.finfo(dtype)
+    return mx.clip(mask, info.min, info.max).astype(dtype)
+
+
 def _cast_inputs(
     dtype: mx.Dtype,
     x: mx.array,
@@ -33,15 +79,15 @@ def _cast_inputs(
 ) -> tuple[mx.array, mx.array | None, mx.array | None, mx.array | None]:
     """Cast the attention inputs to ``dtype``.
 
-    An additive mask is clamped to the dtype's finite range first, so a large
-    negative bias (e.g. -1e9) becomes the dtype minimum rather than -inf: a row
-    that is fully masked then still softmaxes to a finite result, as in float32.
+    An additive mask is clamped to the dtype's finite range first (see
+    :func:`cast_attention_mask`). A mask already in ``dtype`` is taken as already
+    clamped and passed through: ``LTXModel`` casts its masks once per forward with
+    :func:`cast_attention_mask` instead of once per block.
     """
     if encoder_hidden_states is not None:
         encoder_hidden_states = encoder_hidden_states.astype(dtype)
-    if attention_mask is not None and attention_mask.dtype != mx.bool_:
-        info = mx.finfo(dtype)
-        attention_mask = mx.clip(attention_mask, info.min, info.max).astype(dtype)
+    if attention_mask is not None and attention_mask.dtype != dtype:
+        attention_mask = cast_attention_mask(dtype, attention_mask)
     if perturbation_mask is not None:
         perturbation_mask = perturbation_mask.astype(dtype)
     return x.astype(dtype), encoder_hidden_states, attention_mask, perturbation_mask
@@ -125,6 +171,7 @@ class Attention(nn.Module):
         nag_scale: float = DEFAULT_NAG_SCALE,
         nag_alpha: float = DEFAULT_NAG_ALPHA,
         nag_tau: float = DEFAULT_NAG_TAU,
+        kv_cache: tuple[dict, object] | None = None,
     ) -> mx.array:
         """Forward pass.
 
@@ -144,6 +191,10 @@ class Attention(nn.Module):
             nag_scale: NAG extrapolation factor (used with ``nag_encoder_hidden_states``).
             nag_alpha: NAG blend with the positive output.
             nag_tau: NAG clip on the per-token L1-norm ratio.
+            kv_cache: Optional ``(store, key)`` for a cross-attention without RoPE: the
+                projected, normalised, head-split keys and values are read from
+                ``store[key]`` when present, else computed and stored there (see
+                :class:`TextKVCache`). Ignored for self-attention and when RoPE applies.
 
         Returns:
             Output of shape (B, N, out_dim).
@@ -159,18 +210,23 @@ class Attention(nn.Module):
                 nag_encoder_hidden_states = nag_encoder_hidden_states.astype(self.compute_dtype)
         kv_input = encoder_hidden_states if encoder_hidden_states is not None else x
 
-        q = self.to_q(x)
-        k = self.to_k(kv_input)
-        v = self.to_v(kv_input)
+        if kv_cache is not None and (encoder_hidden_states is None or (self.use_rope and rope_freqs is not None)):
+            kv_cache = None  # only a RoPE-free cross-attention has keys that do not depend on x
+        cached = kv_cache[0].get(kv_cache[1]) if kv_cache is not None else None
 
-        # QK normalization (over full inner_dim before reshaping)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-
-        # Reshape to (B, num_heads, seq_len, head_dim)
+        # QK normalization (over full inner_dim before reshaping), then
+        # reshape to (B, num_heads, seq_len, head_dim)
+        q = self.q_norm(self.to_q(x))
         q = q.reshape(B, -1, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        k = k.reshape(B, -1, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        v = v.reshape(B, -1, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        if cached is not None:
+            k, v = cached
+        else:
+            k = self.k_norm(self.to_k(kv_input))
+            v = self.to_v(kv_input)
+            k = k.reshape(B, -1, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+            v = v.reshape(B, -1, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+            if kv_cache is not None:
+                kv_cache[0][kv_cache[1]] = (k, v)
 
         # Apply RoPE -- freqs are (cos, sin, rope_type) tuple
         if self.use_rope and rope_freqs is not None:
@@ -215,18 +271,23 @@ class Attention(nn.Module):
             out_neg = mx.fast.scaled_dot_product_attention(q, k_neg, v_neg, scale=self.scale)
             out = normalized_attention_guidance(out, out_neg, nag_scale, nag_alpha, nag_tau, axis=(1, 3))
 
+        # Back to token-major (B, N, num_heads, head_dim) first: the transpose is a view, so the
+        # blend / gate below write their result straight in the layout the output projection
+        # reads and the final reshape is free (gating in head-major order and transposing
+        # afterwards wrote one more full copy). Same elementwise arithmetic either way.
+        out = out.transpose(0, 2, 1, 3)
+
         # STG perturbation: blend attn output with value projection
         # Reference: out = attn_out * mask + v * (1 - mask)
         if perturbation_mask is not None:
             # perturbation_mask: (B, 1, 1, 1) — 1.0=keep attn, 0.0=skip to values
-            out = out * perturbation_mask + v * (1.0 - perturbation_mask)
+            out = out * perturbation_mask + v.transpose(0, 2, 1, 3) * (1.0 - perturbation_mask)
 
         # Per-head gating: gate = 2 * sigmoid(logits)
         if self.to_gate_logits is not None:
             gate_logits = self.to_gate_logits(x)  # (B, N, num_heads)
             gate = 2.0 * mx.sigmoid(gate_logits)
-            out = out * gate.transpose(0, 2, 1)[:, :, :, None]  # (B, heads, N, 1)
+            out = out * gate[:, :, :, None]  # (B, N, heads, 1)
 
-        # Reshape back: (B, num_heads, N, head_dim) -> (B, N, inner_dim)
-        out = out.transpose(0, 2, 1, 3).reshape(B, -1, self.num_heads * self.head_dim)
+        out = out.reshape(B, -1, self.num_heads * self.head_dim)
         return self.to_out(out)

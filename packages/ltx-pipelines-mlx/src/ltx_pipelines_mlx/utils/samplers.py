@@ -5,6 +5,8 @@ Ported from ltx-pipelines denoising loop.
 
 from __future__ import annotations
 
+import math
+import os as _os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -22,7 +24,8 @@ from ltx_core_mlx.guidance.perturbations import (
     PerturbationConfig,
     PerturbationType,
 )
-from ltx_core_mlx.model.transformer.model import X0Model
+from ltx_core_mlx.model.transformer.attention import TextKVCache
+from ltx_core_mlx.model.transformer.model import BlockPrefix, X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS
 from ltx_pipelines_mlx.utils.estimate import StepEstimator, describe_work
@@ -140,6 +143,69 @@ def _nag_for_states(nag: NAGGuidance | None, audio_state: LatentState | None) ->
     if audio_state is None or audio_state.frozen:
         return nag._replace(audio_text_embeds=None)
     return nag
+
+
+def _stg_perturbations(video_guider, audio_guider) -> list[Perturbation]:
+    """The self-attention perturbations of the STG pass (empty when neither guider runs it)."""
+    perturbations: list[Perturbation] = []
+    if video_guider.do_perturbed_generation():
+        perturbations.append(
+            Perturbation(type=PerturbationType.SKIP_VIDEO_SELF_ATTN, blocks=video_guider.params.stg_blocks)
+        )
+    if audio_guider.do_perturbed_generation():
+        perturbations.append(
+            Perturbation(type=PerturbationType.SKIP_AUDIO_SELF_ATTN, blocks=audio_guider.params.stg_blocks)
+        )
+    return perturbations
+
+
+def stg_block_prefix(model: X0Model, perturbations: list[Perturbation]) -> BlockPrefix | None:
+    """A :class:`BlockPrefix` letting the STG pass resume from the conditioned pass.
+
+    The STG pass has the conditioned pass's inputs and perturbs only the self-attention
+    of the ``stg_blocks``, so both compute the same hidden states up to the first
+    perturbed block. The conditioned pass captures them there and the STG pass starts
+    from them (``stg_blocks=[28]``: 28 of its 48 blocks are skipped). The STG output
+    equals the recomputed one: the skipped blocks see the same inputs. Under
+    ``--low-ram`` the conditioned pass runs the compiled block and the STG pass the
+    eager one, so the shared prefix differs from the old eager recompute by the
+    compiled block's ~1 ULP.
+
+    Returns None (recompute every block) when ``LTX2_STG_PREFIX_REUSE=0``, when the
+    model cannot resume (modality tiling), or when a perturbation covers block 0 or
+    every block.
+    """
+    if _os.environ.get("LTX2_STG_PREFIX_REUSE", "1").strip() == "0" or not perturbations:
+        return None
+    if not getattr(getattr(model, "model", model), "supports_block_prefix", False):
+        return None
+    first: int | None = None
+    for perturbation in perturbations:
+        if not perturbation.blocks:  # None = every block; [] = nothing to share against
+            return None
+        block = min(perturbation.blocks)
+        first = block if first is None else min(first, block)
+    if first is None or first <= 0:
+        return None
+    return BlockPrefix(first)
+
+
+def text_kv_cache_for(model: X0Model) -> TextKVCache | None:
+    """A fresh :class:`TextKVCache` for the guidance passes of one evaluation, or None.
+
+    The conditioned, STG and isolated-modality passes (and an unconditional pass without a
+    negative prompt) attend to the same text context at the same sigma, so they share the
+    text cross-attention keys and values: the first pass computes them, the others reuse
+    them (same values: the outputs are bit-identical). It costs the K/V of every block for
+    the evaluation's duration (2.5 pack, 1,024 text tokens: ~1.2 GB in float16, ~2.4 GB in
+    float32). None when ``LTX2_TEXT_KV_CACHE=0`` or the model cannot take it (modality
+    tiling, ``--low-ram``).
+    """
+    if _os.environ.get("LTX2_TEXT_KV_CACHE", "1").strip() == "0":
+        return None
+    if not getattr(getattr(model, "model", model), "supports_text_kv_cache", False):
+        return None
+    return TextKVCache()
 
 
 def _step_timed(estimator: StepEstimator, step_idx: int, video_x: mx.array, audio_x: mx.array | None) -> None:
@@ -731,6 +797,27 @@ def _sde_step(
     return x_noised.astype(mx.bfloat16)
 
 
+def res2s_evaluation_sigmas(sigmas: list[float]) -> list[tuple[float, int]]:
+    """``(sigma, step)`` of every model evaluation :func:`res2s_denoise_loop` makes on ``sigmas``.
+
+    Each full step ``i`` evaluates at ``sigmas[i]`` and at the substep ``sqrt(sigmas[i] *
+    sigmas[i + 1])``; a schedule ending at 0 has its 0 replaced by 0.0011 for the step sizes and
+    ends with one more evaluation at that sigma (counted as the last step). Mirrors the loop, so
+    per-step settings keyed on the sigma (Sol's tau) reach both evaluations of a step.
+    """
+    n_full_steps = len(sigmas) - 1
+    table = list(sigmas)
+    if table[-1] == 0:
+        table = table[:-1] + [0.0011, 0.0]
+    out: list[tuple[float, int]] = []
+    for i in range(n_full_steps):
+        out.append((table[i], i))
+        out.append((math.sqrt(table[i] * table[i + 1]), i))
+    if sigmas[-1] == 0:
+        out.append((table[n_full_steps], n_full_steps - 1))
+    return out
+
+
 def res2s_denoise_loop(
     model: X0Model,
     video_state: LatentState,
@@ -907,8 +994,19 @@ def res2s_denoise_loop(
             video_guider = video_guider_factory.build_from_sigma(sig)
             audio_guider = audio_guider_factory.build_from_sigma(sig)
 
+            # STG pass, when it runs, resumes from the conditioned pass's hidden states at the
+            # first perturbed block. Not with tap / TeaCache: both need every pass's full block
+            # residual (and a TeaCache skip replaces the block loop).
+            ptb_perturbations = _stg_perturbations(video_guider, audio_guider)
+            stg_prefix = stg_block_prefix(model, ptb_perturbations) if (tap is None and teacache is None) else None
+            text_kv = text_kv_cache_for(model)
+            if text_kv is not None:
+                base_kwargs = {**base_kwargs, "text_kv_cache": text_kv}
+
             # 1. Conditioned prediction
             cond_kw = {**base_kwargs, "video_text_embeds": video_text_embeds, "audio_text_embeds": audio_text_embeds}
+            if stg_prefix is not None:
+                cond_kw["capture_prefix"] = stg_prefix
             cond_v, cond_a = run_pass("cond", cond_kw)
 
             # 2. Unconditional prediction for CFG
@@ -933,23 +1031,16 @@ def res2s_denoise_loop(
             # 3. Perturbed prediction for STG
             ptb_v: mx.array | float = 0.0
             ptb_a: mx.array | float = 0.0
-            if video_guider.do_perturbed_generation() or audio_guider.do_perturbed_generation():
-                perturbation_list: list[Perturbation] = []
-                if video_guider.do_perturbed_generation():
-                    perturbation_list.append(
-                        Perturbation(type=PerturbationType.SKIP_VIDEO_SELF_ATTN, blocks=video_guider.params.stg_blocks)
-                    )
-                if audio_guider.do_perturbed_generation():
-                    perturbation_list.append(
-                        Perturbation(type=PerturbationType.SKIP_AUDIO_SELF_ATTN, blocks=audio_guider.params.stg_blocks)
-                    )
-                ptb_config = PerturbationConfig(perturbations=perturbation_list)
+            if ptb_perturbations:
+                ptb_config = PerturbationConfig(perturbations=ptb_perturbations)
                 ptb_kw = {
                     **base_kwargs,
                     "video_text_embeds": video_text_embeds,
                     "audio_text_embeds": audio_text_embeds,
                     "perturbations": BatchedPerturbationConfig(perturbations=[ptb_config] * B),
                 }
+                if stg_prefix is not None:
+                    ptb_kw["resume_prefix"] = stg_prefix
                 ptb_v, ptb_a = run_pass("ptb", ptb_kw)
 
             # 4. Isolated modality prediction
@@ -1349,12 +1440,23 @@ def guided_denoise_loop(
             else:
                 return model(**kwargs, block_stack_override=_make_override(label))
 
+        # The STG pass, when it runs, resumes from the conditioned pass's hidden states at
+        # the first perturbed block. Not with tap / TeaCache: both need every pass's full
+        # block residual (and a TeaCache skip replaces the block loop).
+        ptb_perturbations = _stg_perturbations(video_guider, audio_guider)
+        stg_prefix = stg_block_prefix(model, ptb_perturbations) if (tap is None and teacache is None) else None
+        text_kv = text_kv_cache_for(model)
+        if text_kv is not None:
+            base_kwargs = {**base_kwargs, "text_kv_cache": text_kv}
+
         # --- 1. Conditioned prediction (positive context) ---
         cond_kwargs = {
             **base_kwargs,
             "video_text_embeds": video_text_embeds,
             "audio_text_embeds": audio_text_embeds,
         }
+        if stg_prefix is not None:
+            cond_kwargs["capture_prefix"] = stg_prefix
         cond_video_x0, cond_audio_x0 = _run_pass("cond", cond_kwargs)
 
         if tap is not None and "cond" in captured_residuals:
@@ -1386,23 +1488,8 @@ def guided_denoise_loop(
         ptb_video_x0: mx.array | float = 0.0
         ptb_audio_x0: mx.array | float = 0.0
 
-        if video_guider.do_perturbed_generation() or audio_guider.do_perturbed_generation():
-            perturbation_list: list[Perturbation] = []
-            if video_guider.do_perturbed_generation():
-                perturbation_list.append(
-                    Perturbation(
-                        type=PerturbationType.SKIP_VIDEO_SELF_ATTN,
-                        blocks=video_guider.params.stg_blocks,
-                    )
-                )
-            if audio_guider.do_perturbed_generation():
-                perturbation_list.append(
-                    Perturbation(
-                        type=PerturbationType.SKIP_AUDIO_SELF_ATTN,
-                        blocks=audio_guider.params.stg_blocks,
-                    )
-                )
-            perturbation_config = PerturbationConfig(perturbations=perturbation_list)
+        if ptb_perturbations:
+            perturbation_config = PerturbationConfig(perturbations=ptb_perturbations)
             batched_perturbations = BatchedPerturbationConfig(perturbations=[perturbation_config] * B)
 
             ptb_kwargs = {
@@ -1411,6 +1498,8 @@ def guided_denoise_loop(
                 "audio_text_embeds": audio_text_embeds,
                 "perturbations": batched_perturbations,
             }
+            if stg_prefix is not None:
+                ptb_kwargs["resume_prefix"] = stg_prefix
             ptb_video_x0, ptb_audio_x0 = _run_pass("ptb", ptb_kwargs)
 
         # --- 4. Isolated modality prediction ---

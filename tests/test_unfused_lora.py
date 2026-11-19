@@ -39,7 +39,8 @@ _ADAPTED = (
 @pytest.fixture(autouse=True)
 def _fused_by_default(monkeypatch):
     monkeypatch.delenv("LTX2_LORA_MODE", raising=False)
-    monkeypatch.delenv("LTX2_COMPUTE_DTYPE", raising=False)
+    # These tests compare against float32 references; the pipelines' default compute dtype is float16.
+    monkeypatch.setenv("LTX2_COMPUTE_DTYPE", "float32")
 
 
 def _sd(tensors: dict[str, mx.array], strength: float = 1.0) -> LoraStateDictWithStrength:

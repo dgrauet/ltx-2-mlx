@@ -29,6 +29,7 @@ import numpy as _np
 from ltx_core_mlx.guidance.nag import NAGGuidance
 from ltx_core_mlx.guidance.perturbations import BatchedPerturbationConfig
 from ltx_core_mlx.model.transformer.adaln import AdaLayerNormSingle, PerTokenAdaLNParams
+from ltx_core_mlx.model.transformer.attention import TextKVCache, cast_attention_mask
 from ltx_core_mlx.model.transformer.sparse_attention import SparseAttentionState
 from ltx_core_mlx.model.transformer.timestep_embedding import get_timestep_embedding
 from ltx_core_mlx.model.transformer.transformer import BasicAVTransformerBlock
@@ -46,14 +47,17 @@ _mx_eval = getattr(mx, "eval")  # noqa: B009
 
 # LTX2_COMPUTE_DTYPE: dtype for the inside of every DiT attention / feed-forward
 # module (projections, q/k norms, RoPE, the attention kernel). Unset or
-# "float32" keeps the default path, which runs the blocks in float32: the F32
-# AdaLN tables promote the modulated activations. "float16" runs those
-# internals in float16 while the residual stream and the AdaLN modulation stay
-# float32 -- on an M1 GPU, which has no native bfloat16, float16 is the fast type.
-# "bfloat16" is the precision upstream PyTorch computes in. Pipelines apply it
-# when they load a DiT; LTXModel.set_compute_dtype is the Python API.
+# "float16" (the default since 0.19) runs those internals in float16 while the
+# residual stream and the AdaLN modulation stay float32: float16 matmuls and
+# attention run ~1.5x faster than float32 on every Apple GPU measured (M1 Max,
+# M4 Pro, M5 Pro). "float32" restores the old path, which runs the blocks in
+# float32 (the F32 AdaLN tables promote the modulated activations). "bfloat16"
+# is the precision upstream PyTorch computes in. Pipelines apply it when they
+# load a DiT; LTXModel.set_compute_dtype is the Python API (a bare LTXModel
+# stays float32 until it is called).
+_DEFAULT_COMPUTE_DTYPE: mx.Dtype = mx.float16
 _COMPUTE_DTYPES: dict[str, mx.Dtype | None] = {
-    "": None,
+    "": _DEFAULT_COMPUTE_DTYPE,
     "float32": None,
     "fp32": None,
     "float16": mx.float16,
@@ -67,7 +71,7 @@ def compute_dtype_from_env() -> mx.Dtype | None:
     """Parse ``LTX2_COMPUTE_DTYPE``.
 
     Returns:
-        The requested dtype, or ``None`` (unset / ``float32``) to leave the DiT as loaded.
+        The requested dtype (unset: float16), or ``None`` (``float32``) to leave the DiT as loaded.
 
     Raises:
         ValueError: On a value other than float32, float16 or bfloat16 (or their short forms).
@@ -81,6 +85,44 @@ def compute_dtype_from_env() -> mx.Dtype | None:
 def _all_finite(*arrays: mx.array | None) -> bool:
     """True when every given array is finite; ``None`` (an absent stream, e.g. video-only audio) is skipped."""
     return all(bool(mx.all(mx.isfinite(a)).item()) for a in arrays if a is not None)
+
+
+def self_attention_bias(mask: mx.array) -> mx.array:
+    """Turn a ``[0, 1]`` self-attention weight mask into the additive bias the attention kernel takes.
+
+    Port of upstream ``TransformerArgsPreprocessor._prepare_self_attention_mask``: ``p > 0`` becomes
+    ``log(max(p, tiny))`` (tiny = smallest normal float32) (``1 -> 0``, no bias; ``0.5 -> -0.69``, which scales the key's attention
+    weight by 0.5 before renormalisation) and ``p <= 0`` becomes the dtype minimum (fully masked, but
+    finite, so a fully masked row still softmaxes to a finite result). A ``(B, N, N)`` mask gets a
+    head axis, ``(B, 1, N, N)``. Boolean masks pass through. Computed in float32; the compute-dtype
+    cast that follows clamps it to that dtype's range.
+    """
+    if mask.dtype == mx.bool_:
+        return mask
+    m = mask.astype(mx.float32)
+    info = mx.finfo(mx.float32)
+    bias = mx.where(m > 0, mx.log(mx.maximum(m, info.smallest_normal)), info.min)
+    return bias[:, None] if bias.ndim == 3 else bias
+
+
+@dataclass
+class BlockPrefix:
+    """Hidden states entering block ``index``, shared between two forwards.
+
+    Two forwards whose inputs agree everywhere and whose blocks only differ from
+    block ``index`` on (the STG pass against the conditioned pass: STG perturbs
+    the self-attention of ``stg_blocks`` only) compute the same hidden states up
+    to that block. ``LTXModel.__call__(capture_prefix=p)`` stores them;
+    ``LTXModel.__call__(resume_prefix=p)`` then starts the block loop at
+    ``index`` from the stored states instead of recomputing blocks
+    ``0 .. index - 1``. The prelude (patchify, AdaLN, RoPE) and the head run as
+    usual. The caller is responsible for the two forwards' inputs agreeing.
+    """
+
+    index: int
+    video: mx.array | None = None
+    audio: mx.array | None = None
+    captured: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +561,12 @@ class LTXModel(nn.Module):
     attention, and adaptive layer norm conditioning.
     """
 
+    # ``capture_prefix`` / ``resume_prefix`` are honoured (see BlockPrefix). Wrappers that
+    # split a forward into several inner forwards (modality tiling) set this to False.
+    supports_block_prefix: bool = True
+    # ``text_kv_cache`` is honoured (see TextKVCache); False on wrappers that cannot pass it on.
+    supports_text_kv_cache: bool = True
+
     def __init__(self, config: LTXModelConfig | None = None):
         super().__init__()
         if config is None:
@@ -594,6 +642,9 @@ class LTXModel(nn.Module):
 
         # Block-sparse video self-attention (Sol routing); None = dense. See set_sparse_attention.
         self._sparse_attention: SparseAttentionState | None = None
+        # RoPE tables of the last forward, keyed on the positions array they came from (see
+        # _rope_freqs_cached). Set with object.__setattr__ so nn.Module does not treat it as a child.
+        object.__setattr__(self, "_rope_cache", {})
 
     @property
     def compute_dtype(self) -> mx.Dtype | None:
@@ -795,6 +846,9 @@ class LTXModel(nn.Module):
         video_sigma: mx.array | None = None,
         audio_sigma: mx.array | None = None,
         nag: NAGGuidance | None = None,
+        capture_prefix: BlockPrefix | None = None,
+        resume_prefix: BlockPrefix | None = None,
+        text_kv_cache: TextKVCache | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Forward pass.
 
@@ -850,12 +904,30 @@ class LTXModel(nn.Module):
                 negative contexts are cast like the positive ones and broadcast to every
                 block's ``attn2`` / ``audio_attn2``. ``None`` (default) is the plain forward.
                 The audio context is unused on the video-only path (no ``audio_attn2`` runs).
+            capture_prefix: Optional :class:`BlockPrefix`; the hidden states entering
+                block ``capture_prefix.index`` are stored in it.
+            resume_prefix: Optional, already captured :class:`BlockPrefix`; the block loop
+                starts at its index from its stored hidden states. Exclusive with ``tap``,
+                ``block_stack_override`` and gradient checkpointing.
+            text_kv_cache: Optional :class:`TextKVCache` shared by the forwards of one
+                denoising evaluation. Used only when this forward's text contexts are the
+                ones the cache was bound to and the compute dtype matches (so the overflow
+                guard's recompute runs without it); ignored with a ``block_provider``
+                (``--low-ram``: the compiled block cannot carry it) and under gradient
+                checkpointing.
 
         Returns:
             Tuple of (video_velocity, audio_velocity), same shapes as inputs.
         """
+        if resume_prefix is not None:
+            if not resume_prefix.captured:
+                raise ValueError("resume_prefix was never captured")
+            if tap is not None or block_stack_override is not None or self.gradient_checkpointing:
+                raise ValueError("resume_prefix cannot be combined with tap, block_stack_override or checkpointing")
         # Arguments kept for the overflow guard's recompute (compute dtype only).
         call_args = {k: v for k, v in locals().items() if k != "self"} if self._compute_dtype is not None else None
+        # The text cache matches on the caller's context arrays (the prelude casts them).
+        raw_text_contexts = (video_text_embeds, audio_text_embeds)
         if self._sparse_attention is not None:
             # Before the bfloat16 cast below: the tau is picked by matching this sigma against the step table.
             self._sparse_attention.prepare(timestep, video_positions)
@@ -947,18 +1019,25 @@ class LTXModel(nn.Module):
             # Audio prompt AdaLN: always scalar (from the audio sigma)
             audio_prompt_emb, _ = self.audio_prompt_adaln_single(audio_t_emb)
 
-        # RoPE frequencies (per-head, using reference log-spaced grid)
+        # RoPE frequencies (per-head, using reference log-spaced grid). A sampler passes the same
+        # positions arrays to every forward of a stage, so the tables are reused from the last
+        # forward when the positions are the very same array (exact: same inputs, same tables).
+        rope_cache: dict = {}
         video_rope_freqs = None
         audio_rope_freqs = None
         if video_positions is not None:
-            video_rope_freqs = self._compute_rope_freqs(
+            video_rope_freqs = self._rope_freqs_cached(
+                rope_cache,
                 video_positions,
+                False,
                 self.config.video_num_heads,
                 self.config.video_head_dim,
             )
         if audio_latent is not None and audio_positions is not None:
-            audio_rope_freqs = self._compute_rope_freqs(
+            audio_rope_freqs = self._rope_freqs_cached(
+                rope_cache,
                 audio_positions,
+                False,
                 self.config.audio_num_heads,
                 self.config.audio_head_dim,
                 max_pos_override=list(self.config.audio_positional_embedding_max_pos),
@@ -974,19 +1053,56 @@ class LTXModel(nn.Module):
             self.config.audio_positional_embedding_max_pos[0],
         )
         if audio_latent is not None and video_positions is not None:
-            video_cross_rope_freqs = self._compute_rope_freqs(
-                video_positions[:, :, 0:1],  # temporal dimension only
+            video_cross_rope_freqs = self._rope_freqs_cached(
+                rope_cache,
+                video_positions,
+                True,  # temporal dimension only
                 self.config.av_cross_num_heads,
                 self.config.av_cross_head_dim,
                 max_pos_override=[cross_pe_max_pos],
             )
         if audio_latent is not None and audio_positions is not None:
-            audio_cross_rope_freqs = self._compute_rope_freqs(
-                audio_positions[:, :, 0:1],  # temporal dimension only
+            audio_cross_rope_freqs = self._rope_freqs_cached(
+                rope_cache,
+                audio_positions,
+                True,  # temporal dimension only
                 self.config.av_cross_num_heads,
                 self.config.av_cross_head_dim,
                 max_pos_override=[cross_pe_max_pos],
             )
+        # Keep only this forward's tables: memory stays at one forward's worth.
+        object.__setattr__(self, "_rope_cache", rope_cache)
+
+        # Self-attention masks arrive as [0, 1] attention weights (conditioning/mask_utils.py:
+        # 1 = attend, 0 = blocked, fractions = attention strength). The attention kernel takes an
+        # additive bias: convert them to log space once per forward, as upstream
+        # TransformerArgsPreprocessor._prepare_self_attention_mask does.
+        if video_attention_mask is not None:
+            video_attention_mask = self_attention_bias(video_attention_mask)
+        if audio_attention_mask is not None:
+            audio_attention_mask = self_attention_bias(audio_attention_mask)
+
+        # Additive masks: clamp + cast to the compute dtype once per forward rather than in
+        # every block's attention (Attention passes a mask already in its dtype through).
+        if self._compute_dtype is not None:
+            cd = self._compute_dtype
+            video_attention_mask = (
+                None if video_attention_mask is None else cast_attention_mask(cd, video_attention_mask)
+            )
+            audio_attention_mask = (
+                None if audio_attention_mask is None else cast_attention_mask(cd, audio_attention_mask)
+            )
+            if video_cross_attention_mask is not None:
+                video_cross_attention_mask = cast_attention_mask(cd, video_cross_attention_mask)
+            if audio_cross_attention_mask is not None:
+                audio_cross_attention_mask = cast_attention_mask(cd, audio_cross_attention_mask)
+
+        if text_kv_cache is not None and (
+            block_provider is not None
+            or self.gradient_checkpointing
+            or not text_kv_cache.usable_for(*raw_text_contexts, self._compute_dtype)
+        ):
+            text_kv_cache = None
 
         # --- Block stack (optionally overridden) ---
         block_input_v = video_hidden
@@ -996,7 +1112,14 @@ class LTXModel(nn.Module):
             video_hidden, audio_hidden = block_stack_override(video_hidden, audio_hidden)
         else:
             num_layers = self.config.num_layers if block_provider is not None else len(self.transformer_blocks)
-            for block_idx in range(num_layers):
+            first_block = 0
+            if resume_prefix is not None:
+                first_block = resume_prefix.index
+                video_hidden, audio_hidden = resume_prefix.video, resume_prefix.audio
+            for block_idx in range(first_block, num_layers):
+                if capture_prefix is not None and block_idx == capture_prefix.index:
+                    capture_prefix.video, capture_prefix.audio = video_hidden, audio_hidden
+                    capture_prefix.captured = True
                 block = block_provider(block_idx) if block_provider is not None else self.transformer_blocks[block_idx]
 
                 if self.gradient_checkpointing:
@@ -1068,6 +1191,7 @@ class LTXModel(nn.Module):
                     perturbations=perturbations,
                     block_idx=block_idx,
                     nag=nag,
+                    text_kv_cache=text_kv_cache,
                 )
                 if block_provider is not None:
                     # Streaming: force MLX graph materialization between
@@ -1137,6 +1261,41 @@ class LTXModel(nn.Module):
         x = mx.fast.layer_norm(x, weight=None, bias=None, eps=self.config.norm_eps)
         x = x * (1.0 + scale) + shift
         return proj(x)
+
+    def _rope_freqs_cached(
+        self,
+        new_cache: dict,
+        positions: mx.array,
+        temporal_only: bool,
+        num_heads: int,
+        head_dim: int,
+        max_pos_override: list[int] | None = None,
+    ) -> tuple:
+        """:meth:`_compute_rope_freqs`, reused from the previous forward for the same positions array.
+
+        The key holds ``id(positions)``; the entry keeps a reference to ``positions`` and a hit
+        requires the very same object (``is``), so a recycled id can never match. The entry is
+        copied into ``new_cache``, which replaces the model's cache at the end of the prelude.
+        """
+        key = (
+            id(positions),
+            temporal_only,
+            num_heads,
+            head_dim,
+            None if max_pos_override is None else tuple(max_pos_override),
+        )
+        hit = self._rope_cache.get(key)
+        if hit is not None and hit[0] is positions:
+            freqs = hit[1]
+        else:
+            freqs = self._compute_rope_freqs(
+                positions[:, :, 0:1] if temporal_only else positions,
+                num_heads,
+                head_dim,
+                max_pos_override=max_pos_override,
+            )
+        new_cache[key] = (positions, freqs)
+        return freqs
 
     def _compute_rope_freqs(
         self,

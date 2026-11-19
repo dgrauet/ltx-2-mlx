@@ -478,15 +478,19 @@ class A2VidPipelineTwoStage(TI2VidTwoStagesPipeline):
         )
 
         self._pre_denoise_flush(video_state_2, audio_state_2)
-        output_2 = denoise_loop(
-            model=x0_model,
-            video_state=video_state_2,
-            audio_state=audio_state_2,
-            video_text_embeds=video_embeds,
-            audio_text_embeds=audio_embeds,
-            sigmas=sigmas_2,
-            on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
-        )
+        sparse = self._start_stage2_sparse_attention(sigmas_2)
+        try:
+            output_2 = denoise_loop(
+                model=x0_model,
+                video_state=video_state_2,
+                audio_state=audio_state_2,
+                video_text_embeds=video_embeds,
+                audio_text_embeds=audio_embeds,
+                sigmas=sigmas_2,
+                on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
+            )
+        finally:
+            self._stop_stage2_sparse_attention(sparse)
         if self.low_memory:
             aggressive_cleanup()
 
