@@ -1755,6 +1755,26 @@ Measured on an M1 Max 64 GB, 2.5 q8 pack, `--distilled` I2V 576×1024×241, seed
 | `bfloat16` | 136 s | 698 s | rel. L2 6.4e-2, cos 0.99796 |
 | `float16` | 107 s | 563 s | rel. L2 1.7e-2, cos 0.99985 |
 
+Float16-default quality gate (M5 Pro 48 GB, 512×768×49, seed 5, the commands' default steps and guidance, one
+render per dtype; prompt "a woman in a kitchen smiles at the camera and says good morning, static camera"; retake /
+extend / ic-lora sources: a 2.5 `--distilled` render of that prompt):
+
+| run | wall-clock float32 → float16 | PSNR / SSIM float16 vs float32 | verdict |
+|---|---:|---:|---|
+| `--two-stage` 2.5 | 224 → 176 s (−21 %) | 20.8 dB / 0.73 | another sample, clean |
+| `--two-stage` 2.3 | 239 → 185 s (−22 %) | 21.6 dB / 0.69 | another sample, clean |
+| `--two-stages-hq` 2.5 | 309 → 246 s (−20 %) | 20.9 dB / 0.78 | another sample (same framing), clean |
+| `a2v` 2.5 (speech) | 257 → 197 s (−24 %) | 20.8 dB / 0.77 | another sample, clean |
+| `retake` 2.5 (latent frames 2-4) | 777 → 561 s (−28 %) | 43.2 dB / 0.98 | same render |
+| `extend` 2.5 (+2 latent frames) | 1424 → 810 s (−43 %) | 43.3 dB / 0.98 | same render |
+
+The 30-step CFG paths diverge into a different sample at the same seed (the gap compounds over the guided steps);
+neither dtype shows artifacts, banding, burn or flicker, and brightness, contrast, saturation, sharpness and
+frame-to-frame motion stay within the spread between two seeds (no systematic shift: sharpness lower on two of the
+four, higher on one). `retake` / `extend` keep most of the clip and differ by ~43 dB. `ic-lora` could not be gated: the
+only local 2.5 IC-LoRA (Pixel-Spatial-Upscaler, a stage-2 detailing LoRA) gives a grid pattern in both dtypes and on
+`main` in float32, so that failure is not float16's. `lipdub` was not run (no Dub-It LoRA locally). One seed per arm.
+
 Float16 margin: on every forward of two full renders (I2V 576×1024×121 and a flat-sky T2V
 1024×576×97, all 11 forwards each) the largest value inside any attention/FF op was 2,512, against
 float16's 65,504; the residual stream reaches ~14,000, which is why it stays float32. As a guard,
