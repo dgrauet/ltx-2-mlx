@@ -264,6 +264,7 @@ speech unchanged, while a negative naming distorted hands did not fix motion-blu
 | Flag or variable | Default | Effect | Applies to |
 |---|---|---|---|
 | `--low-ram` | off | Stream transformer blocks from mmap'd safetensors. Cuts transformer peak Metal memory by about 75%, at roughly 5% more time per step. Targets 16 GB Macs at q8 and 32 GB Macs at bf16. [Details](../CLAUDE.md#block-streaming---low-ram). | every generating pipeline |
+| `--compute-dtype` | `LTX2_COMPUTE_DTYPE`, else `float16` | `float16`, `bfloat16` or `float32`: the dtype of the DiT's attention and feed-forward (the residual stream and AdaLN modulation stay float32). Overrides `LTX2_COMPUTE_DTYPE`. `float32` is the pre-0.19 path (slower), `bfloat16` the precision upstream PyTorch uses. [Details](../CLAUDE.md#dit-compute-dtype-ltx2_compute_dtype). | every generating pipeline |
 | `--tile-frames N` | 1 | Split the video tokens into N temporal tiles, denoised independently and blended back. Caps the quadratic attention activation. [Details](../CLAUDE.md#modality-tiling---tile-frames-n---tile-spatial-m). | `generate` modes |
 | `--tile-spatial M` | 1 | Split into M × M spatial tiles. Total tiles are `tile-frames × M²`. | same as above |
 | `--tile-overlap K` | 2 | Token-grid overlap between adjacent tiles. More overlap means a smoother blend and more redundant compute. | when tiling is active |
@@ -344,6 +345,7 @@ are utilities and have no column.
 | `--temporal-upscalings` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--temporal-upsampler-path` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--low-ram` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `--compute-dtype` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `--tile-frames` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--tile-spatial` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `--tile-overlap` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import enum
+import os
 import sys
 import time
 from pathlib import Path
@@ -373,6 +374,21 @@ def _add_generation_args(
             "transformer-distilled.safetensors at the stage 1->2 transition; "
             "custom strengths trigger bind-time LoRA fusion (slower but "
             "supports any strength)."
+        ),
+    )
+    _add_compute_dtype_arg(parser)
+
+
+def _add_compute_dtype_arg(parser: argparse.ArgumentParser) -> None:
+    """``--compute-dtype``: the CLI form of ``LTX2_COMPUTE_DTYPE`` (wins over the variable when given)."""
+    parser.add_argument(
+        "--compute-dtype",
+        choices=("float16", "bfloat16", "float32"),
+        default=None,
+        help=(
+            "Dtype the DiT's attention and feed-forward run in (the residual stream and AdaLN stay "
+            "float32). Default: LTX2_COMPUTE_DTYPE, else float16. float32 is the pre-0.19 path; "
+            "bfloat16 is upstream's precision."
         ),
     )
 
@@ -904,6 +920,7 @@ examples:
         action="store_true",
         help="Stream transformer blocks from mmap'd safetensors (see generate --low-ram)",
     )
+    _add_compute_dtype_arg(ret)
 
     # --- extend ---
     ext = sub.add_parser(
@@ -920,6 +937,7 @@ examples:
         action="store_true",
         help="Stream transformer blocks from mmap'd safetensors (see generate --low-ram)",
     )
+    _add_compute_dtype_arg(ext)
     ext.add_argument(
         "--distilled",
         action="store_true",
@@ -1074,6 +1092,7 @@ examples:
         action="store_true",
         help="Stream transformer blocks (same semantics as ic-lora --low-ram).",
     )
+    _add_compute_dtype_arg(ld)
     ld.add_argument(
         "--reference-video",
         required=True,
@@ -1190,6 +1209,7 @@ examples:
         action="store_true",
         help="Stream transformer blocks from mmap'd safetensors (see `generate --help`).",
     )
+    _add_compute_dtype_arg(hdr)
 
     # --- enhance ---
     enh = sub.add_parser("enhance", help="Enhance a prompt using Gemma (no video generation)")
@@ -1280,6 +1300,10 @@ def main() -> None:
     if args.command is None:
         parser.print_help()
         sys.exit(1)
+
+    # --compute-dtype overrides LTX2_COMPUTE_DTYPE, which every pipeline reads when it loads a DiT.
+    if getattr(args, "compute_dtype", None):
+        os.environ["LTX2_COMPUTE_DTYPE"] = args.compute_dtype
 
     # Resolve seed=-1 to a random value
     if hasattr(args, "seed") and args.seed < 0:
