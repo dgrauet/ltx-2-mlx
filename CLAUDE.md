@@ -1767,13 +1767,18 @@ extend / ic-lora sources: a 2.5 `--distilled` render of that prompt):
 | `a2v` 2.5 (speech) | 257 → 197 s (−24 %) | 20.8 dB / 0.77 | another sample, clean |
 | `retake` 2.5 (latent frames 2-4) | 777 → 561 s (−28 %) | 43.2 dB / 0.98 | same render |
 | `extend` 2.5 (+2 latent frames) | 1424 → 810 s (−43 %) | 43.3 dB / 0.98 | same render |
+| `ic-lora` 2.3, Union-Control, canny control | 83 → 61 s (−27 %) | 24.8 dB / 0.87 | same layout and person, clean; control edges matched 0.34 / 0.36 |
+| same, `--conditioning-strength 0.7` (self-attention mask path) | 83 → 71 s (−15 %) | 23.4 dB / 0.83 | same layout, clean; control edges matched 0.35 / 0.35 |
 
 The 30-step CFG paths diverge into a different sample at the same seed (the gap compounds over the guided steps);
 neither dtype shows artifacts, banding, burn or flicker, and brightness, contrast, saturation, sharpness and
 frame-to-frame motion stay within the spread between two seeds (no systematic shift: sharpness lower on two of the
-four, higher on one). `retake` / `extend` keep most of the clip and differ by ~43 dB. `ic-lora` could not be gated: the
-only local 2.5 IC-LoRA (Pixel-Spatial-Upscaler, a stage-2 detailing LoRA) gives a grid pattern in both dtypes and on
-`main` in float32, so that failure is not float16's. `lipdub` was not run (no Dub-It LoRA locally). One seed per arm.
+four, higher on one). `retake` / `extend` keep most of the clip and differ by ~43 dB. `ic-lora` was gated on 2.3 (no 2.5 Union-Control
+exists) with a grayscale canny control extracted from the `--two-stage` 2.3 render; "control edges matched" is the share
+of control edge pixels with a render edge within 2 px (the source render itself scores 0.99), and float16 keeps it.
+The 2.5 Pixel-Spatial-Upscaler LoRA (a stage-2 detailing LoRA, used by `--dfr`) gives a grid pattern as an `ic-lora`
+task LoRA in both dtypes and on `main` in float32: not float16's. `lipdub` was not run (no Dub-It LoRA locally). One
+seed per arm.
 
 Float16 margin: on every forward of two full renders (I2V 576×1024×121 and a flat-sky T2V
 1024×576×97, all 11 forwards each) the largest value inside any attention/FF op was 2,512, against
