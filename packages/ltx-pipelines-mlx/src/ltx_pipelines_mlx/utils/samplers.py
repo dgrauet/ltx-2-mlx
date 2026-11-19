@@ -5,6 +5,7 @@ Ported from ltx-pipelines denoising loop.
 
 from __future__ import annotations
 
+import math
 import os as _os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -794,6 +795,27 @@ def _sde_step(
     denoised_next = sample - sigma * eps_next
     x_noised = alpha_ratio * (denoised_next + sigma_down * eps_next) + sigma_up * noise
     return x_noised.astype(mx.bfloat16)
+
+
+def res2s_evaluation_sigmas(sigmas: list[float]) -> list[tuple[float, int]]:
+    """``(sigma, step)`` of every model evaluation :func:`res2s_denoise_loop` makes on ``sigmas``.
+
+    Each full step ``i`` evaluates at ``sigmas[i]`` and at the substep ``sqrt(sigmas[i] *
+    sigmas[i + 1])``; a schedule ending at 0 has its 0 replaced by 0.0011 for the step sizes and
+    ends with one more evaluation at that sigma (counted as the last step). Mirrors the loop, so
+    per-step settings keyed on the sigma (Sol's tau) reach both evaluations of a step.
+    """
+    n_full_steps = len(sigmas) - 1
+    table = list(sigmas)
+    if table[-1] == 0:
+        table = table[:-1] + [0.0011, 0.0]
+    out: list[tuple[float, int]] = []
+    for i in range(n_full_steps):
+        out.append((table[i], i))
+        out.append((math.sqrt(table[i] * table[i + 1]), i))
+    if sigmas[-1] == 0:
+        out.append((table[n_full_steps], n_full_steps - 1))
+    return out
 
 
 def res2s_denoise_loop(

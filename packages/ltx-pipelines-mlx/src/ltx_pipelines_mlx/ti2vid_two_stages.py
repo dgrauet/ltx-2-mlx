@@ -12,6 +12,7 @@ Ported from ltx-pipelines/src/ltx_pipelines/ti2vid_two_stages.py
 from __future__ import annotations
 
 import inspect
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from ltx_core_mlx.loader.fuse_loras import apply_loras
 from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
 from ltx_core_mlx.loader.sd_ops import LTXV_LORA_COMFY_RENAMING_MAP
 from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
+from ltx_core_mlx.model.transformer.sparse_attention import SparseAttentionState
 from ltx_core_mlx.model.upsampler import LatentUpsampler
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
@@ -218,6 +220,46 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         # Fused scales keep their pre-fusion dtype (#186); re-apply the compute dtype anyway as a
         # safety net so stage 2 can never run float32 scales.
         self._recast_after_inplace_fusion(dit)
+
+    def _start_stage2_sparse_attention(
+        self, sigmas: list[float], evaluations: list[tuple[float, int]] | None = None
+    ) -> SparseAttentionState | None:
+        """Turn on block-sparse video self-attention for stage 2 when ``LTX2_SOL_TAU`` asks for it.
+
+        One tau per stage-2 step, matched to the step's sigma (the last tau repeats); the terminal sigma 0 is never
+        evaluated. Covers every pipeline whose stage 2 runs here: ``generate --distilled`` / ``--dfr``,
+        ``a2v --distilled`` and ``extend --distilled`` (``DistilledPipeline._stage2``), and the dev two-stage stage 2
+        of ``--two-stage``, ``--two-stages-hq`` and ``a2v``.
+
+        Args:
+            sigmas: The stage-2 sigma table, as the sampler gets it.
+            evaluations: ``(sigma, step)`` of every model evaluation when a sampler evaluates more than once per
+                step (res_2s: :func:`~ltx_pipelines_mlx.utils.samplers.res2s_evaluation_sigmas`); each gets its
+                step's tau. ``None``: one evaluation per step at ``sigmas[:-1]``.
+        """
+        if self.sol_taus is None or self.dit is None:
+            return None
+        if evaluations is None:
+            state = SparseAttentionState(taus=self.sol_taus, sigmas=tuple(sigmas[:-1]))
+        else:
+            last = len(self.sol_taus) - 1
+            state = SparseAttentionState(
+                taus=tuple(self.sol_taus[min(step, last)] for _, step in evaluations),
+                sigmas=tuple(sigma for sigma, _ in evaluations),
+            )
+        self.dit.set_sparse_attention(state)
+        if self.verbose:
+            steps = ", ".join(f"sigma {s:g}: tau {state.tau_for_sigma(s):g}" for s in state.sigmas)
+            print(f"[sparse-attention] stage 2 video self-attention, blocks 1+: {steps}", file=sys.stderr, flush=True)
+        return state
+
+    def _stop_stage2_sparse_attention(self, state: SparseAttentionState | None) -> None:
+        """Back to dense attention after stage 2."""
+        if state is None or self.dit is None:
+            return
+        self.dit.set_sparse_attention(None)
+        if self.verbose:
+            print(f"[sparse-attention] {state.calls} attention calls ran sparse", file=sys.stderr, flush=True)
 
     def _swap_to_distilled_streamer(self) -> None:
         """Switch the streamer to a distilled-LoRA-fused dev model.
@@ -722,17 +764,21 @@ class TI2VidTwoStagesPipeline(BasePipeline):
             stage2_x0_model = X0Model(TiledLTXModel(self.dit, tiler_2))
 
         self._pre_denoise_flush(video_state_2, audio_state_2)
-        output_2 = denoise_loop(
-            model=stage2_x0_model,
-            video_state=video_state_2,
-            audio_state=audio_state_2,
-            video_text_embeds=video_embeds,
-            audio_text_embeds=audio_embeds,
-            sigmas=sigmas_2,
-            video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
-            audio_cross_attention_mask=relay_audio_mask(F, audio_state_2),
-            on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
-        )
+        sparse = self._start_stage2_sparse_attention(sigmas_2)
+        try:
+            output_2 = denoise_loop(
+                model=stage2_x0_model,
+                video_state=video_state_2,
+                audio_state=audio_state_2,
+                video_text_embeds=video_embeds,
+                audio_text_embeds=audio_embeds,
+                sigmas=sigmas_2,
+                video_cross_attention_mask=relay_mask(F, H_full, W_full, video_state_2.latent.shape[1]),
+                audio_cross_attention_mask=relay_audio_mask(F, audio_state_2),
+                on_step=self._stepwise_hook(F, H_full, W_full, stage=2),
+            )
+        finally:
+            self._stop_stage2_sparse_attention(sparse)
         if self.low_memory:
             aggressive_cleanup()
 

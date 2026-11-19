@@ -21,7 +21,6 @@ For dev model + CFG quality, see :class:`TI2VidTwoStagesPipeline` /
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -36,7 +35,6 @@ from ltx_core_mlx.conditioning.types.keyframe_slots import extract_generated_key
 from ltx_core_mlx.conditioning.types.latent_cond import LatentState
 from ltx_core_mlx.guidance.nag import NAGConfig, NAGGuidance
 from ltx_core_mlx.model.transformer.model import X0Model
-from ltx_core_mlx.model.transformer.sparse_attention import SparseAttentionState
 from ltx_core_mlx.model.upsampler import LatentUpsampler
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import (
@@ -316,30 +314,6 @@ class DistilledPipeline(TI2VidTwoStagesPipeline):
             on_step=on_step,
             **nag_kwargs,
         )
-
-    def _start_stage2_sparse_attention(self, sigmas: list[float]) -> SparseAttentionState | None:
-        """Turn on block-sparse video self-attention for stage 2 when ``LTX2_SOL_TAU`` asks for it.
-
-        One tau per stage-2 step, matched to the step's sigma (the last tau repeats); the terminal sigma 0 is never
-        evaluated. Covers every pipeline whose stage 2 is this one: ``generate --distilled`` / ``--dfr``,
-        ``a2v --distilled`` and ``extend --distilled``.
-        """
-        if self.sol_taus is None or self.dit is None:
-            return None
-        state = SparseAttentionState(taus=self.sol_taus, sigmas=tuple(sigmas[:-1]))
-        self.dit.set_sparse_attention(state)
-        if self.verbose:
-            steps = ", ".join(f"sigma {s:g}: tau {state.tau_for_sigma(s):g}" for s in state.sigmas)
-            print(f"[sparse-attention] stage 2 video self-attention, blocks 1+: {steps}", file=sys.stderr, flush=True)
-        return state
-
-    def _stop_stage2_sparse_attention(self, state: SparseAttentionState | None) -> None:
-        """Back to dense attention after stage 2."""
-        if state is None or self.dit is None:
-            return
-        self.dit.set_sparse_attention(None)
-        if self.verbose:
-            print(f"[sparse-attention] {state.calls} attention calls ran sparse", file=sys.stderr, flush=True)
 
     def _stage1_video_conditionings(self, spatial_dims: tuple[int, int, int]) -> list:
         """Extra stage-1 video conditionings, applied after the I2V anchors and the generated keyframe slots.

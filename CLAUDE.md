@@ -1854,8 +1854,14 @@ How it works (`model/transformer/sparse_attention.py`):
   perturbation, cross-attention, or fewer than 4096 tokens stay dense.
 - `DistilledPipeline._stage2` turns it on around the stage-2 loop and off afterwards (also on error), so it covers
   the stage 2 of every pipeline built on it: `generate --distilled`, `generate --dfr`, `a2v --distilled`, `a2v --dfr` and
-  `extend --distilled`. Stage 1, the DFR temporal rounds and spatial epilogue, and
-  the other pipelines (single-stage `retake --distilled` included) are untouched. Under `--low-ram` the streamed model attaches the state to whichever block is bound
+  `extend --distilled`. The dev two-stage stage 2 (distilled LoRA fused, no CFG) of `--two-stage`, `--two-stages-hq`
+  and `a2v` is switched the same way (`TI2VidTwoStagesPipeline._start_stage2_sparse_attention`, where the helpers now
+  live). On `--two-stages-hq` res_2s evaluates twice per step, the second time at the substep
+  `sqrt(sigma_i * sigma_i+1)`, and ends with an evaluation at 0.0011: the table lists every evaluation
+  (`res2s_evaluation_sigmas` in `utils/samplers.py`), each with its step's tau, so none falls back to dense. Tests:
+  `tests/test_sparse_attention_dev_stage2.py`. Not measured on the dev stage 2 yet (quality or speed). Stage 1, the DFR
+  temporal rounds and spatial epilogue, and the other pipelines (single-stage `retake --distilled` included) are
+  untouched. Under `--low-ram` the streamed model attaches the state to whichever block is bound
   and runs the eager shared block while it is on (the compiled block would replay the tau and routing of the step it
   was traced on).
 
