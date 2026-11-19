@@ -448,6 +448,9 @@ class StreamingLTXModel(nn.Module):
         callers (e.g. ``X0Model``) can read ``self.config`` etc.
     """
 
+    # Blocks run through block_provider (often the compiled block), which cannot carry a cache.
+    supports_text_kv_cache = False
+
     def __init__(
         self,
         model: nn.Module,

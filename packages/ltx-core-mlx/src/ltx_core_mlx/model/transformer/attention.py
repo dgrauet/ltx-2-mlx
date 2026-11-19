@@ -24,6 +24,40 @@ from ltx_core_mlx.model.transformer.rope import apply_rope_interleaved, apply_ro
 from ltx_core_mlx.model.transformer.sparse_attention import SparseAttentionState, sparse_self_attention
 
 
+class TextKVCache:
+    """Keys / values of the text cross-attentions, shared by the forwards of one denoising evaluation.
+
+    The guided loops run up to four forwards per evaluation (conditioned, unconditional, STG,
+    isolated modality) at the same sigma. Every one of them that attends to the same text
+    context computes the same text K/V in every block: same context, same per-step prompt
+    AdaLN modulation (it depends on the sigma only), same weights; the STG and modality
+    perturbations and the Prompt Relay masks act elsewhere. The first such forward stores
+    them here and the others reuse them.
+
+    A sampler creates one cache per evaluation (never across sigmas) and passes it to every
+    pass. ``LTXModel`` binds it to the first forward's text contexts and compute dtype, and
+    uses it only in forwards whose contexts are those very arrays (``is``) and whose compute
+    dtype matches; a pass with another context (the negative prompt) runs without it.
+    Entries are keyed by ``(block_idx, modality)``.
+    """
+
+    def __init__(self) -> None:
+        self.bound = False
+        self.video_context: mx.array | None = None
+        self.audio_context: mx.array | None = None
+        self.dtype: mx.Dtype | None = None
+        self.entries: dict = {}
+
+    def usable_for(self, video_context: mx.array | None, audio_context: mx.array | None, dtype) -> bool:
+        """Bind on first use; afterwards True only for the same context arrays and compute dtype."""
+        if not self.bound:
+            self.bound = True
+            self.video_context, self.audio_context, self.dtype = video_context, audio_context, dtype
+            return True
+        same_dtype = dtype is self.dtype or (dtype is not None and self.dtype is not None and dtype == self.dtype)
+        return video_context is self.video_context and audio_context is self.audio_context and same_dtype
+
+
 def cast_attention_mask(dtype: mx.Dtype, mask: mx.array) -> mx.array:
     """Clamp an additive attention mask to ``dtype``'s finite range and cast it (boolean masks unchanged).
 
@@ -137,6 +171,7 @@ class Attention(nn.Module):
         nag_scale: float = DEFAULT_NAG_SCALE,
         nag_alpha: float = DEFAULT_NAG_ALPHA,
         nag_tau: float = DEFAULT_NAG_TAU,
+        kv_cache: tuple[dict, object] | None = None,
     ) -> mx.array:
         """Forward pass.
 
@@ -156,6 +191,10 @@ class Attention(nn.Module):
             nag_scale: NAG extrapolation factor (used with ``nag_encoder_hidden_states``).
             nag_alpha: NAG blend with the positive output.
             nag_tau: NAG clip on the per-token L1-norm ratio.
+            kv_cache: Optional ``(store, key)`` for a cross-attention without RoPE: the
+                projected, normalised, head-split keys and values are read from
+                ``store[key]`` when present, else computed and stored there (see
+                :class:`TextKVCache`). Ignored for self-attention and when RoPE applies.
 
         Returns:
             Output of shape (B, N, out_dim).
@@ -171,18 +210,23 @@ class Attention(nn.Module):
                 nag_encoder_hidden_states = nag_encoder_hidden_states.astype(self.compute_dtype)
         kv_input = encoder_hidden_states if encoder_hidden_states is not None else x
 
-        q = self.to_q(x)
-        k = self.to_k(kv_input)
-        v = self.to_v(kv_input)
+        if kv_cache is not None and (encoder_hidden_states is None or (self.use_rope and rope_freqs is not None)):
+            kv_cache = None  # only a RoPE-free cross-attention has keys that do not depend on x
+        cached = kv_cache[0].get(kv_cache[1]) if kv_cache is not None else None
 
-        # QK normalization (over full inner_dim before reshaping)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-
-        # Reshape to (B, num_heads, seq_len, head_dim)
+        # QK normalization (over full inner_dim before reshaping), then
+        # reshape to (B, num_heads, seq_len, head_dim)
+        q = self.q_norm(self.to_q(x))
         q = q.reshape(B, -1, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        k = k.reshape(B, -1, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        v = v.reshape(B, -1, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        if cached is not None:
+            k, v = cached
+        else:
+            k = self.k_norm(self.to_k(kv_input))
+            v = self.to_v(kv_input)
+            k = k.reshape(B, -1, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+            v = v.reshape(B, -1, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+            if kv_cache is not None:
+                kv_cache[0][kv_cache[1]] = (k, v)
 
         # Apply RoPE -- freqs are (cos, sin, rope_type) tuple
         if self.use_rope and rope_freqs is not None:

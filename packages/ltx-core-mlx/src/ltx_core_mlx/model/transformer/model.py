@@ -29,7 +29,7 @@ import numpy as _np
 from ltx_core_mlx.guidance.nag import NAGGuidance
 from ltx_core_mlx.guidance.perturbations import BatchedPerturbationConfig
 from ltx_core_mlx.model.transformer.adaln import AdaLayerNormSingle, PerTokenAdaLNParams
-from ltx_core_mlx.model.transformer.attention import cast_attention_mask
+from ltx_core_mlx.model.transformer.attention import TextKVCache, cast_attention_mask
 from ltx_core_mlx.model.transformer.sparse_attention import SparseAttentionState
 from ltx_core_mlx.model.transformer.timestep_embedding import get_timestep_embedding
 from ltx_core_mlx.model.transformer.transformer import BasicAVTransformerBlock
@@ -546,6 +546,8 @@ class LTXModel(nn.Module):
     # ``capture_prefix`` / ``resume_prefix`` are honoured (see BlockPrefix). Wrappers that
     # split a forward into several inner forwards (modality tiling) set this to False.
     supports_block_prefix: bool = True
+    # ``text_kv_cache`` is honoured (see TextKVCache); False on wrappers that cannot pass it on.
+    supports_text_kv_cache: bool = True
 
     def __init__(self, config: LTXModelConfig | None = None):
         super().__init__()
@@ -828,6 +830,7 @@ class LTXModel(nn.Module):
         nag: NAGGuidance | None = None,
         capture_prefix: BlockPrefix | None = None,
         resume_prefix: BlockPrefix | None = None,
+        text_kv_cache: TextKVCache | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Forward pass.
 
@@ -888,6 +891,12 @@ class LTXModel(nn.Module):
             resume_prefix: Optional, already captured :class:`BlockPrefix`; the block loop
                 starts at its index from its stored hidden states. Exclusive with ``tap``,
                 ``block_stack_override`` and gradient checkpointing.
+            text_kv_cache: Optional :class:`TextKVCache` shared by the forwards of one
+                denoising evaluation. Used only when this forward's text contexts are the
+                ones the cache was bound to and the compute dtype matches (so the overflow
+                guard's recompute runs without it); ignored with a ``block_provider``
+                (``--low-ram``: the compiled block cannot carry it) and under gradient
+                checkpointing.
 
         Returns:
             Tuple of (video_velocity, audio_velocity), same shapes as inputs.
@@ -899,6 +908,8 @@ class LTXModel(nn.Module):
                 raise ValueError("resume_prefix cannot be combined with tap, block_stack_override or checkpointing")
         # Arguments kept for the overflow guard's recompute (compute dtype only).
         call_args = {k: v for k, v in locals().items() if k != "self"} if self._compute_dtype is not None else None
+        # The text cache matches on the caller's context arrays (the prelude casts them).
+        raw_text_contexts = (video_text_embeds, audio_text_embeds)
         if self._sparse_attention is not None:
             # Before the bfloat16 cast below: the tau is picked by matching this sigma against the step table.
             self._sparse_attention.prepare(timestep, video_positions)
@@ -1059,6 +1070,13 @@ class LTXModel(nn.Module):
             if audio_cross_attention_mask is not None:
                 audio_cross_attention_mask = cast_attention_mask(cd, audio_cross_attention_mask)
 
+        if text_kv_cache is not None and (
+            block_provider is not None
+            or self.gradient_checkpointing
+            or not text_kv_cache.usable_for(*raw_text_contexts, self._compute_dtype)
+        ):
+            text_kv_cache = None
+
         # --- Block stack (optionally overridden) ---
         block_input_v = video_hidden
         block_input_a = audio_hidden
@@ -1146,6 +1164,7 @@ class LTXModel(nn.Module):
                     perturbations=perturbations,
                     block_idx=block_idx,
                     nag=nag,
+                    text_kv_cache=text_kv_cache,
                 )
                 if block_provider is not None:
                     # Streaming: force MLX graph materialization between

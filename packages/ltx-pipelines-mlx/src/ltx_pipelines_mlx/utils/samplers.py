@@ -23,6 +23,7 @@ from ltx_core_mlx.guidance.perturbations import (
     PerturbationConfig,
     PerturbationType,
 )
+from ltx_core_mlx.model.transformer.attention import TextKVCache
 from ltx_core_mlx.model.transformer.model import BlockPrefix, X0Model
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS
@@ -186,6 +187,24 @@ def stg_block_prefix(model: X0Model, perturbations: list[Perturbation]) -> Block
     if first is None or first <= 0:
         return None
     return BlockPrefix(first)
+
+
+def text_kv_cache_for(model: X0Model) -> TextKVCache | None:
+    """A fresh :class:`TextKVCache` for the guidance passes of one evaluation, or None.
+
+    The conditioned, STG and isolated-modality passes (and an unconditional pass without a
+    negative prompt) attend to the same text context at the same sigma, so they share the
+    text cross-attention keys and values: the first pass computes them, the others reuse
+    them (same values: the outputs are bit-identical). It costs the K/V of every block for
+    the evaluation's duration (2.5 pack, 1,024 text tokens: ~1.2 GB in float16, ~2.4 GB in
+    float32). None when ``LTX2_TEXT_KV_CACHE=0`` or the model cannot take it (modality
+    tiling, ``--low-ram``).
+    """
+    if _os.environ.get("LTX2_TEXT_KV_CACHE", "1").strip() == "0":
+        return None
+    if not getattr(getattr(model, "model", model), "supports_text_kv_cache", False):
+        return None
+    return TextKVCache()
 
 
 def _step_timed(estimator: StepEstimator, step_idx: int, video_x: mx.array, audio_x: mx.array | None) -> None:
@@ -958,6 +977,9 @@ def res2s_denoise_loop(
             # residual (and a TeaCache skip replaces the block loop).
             ptb_perturbations = _stg_perturbations(video_guider, audio_guider)
             stg_prefix = stg_block_prefix(model, ptb_perturbations) if (tap is None and teacache is None) else None
+            text_kv = text_kv_cache_for(model)
+            if text_kv is not None:
+                base_kwargs = {**base_kwargs, "text_kv_cache": text_kv}
 
             # 1. Conditioned prediction
             cond_kw = {**base_kwargs, "video_text_embeds": video_text_embeds, "audio_text_embeds": audio_text_embeds}
@@ -1401,6 +1423,9 @@ def guided_denoise_loop(
         # block residual (and a TeaCache skip replaces the block loop).
         ptb_perturbations = _stg_perturbations(video_guider, audio_guider)
         stg_prefix = stg_block_prefix(model, ptb_perturbations) if (tap is None and teacache is None) else None
+        text_kv = text_kv_cache_for(model)
+        if text_kv is not None:
+            base_kwargs = {**base_kwargs, "text_kv_cache": text_kv}
 
         # --- 1. Conditioned prediction (positive context) ---
         cond_kwargs = {

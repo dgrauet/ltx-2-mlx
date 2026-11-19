@@ -24,7 +24,7 @@ import mlx.nn as nn
 from ltx_core_mlx.guidance.nag import NAGGuidance
 from ltx_core_mlx.guidance.perturbations import BatchedPerturbationConfig, PerturbationType
 from ltx_core_mlx.model.transformer.adaln import PerTokenAdaLNParams
-from ltx_core_mlx.model.transformer.attention import Attention
+from ltx_core_mlx.model.transformer.attention import Attention, TextKVCache
 from ltx_core_mlx.model.transformer.feed_forward import FeedForward
 
 _FLOAT_DTYPES = (mx.float16, mx.bfloat16, mx.float32)
@@ -306,6 +306,7 @@ class BasicAVTransformerBlock(nn.Module):
         perturbations: BatchedPerturbationConfig | None = None,
         block_idx: int = 0,
         nag: NAGGuidance | None = None,
+        text_kv_cache: TextKVCache | None = None,
     ) -> tuple[mx.array, mx.array | None]:
         """Forward pass for the joint audio+video block, or video-only when ``audio_hidden`` is None.
 
@@ -340,6 +341,9 @@ class BasicAVTransformerBlock(nn.Module):
             nag: Optional Normalized Attention Guidance input. Its negative contexts get the
                 same per-step prompt AdaLN modulation as the positive ones and are handed to
                 ``attn2`` (and ``audio_attn2`` when ``nag.audio_text_embeds`` is set).
+            text_kv_cache: Optional :class:`TextKVCache` already validated by ``LTXModel``
+                for this forward's text contexts: ``attn2`` / ``audio_attn2`` read or store
+                their keys and values under ``(block_idx, "video" / "audio")``.
 
         Returns:
             Tuple of (video_hidden, audio_hidden); audio_hidden is None on the video-only path.
@@ -434,6 +438,7 @@ class BasicAVTransformerBlock(nn.Module):
                     video_normed,
                     encoder_hidden_states=text_scaled,
                     attention_mask=video_cross_attention_mask,
+                    kv_cache=None if text_kv_cache is None else (text_kv_cache.entries, (block_idx, "video")),
                     **nag_kwargs,
                 )
                 * v_gate_ca
@@ -455,6 +460,7 @@ class BasicAVTransformerBlock(nn.Module):
                     audio_normed,
                     encoder_hidden_states=text_scaled,
                     attention_mask=audio_cross_attention_mask,
+                    kv_cache=None if text_kv_cache is None else (text_kv_cache.entries, (block_idx, "audio")),
                     **nag_kwargs,
                 )
                 * a_gate_ca

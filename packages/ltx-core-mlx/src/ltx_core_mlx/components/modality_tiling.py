@@ -417,6 +417,7 @@ class TiledLTXModel:
 
     # Each tile is its own inner forward: a captured block prefix would hold the last tile only.
     supports_block_prefix = False
+    supports_text_kv_cache = False
 
     def __init__(self, inner, tiler: VideoModalityTiler, normalize_positions: bool = False) -> None:
         self._inner = inner
