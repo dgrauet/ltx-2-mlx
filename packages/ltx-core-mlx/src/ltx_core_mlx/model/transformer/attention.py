@@ -215,18 +215,23 @@ class Attention(nn.Module):
             out_neg = mx.fast.scaled_dot_product_attention(q, k_neg, v_neg, scale=self.scale)
             out = normalized_attention_guidance(out, out_neg, nag_scale, nag_alpha, nag_tau, axis=(1, 3))
 
+        # Back to token-major (B, N, num_heads, head_dim) first: the transpose is a view, so the
+        # blend / gate below write their result straight in the layout the output projection
+        # reads and the final reshape is free (gating in head-major order and transposing
+        # afterwards wrote one more full copy). Same elementwise arithmetic either way.
+        out = out.transpose(0, 2, 1, 3)
+
         # STG perturbation: blend attn output with value projection
         # Reference: out = attn_out * mask + v * (1 - mask)
         if perturbation_mask is not None:
             # perturbation_mask: (B, 1, 1, 1) — 1.0=keep attn, 0.0=skip to values
-            out = out * perturbation_mask + v * (1.0 - perturbation_mask)
+            out = out * perturbation_mask + v.transpose(0, 2, 1, 3) * (1.0 - perturbation_mask)
 
         # Per-head gating: gate = 2 * sigmoid(logits)
         if self.to_gate_logits is not None:
             gate_logits = self.to_gate_logits(x)  # (B, N, num_heads)
             gate = 2.0 * mx.sigmoid(gate_logits)
-            out = out * gate.transpose(0, 2, 1)[:, :, :, None]  # (B, heads, N, 1)
+            out = out * gate[:, :, :, None]  # (B, N, heads, 1)
 
-        # Reshape back: (B, num_heads, N, head_dim) -> (B, N, inner_dim)
-        out = out.transpose(0, 2, 1, 3).reshape(B, -1, self.num_heads * self.head_dim)
+        out = out.reshape(B, -1, self.num_heads * self.head_dim)
         return self.to_out(out)
