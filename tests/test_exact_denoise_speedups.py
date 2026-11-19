@@ -219,3 +219,78 @@ def test_fused_elementwise_helpers_are_bit_identical(monkeypatch, compute_dtype,
     monkeypatch.setattr(block_mod, "_gated_residual", block_mod._gated_residual_eager)
     eager = run()
     assert all(mx.array_equal(f, e) for f, e in zip(fused, eager, strict=True))
+
+
+# ---------------------------------------------------------------------------
+# Per-token timestep embedding + AdaLN row grouping reused across modules and passes
+# ---------------------------------------------------------------------------
+
+
+def _per_token_kwargs(model: LTXModel) -> dict:
+    """Inputs with per-token video and audio timesteps (first frame / first tokens preserved)."""
+    kwargs = _inputs(model)
+    n = kwargs["video_latent"].shape[1]
+    kwargs["video_timesteps"] = mx.concatenate([mx.zeros((1, 24)), mx.full((1, n - 24), 0.7)], axis=1)
+    kwargs["audio_timesteps"] = mx.concatenate([mx.zeros((1, 2)), mx.full((1, 6), 0.7)], axis=1)
+    return kwargs
+
+
+@pytest.fixture
+def _dedupe_on_tiny(monkeypatch):
+    """Let the tiny model's 48 / 8 rows reach the dedupe (it needs 1024 rows by default)."""
+    monkeypatch.setattr(model_mod, "_ADALN_DEDUPE_MIN_ROWS", 1)
+    monkeypatch.setattr(model_mod, "_ADALN_DEDUPE_MAX_FRAC", 1.0)
+
+
+def test_per_token_grouping_runs_once_per_timesteps_array(monkeypatch, _dedupe_on_tiny):
+    model = _tiny_model()
+    kwargs = _per_token_kwargs(model)
+    calls = {"group": 0, "embed": 0}
+    original_group, original_embed = model_mod._unique_rows, LTXModel._embed_timestep_per_token
+
+    def counting_group(flat):
+        calls["group"] += 1
+        return original_group(flat)
+
+    def counting_embed(self, t):
+        calls["embed"] += 1
+        return original_embed(self, t)
+
+    monkeypatch.setattr(model_mod, "_unique_rows", counting_group)
+    monkeypatch.setattr(LTXModel, "_embed_timestep_per_token", counting_embed)
+    first = model(**kwargs)
+    # One grouping and one embedding per modality, shared by its two per-token AdaLN modules.
+    assert calls == {"group": 2, "embed": 2}
+    # A second pass of the same step (same timesteps arrays, e.g. the uncond pass): all reused.
+    second = model(**{**kwargs, "video_text_embeds": kwargs["video_text_embeds"] * 0.5})
+    assert calls == {"group": 2, "embed": 2}
+    # A new array with equal values (the next step) recomputes: the cache matches on identity.
+    model(**{**kwargs, "video_timesteps": mx.array(kwargs["video_timesteps"])})
+    assert calls == {"group": 3, "embed": 3}
+    assert len(model._per_token_cache) == 2  # only the last forward's entries are kept
+    mx.eval(first, second)
+
+
+@pytest.mark.parametrize("dedupe", [True, False])
+def test_per_token_grouping_cache_is_bit_identical(monkeypatch, _dedupe_on_tiny, dedupe):
+    if not dedupe:
+        monkeypatch.setattr(model_mod, "_ADALN_DEDUPE", False)
+    kwargs = _per_token_kwargs(_tiny_model())
+    cached = _tiny_model()
+    cached(**kwargs)  # warm the cache with the same timesteps arrays
+    cached(**kwargs)  # calibration call done; this one may use the deduped GEMM
+    got = cached(**{**kwargs, "timestep": mx.array([0.3])})
+
+    reference = _tiny_model()
+    reference(**{**kwargs, "video_timesteps": mx.array(kwargs["video_timesteps"])})
+    reference(**{**kwargs, "video_timesteps": mx.array(kwargs["video_timesteps"])})
+    # Fresh arrays each call: nothing reused, every grouping computed in place.
+    want = reference(
+        **{
+            **kwargs,
+            "timestep": mx.array([0.3]),
+            "video_timesteps": mx.array(kwargs["video_timesteps"]),
+            "audio_timesteps": mx.array(kwargs["audio_timesteps"]),
+        }
+    )
+    assert all(mx.array_equal(g, w) for g, w in zip(got, want, strict=True))

@@ -299,7 +299,26 @@ def _trim_rows(x: mx.array, u: int) -> mx.array:
     return mx.take(x, mx.arange(u, dtype=mx.int32), axis=0)
 
 
-def _dedupe_adaln(adaln_module: AdaLayerNormSingle, flat: mx.array) -> tuple[mx.array, mx.array, mx.array | None]:
+# Sentinel: "no grouping was precomputed, compute it here".
+_GROUPING_UNSET: object = object()
+
+
+def _grouping_for(flat: mx.array) -> tuple[mx.array, mx.array, int] | None:
+    """The row grouping ``_dedupe_adaln`` would use for ``flat`` (None = no dedupe).
+
+    Depends on ``flat`` only, never on the AdaLN module, so one grouping serves every
+    module that reads the same per-token embedding.
+    """
+    if not _ADALN_DEDUPE or int(flat.shape[0]) < _ADALN_DEDUPE_MIN_ROWS:
+        return None
+    return _unique_rows(flat)
+
+
+def _dedupe_adaln(
+    adaln_module: AdaLayerNormSingle,
+    flat: mx.array,
+    grouping: tuple[mx.array, mx.array, int] | None | object = _GROUPING_UNSET,
+) -> tuple[mx.array, mx.array, mx.array | None]:
     """Evaluate ``adaln_module`` on ``flat`` (M, D), deduplicating equal rows.
 
     Returns ``(params, embedded, inverse)``. When ``inverse`` is None the two
@@ -311,13 +330,16 @@ def _dedupe_adaln(adaln_module: AdaLayerNormSingle, flat: mx.array) -> tuple[mx.
     Bitwise identical to ``adaln_module(flat)`` for every input: whenever the
     deduped path has not been *proven* equal for this shape signature, the
     original full-size call is what is returned.
+
+    ``grouping``, when given, is ``_grouping_for(flat)`` computed earlier (it is a
+    pure function of ``flat``), so modules sharing one embedding group it once.
     """
     m = int(flat.shape[0])
     if not _ADALN_DEDUPE or m < _ADALN_DEDUPE_MIN_ROWS:
         params, embedded = adaln_module(flat)
         return params, embedded, None
 
-    grouped = _unique_rows(flat)
+    grouped = _unique_rows(flat) if grouping is _GROUPING_UNSET else grouping
     if grouped is None:  # no useful duplication in this input
         params, embedded = adaln_module(flat)
         return params, embedded, None
@@ -645,6 +667,9 @@ class LTXModel(nn.Module):
         # RoPE tables of the last forward, keyed on the positions array they came from (see
         # _rope_freqs_cached). Set with object.__setattr__ so nn.Module does not treat it as a child.
         object.__setattr__(self, "_rope_cache", {})
+        # Per-token timestep embeddings and their AdaLN row grouping of the last forward, keyed
+        # on the per-token timesteps array (see _per_token_embedding_cached).
+        object.__setattr__(self, "_per_token_cache", {})
 
     @property
     def compute_dtype(self) -> mx.Dtype | None:
@@ -744,12 +769,14 @@ class LTXModel(nn.Module):
         self,
         adaln_module: AdaLayerNormSingle,
         t_emb_per_token: mx.array,
+        grouping: tuple[mx.array, mx.array, int] | None | object = _GROUPING_UNSET,
     ) -> tuple[mx.array | PerTokenAdaLNParams, mx.array | PerTokenAdaLNParams]:
         """Apply AdaLN with per-token timestep embeddings.
 
         Args:
             adaln_module: AdaLayerNormSingle module.
             t_emb_per_token: (B, N, timestep_embedding_dim).
+            grouping: Optional precomputed ``_grouping_for`` of the flattened embedding.
 
         Returns:
             Tuple of (params, embedded_timestep), logically shaped
@@ -767,7 +794,7 @@ class LTXModel(nn.Module):
         """
         B, N, D = t_emb_per_token.shape
         flat = t_emb_per_token.reshape(B * N, D)
-        params, embedded, inv = _dedupe_adaln(adaln_module, flat)
+        params, embedded, inv = _dedupe_adaln(adaln_module, flat, grouping)
         if inv is None:
             return params.reshape(B, N, -1), embedded.reshape(B, N, -1)
         if _ADALN_LAZY:
@@ -983,12 +1010,16 @@ class LTXModel(nn.Module):
         # Note: prompt AdaLN always uses scalar timestep — text embeddings
         # don't correspond to individual latent tokens, so per-token
         # modulation would cause a shape mismatch in cross-attention.
+        # The per-token embedding and its row grouping are reused across the modules of this
+        # forward and across forwards given the same timesteps array (the guidance passes of
+        # one step): the grouping's host syncs run once per step, not once per module and pass.
+        per_token_cache: dict = {}
         if video_timesteps is not None:
-            vt_emb = self._embed_timestep_per_token(video_timesteps)
-            video_adaln_emb, video_embedded_ts = self._adaln_per_token(self.adaln_single, vt_emb)
+            vt_emb, vt_group = self._per_token_embedding_cached(per_token_cache, video_timesteps)
+            video_adaln_emb, video_embedded_ts = self._adaln_per_token(self.adaln_single, vt_emb, vt_group)
             av_ca_video_emb = None
             if audio_latent is not None:
-                av_ca_video_emb, _ = self._adaln_per_token(self.av_ca_video_scale_shift_adaln_single, vt_emb)
+                av_ca_video_emb, _ = self._adaln_per_token(self.av_ca_video_scale_shift_adaln_single, vt_emb, vt_group)
         else:
             video_adaln_emb, video_embedded_ts = self.adaln_single(t_emb)
             av_ca_video_emb = None
@@ -1008,9 +1039,9 @@ class LTXModel(nn.Module):
         av_ca_v2a_gate_emb = audio_prompt_emb = None
         if audio_latent is not None:
             if audio_timesteps is not None:
-                at_emb = self._embed_timestep_per_token(audio_timesteps)
-                audio_adaln_emb, audio_embedded_ts = self._adaln_per_token(self.audio_adaln_single, at_emb)
-                av_ca_audio_emb, _ = self._adaln_per_token(self.av_ca_audio_scale_shift_adaln_single, at_emb)
+                at_emb, at_group = self._per_token_embedding_cached(per_token_cache, audio_timesteps)
+                audio_adaln_emb, audio_embedded_ts = self._adaln_per_token(self.audio_adaln_single, at_emb, at_group)
+                av_ca_audio_emb, _ = self._adaln_per_token(self.av_ca_audio_scale_shift_adaln_single, at_emb, at_group)
             else:
                 audio_adaln_emb, audio_embedded_ts = self.audio_adaln_single(t_emb)
                 av_ca_audio_emb, _ = self.av_ca_audio_scale_shift_adaln_single(t_emb)
@@ -1072,6 +1103,7 @@ class LTXModel(nn.Module):
             )
         # Keep only this forward's tables: memory stays at one forward's worth.
         object.__setattr__(self, "_rope_cache", rope_cache)
+        object.__setattr__(self, "_per_token_cache", per_token_cache)
 
         # Self-attention masks arrive as [0, 1] attention weights (conditioning/mask_utils.py:
         # 1 = attend, 0 = blocked, fractions = attention strength). The attention kernel takes an
@@ -1261,6 +1293,28 @@ class LTXModel(nn.Module):
         x = mx.fast.layer_norm(x, weight=None, bias=None, eps=self.config.norm_eps)
         x = x * (1.0 + scale) + shift
         return proj(x)
+
+    def _per_token_embedding_cached(
+        self, new_cache: dict, per_token_timesteps: mx.array
+    ) -> tuple[mx.array, tuple[mx.array, mx.array, int] | None]:
+        """Per-token timestep embedding and its AdaLN row grouping, reused for the same timesteps array.
+
+        Both are pure functions of ``per_token_timesteps`` (MLX arrays are not modified in
+        place by the samplers, which build a fresh array every step). Same identity rule as
+        :meth:`_rope_freqs_cached`: the entry keeps a reference to the array and a hit needs
+        the very same object. The entry is copied into ``new_cache``, which replaces the
+        model's cache at the end of the prelude, so only the last forward's entries stay.
+        """
+        key = id(per_token_timesteps)
+        hit = self._per_token_cache.get(key) or new_cache.get(key)
+        if hit is not None and hit[0] is per_token_timesteps:
+            entry = hit
+        else:
+            emb = self._embed_timestep_per_token(per_token_timesteps)
+            b, n, d = emb.shape
+            entry = (per_token_timesteps, emb, _grouping_for(emb.reshape(b * n, d)))
+        new_cache[key] = entry
+        return entry[1], entry[2]
 
     def _rope_freqs_cached(
         self,
