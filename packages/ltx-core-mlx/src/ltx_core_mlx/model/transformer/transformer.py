@@ -18,6 +18,8 @@ Per-block weight keys (under ``transformer_blocks.N``):
 
 from __future__ import annotations
 
+import os as _os
+
 import mlx.core as mx
 import mlx.nn as nn
 
@@ -64,6 +66,30 @@ def _nag_kwargs(nag: NAGGuidance, negative_context: mx.array) -> dict:
         "nag_alpha": nag.alpha,
         "nag_tau": nag.tau,
     }
+
+
+# Fused elementwise helpers. Each is a handful of full-size elementwise passes over (B, N, dim) in
+# eager mode; mx.compile fuses them into one kernel, with bit-identical results (the same ops in the
+# same order and dtypes; checked in tests/test_exact_denoise_speedups.py). LTX2_COMPILE_ELEMENTWISE=0
+# runs them eagerly.
+def _modulate_eager(normed: mx.array, scale: mx.array, shift: mx.array) -> mx.array:
+    return normed * (1.0 + scale) + shift
+
+
+def _norm_modulate_eager(x: mx.array, scale: mx.array, shift: mx.array, eps: float) -> mx.array:
+    return mx.fast.rms_norm(x, weight=None, eps=eps) * (1.0 + scale) + shift
+
+
+def _gated_residual_eager(hidden: mx.array, out: mx.array, gate: mx.array) -> mx.array:
+    return hidden + out * gate
+
+
+if _os.environ.get("LTX2_COMPILE_ELEMENTWISE", "1").strip() == "0":
+    _modulate, _norm_modulate, _gated_residual = _modulate_eager, _norm_modulate_eager, _gated_residual_eager
+else:
+    _modulate = mx.compile(_modulate_eager)
+    _norm_modulate = mx.compile(_norm_modulate_eager)
+    _gated_residual = mx.compile(_gated_residual_eager)
 
 
 class BasicAVTransformerBlock(nn.Module):
@@ -256,6 +282,10 @@ class BasicAVTransformerBlock(nn.Module):
         """Affine-free RMS norm (no mean subtraction, matches reference rms_norm)."""
         return mx.fast.rms_norm(x, weight=None, eps=self._norm_eps)
 
+    def _norm_modulate(self, x: mx.array, scale: mx.array, shift: mx.array) -> mx.array:
+        """``_rms_norm(x) * (1 + scale) + shift`` as one fused kernel (bit-identical)."""
+        return _norm_modulate(x, scale, shift, self._norm_eps)
+
     def compute_video_normed_sa(
         self,
         video_hidden: mx.array,
@@ -391,7 +421,7 @@ class BasicAVTransformerBlock(nn.Module):
                 av_a_gate_v2a = av_ca_v2a_gate_params + self.scale_shift_table_a2v_ca_audio[None, None, 4, :]
 
         # --- 1. Video self-attention ---
-        video_normed = self._rms_norm(video_hidden) * (1.0 + v_scale_sa) + v_shift_sa
+        video_normed = self._norm_modulate(video_hidden, v_scale_sa, v_shift_sa)
         # STG: pass perturbation mask into attention so it blends with values
         v_ptb_mask = None
         if perturbations is not None and perturbations.any_in_batch(PerturbationType.SKIP_VIDEO_SELF_ATTN, block_idx):
@@ -404,11 +434,11 @@ class BasicAVTransformerBlock(nn.Module):
             attention_mask=video_attention_mask,
             perturbation_mask=v_ptb_mask,
         )
-        video_hidden = video_hidden + video_sa_out * v_gate_sa
+        video_hidden = _gated_residual(video_hidden, video_sa_out, v_gate_sa)
 
         if run_audio:
             # --- 2. Audio self-attention ---
-            audio_normed = self._rms_norm(audio_hidden) * (1.0 + a_scale_sa) + a_shift_sa
+            audio_normed = self._norm_modulate(audio_hidden, a_scale_sa, a_shift_sa)
             a_ptb_mask = None
             if perturbations is not None and perturbations.any_in_batch(
                 PerturbationType.SKIP_AUDIO_SELF_ATTN, block_idx
@@ -422,31 +452,28 @@ class BasicAVTransformerBlock(nn.Module):
                 attention_mask=audio_attention_mask,
                 perturbation_mask=a_ptb_mask,
             )
-            audio_hidden = audio_hidden + audio_sa_out * a_gate_sa
+            audio_hidden = _gated_residual(audio_hidden, audio_sa_out, a_gate_sa)
 
         # --- 3. Video text cross-attention (AdaLN indices 6-8 + prompt table for KV) ---
         if video_text_embeds is not None:
-            video_normed = self._rms_norm(video_hidden) * (1.0 + v_scale_ca) + v_shift_ca
+            video_normed = self._norm_modulate(video_hidden, v_scale_ca, v_shift_ca)
             vp_shift, vp_scale = self._unpack_adaln(video_prompt_adaln_params, self.prompt_scale_shift_table, 2, vdim)
             text_scaled = video_text_embeds * (1.0 + vp_scale) + vp_shift
             nag_kwargs = {}
             if nag is not None:
                 nag_kwargs = _nag_kwargs(nag, nag.video_text_embeds * (1.0 + vp_scale) + vp_shift)
-            video_hidden = (
-                video_hidden
-                + self.attn2(
-                    video_normed,
-                    encoder_hidden_states=text_scaled,
-                    attention_mask=video_cross_attention_mask,
-                    kv_cache=None if text_kv_cache is None else (text_kv_cache.entries, (block_idx, "video")),
-                    **nag_kwargs,
-                )
-                * v_gate_ca
+            ca_out = self.attn2(
+                video_normed,
+                encoder_hidden_states=text_scaled,
+                attention_mask=video_cross_attention_mask,
+                kv_cache=None if text_kv_cache is None else (text_kv_cache.entries, (block_idx, "video")),
+                **nag_kwargs,
             )
+            video_hidden = _gated_residual(video_hidden, ca_out, v_gate_ca)
 
         # --- 4. Audio text cross-attention ---
         if run_audio and audio_text_embeds is not None:
-            audio_normed = self._rms_norm(audio_hidden) * (1.0 + a_scale_ca) + a_shift_ca
+            audio_normed = self._norm_modulate(audio_hidden, a_scale_ca, a_shift_ca)
             ap_shift, ap_scale = self._unpack_adaln(
                 audio_prompt_adaln_params, self.audio_prompt_scale_shift_table, 2, adim
             )
@@ -454,17 +481,14 @@ class BasicAVTransformerBlock(nn.Module):
             nag_kwargs = {}
             if nag is not None and nag.audio_text_embeds is not None:
                 nag_kwargs = _nag_kwargs(nag, nag.audio_text_embeds * (1.0 + ap_scale) + ap_shift)
-            audio_hidden = (
-                audio_hidden
-                + self.audio_attn2(
-                    audio_normed,
-                    encoder_hidden_states=text_scaled,
-                    attention_mask=audio_cross_attention_mask,
-                    kv_cache=None if text_kv_cache is None else (text_kv_cache.entries, (block_idx, "audio")),
-                    **nag_kwargs,
-                )
-                * a_gate_ca
+            ca_out = self.audio_attn2(
+                audio_normed,
+                encoder_hidden_states=text_scaled,
+                attention_mask=audio_cross_attention_mask,
+                kv_cache=None if text_kv_cache is None else (text_kv_cache.entries, (block_idx, "audio")),
+                **nag_kwargs,
             )
+            audio_hidden = _gated_residual(audio_hidden, ca_out, a_gate_ca)
 
         if run_audio:
             # --- 5-6. Audio-Video cross-modal attention ---
@@ -475,50 +499,46 @@ class BasicAVTransformerBlock(nn.Module):
             # A2V: Q from video, KV from audio
             # Reference applies perturbation mask OUTSIDE attention (attn * gate * mask),
             # not inside (unlike self-attention which blends with values).
-            video_q_a2v = video_norm3 * (1.0 + av_v_scale_a2v) + av_v_shift_a2v
-            audio_kv_a2v = audio_norm3 * (1.0 + av_a_scale_a2v) + av_a_shift_a2v
-            a2v_out = (
-                self.audio_to_video_attn(
-                    video_q_a2v,
-                    encoder_hidden_states=audio_kv_a2v,
-                    rope_freqs=video_cross_rope_freqs,
-                    rope_freqs_k=audio_cross_rope_freqs,
-                )
-                * av_v_gate_a2v
+            video_q_a2v = _modulate(video_norm3, av_v_scale_a2v, av_v_shift_a2v)
+            audio_kv_a2v = _modulate(audio_norm3, av_a_scale_a2v, av_a_shift_a2v)
+            a2v_attn = self.audio_to_video_attn(
+                video_q_a2v,
+                encoder_hidden_states=audio_kv_a2v,
+                rope_freqs=video_cross_rope_freqs,
+                rope_freqs_k=audio_cross_rope_freqs,
             )
             if perturbations is not None and perturbations.any_in_batch(
                 PerturbationType.SKIP_A2V_CROSS_ATTN, block_idx
             ):
                 a2v_mask = perturbations.mask_like(PerturbationType.SKIP_A2V_CROSS_ATTN, block_idx, video_hidden)
-                a2v_out = a2v_out * a2v_mask
-            video_hidden = video_hidden + a2v_out
+                video_hidden = video_hidden + (a2v_attn * av_v_gate_a2v) * a2v_mask
+            else:
+                video_hidden = _gated_residual(video_hidden, a2v_attn, av_v_gate_a2v)
 
             # V2A: Q from audio, KV from video (using pre-A2V norms)
-            audio_q_v2a = audio_norm3 * (1.0 + av_a_scale_v2a) + av_a_shift_v2a
-            video_kv_v2a = video_norm3 * (1.0 + av_v_scale_v2a) + av_v_shift_v2a
-            v2a_out = (
-                self.video_to_audio_attn(
-                    audio_q_v2a,
-                    encoder_hidden_states=video_kv_v2a,
-                    rope_freqs=audio_cross_rope_freqs,
-                    rope_freqs_k=video_cross_rope_freqs,
-                )
-                * av_a_gate_v2a
+            audio_q_v2a = _modulate(audio_norm3, av_a_scale_v2a, av_a_shift_v2a)
+            video_kv_v2a = _modulate(video_norm3, av_v_scale_v2a, av_v_shift_v2a)
+            v2a_attn = self.video_to_audio_attn(
+                audio_q_v2a,
+                encoder_hidden_states=video_kv_v2a,
+                rope_freqs=audio_cross_rope_freqs,
+                rope_freqs_k=video_cross_rope_freqs,
             )
             if perturbations is not None and perturbations.any_in_batch(
                 PerturbationType.SKIP_V2A_CROSS_ATTN, block_idx
             ):
                 v2a_mask = perturbations.mask_like(PerturbationType.SKIP_V2A_CROSS_ATTN, block_idx, audio_hidden)
-                v2a_out = v2a_out * v2a_mask
-            audio_hidden = audio_hidden + v2a_out
+                audio_hidden = audio_hidden + (v2a_attn * av_a_gate_v2a) * v2a_mask
+            else:
+                audio_hidden = _gated_residual(audio_hidden, v2a_attn, av_a_gate_v2a)
 
         # --- 7. Video feed-forward (uses indices 3-5) ---
-        video_normed = self._rms_norm(video_hidden) * (1.0 + v_scale_ff) + v_shift_ff
-        video_hidden = video_hidden + self.ff(video_normed) * v_gate_ff
+        video_normed = self._norm_modulate(video_hidden, v_scale_ff, v_shift_ff)
+        video_hidden = _gated_residual(video_hidden, self.ff(video_normed), v_gate_ff)
 
         if run_audio:
             # --- 8. Audio feed-forward (uses indices 3-5) ---
-            audio_normed = self._rms_norm(audio_hidden) * (1.0 + a_scale_ff) + a_shift_ff
-            audio_hidden = audio_hidden + self.audio_ff(audio_normed) * a_gate_ff
+            audio_normed = self._norm_modulate(audio_hidden, a_scale_ff, a_shift_ff)
+            audio_hidden = _gated_residual(audio_hidden, self.audio_ff(audio_normed), a_gate_ff)
 
         return video_hidden, audio_hidden

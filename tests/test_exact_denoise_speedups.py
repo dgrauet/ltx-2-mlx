@@ -190,3 +190,32 @@ def test_mask_cast_once_per_forward_is_bit_identical(monkeypatch, dtype):
     want = run()
     assert calls["n"] == 2
     assert all(mx.array_equal(g, w) for g, w in zip(got, want, strict=True))
+
+
+# ---------------------------------------------------------------------------
+# Fused (mx.compile) elementwise helpers in the transformer block
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("compute_dtype", [None, mx.float16])
+@pytest.mark.parametrize("per_token", [False, True])
+def test_fused_elementwise_helpers_are_bit_identical(monkeypatch, compute_dtype, per_token):
+    from ltx_core_mlx.model.transformer import transformer as block_mod
+
+    def run():
+        model = _tiny_model()
+        if compute_dtype is not None:
+            model.set_compute_dtype(compute_dtype)
+        kwargs = _inputs(model)
+        if per_token:  # first latent frame preserved: per-token AdaLN path
+            n = kwargs["video_latent"].shape[1]
+            kwargs["video_timesteps"] = mx.concatenate([mx.zeros((1, 24)), mx.full((1, n - 24), 0.7)], axis=1)
+        return model(**kwargs)
+
+    fused = run()
+    assert block_mod._gated_residual is not block_mod._gated_residual_eager  # compiled by default
+    monkeypatch.setattr(block_mod, "_modulate", block_mod._modulate_eager)
+    monkeypatch.setattr(block_mod, "_norm_modulate", block_mod._norm_modulate_eager)
+    monkeypatch.setattr(block_mod, "_gated_residual", block_mod._gated_residual_eager)
+    eager = run()
+    assert all(mx.array_equal(f, e) for f, e in zip(fused, eager, strict=True))

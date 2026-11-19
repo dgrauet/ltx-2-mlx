@@ -1694,6 +1694,15 @@ LTX-2 mitigates both by inserting `mx.eval` at strategic points so each command 
 
 Mac Studio / M-series Ultra users who have never seen a watchdog crash may recover full lazy-graph pipelining by setting `LTX2_GEMMA_EVAL_EVERY=0` and `LTX2_DIT_EVAL_EVERY=0`. This disables all eval guards and restores maximum throughput at the cost of watchdog safety on machines where those guards were needed.
 
+### Fused elementwise helpers (`LTX2_COMPILE_ELEMENTWISE`)
+
+The block's AdaLN modulations (`rms(x) * (1 + scale) + shift`, and the A↔V ones on the shared norms) and gated residuals
+(`h + out * gate`) each ran as several full-size elementwise passes. `transformer.py` runs them through `mx.compile`d
+helpers (`_norm_modulate`, `_modulate`, `_gated_residual`), one fused kernel each, bit-identical to the eager ops
+(`tests/test_exact_denoise_speedups.py`, resident, float16 and per-token AdaLN). Micro-benchmark (M5 Pro, 4,992 tokens ×
+4,096, per-token params): modulation 3.3 → 2.0 ms, residual 2.5 → 1.3 ms; 9 such calls per block. The STG / modality
+perturbation masks keep the eager path. `LTX2_COMPILE_ELEMENTWISE=0` (read at import) runs them eagerly.
+
 ### AdaLN dedupe switches (per-token timesteps only)
 
 The per-token AdaLN path deduplicates identical sigma rows into one shrunken
