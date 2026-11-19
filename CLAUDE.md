@@ -355,6 +355,7 @@ When conditioning (I2V, retake, extend), use per-token timesteps `sigma * denois
 - `denoise_mask`: `1.0` = denoise (generate), `0.0` = preserve (keep clean)
 - `positions`: (B, N, num_axes) pixel-space positions for RoPE
 - `attention_mask`: (B, N, N) optional self-attention mask [0,1]
+  (1 = attend, 0 = blocked, fractions = attention strength). `LTXModel` turns it into the additive bias the kernel takes once per forward (`self_attention_bias`: `log(p)`, `p <= 0` -> float32 min), as upstream `_prepare_self_attention_mask`. Until this fix the raw weights were added as a bias (a 0 lowered a logit by 1), so `ic-lora` renders with `--conditioning-strength` below 1 (or a `conditioning_attention_mask` video, Python API) change; renders without a self-attention mask (every other path) are byte-identical. Tests: `tests/test_self_attention_mask.py`.
 - `frozen`: `True` marks a stream that is conditioning only (upstream `LatentState.frozen`); it always carries an
   all-zero `denoise_mask`. `create_noised_state(..., frozen=True)` builds one. Set where upstream sets
   `frozen=True`: a2v audio (both stages), lipdub stage-2 audio, `--two-stage` stage-2 audio (upstream v1.4.0

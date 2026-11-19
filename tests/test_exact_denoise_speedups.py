@@ -167,11 +167,11 @@ def test_mask_cast_once_per_forward_is_bit_identical(monkeypatch, dtype):
     """Casting the self-attention / cross-attention masks once in LTXModel equals the per-block cast."""
     n_video = 2 * 4 * 6
     mx.random.seed(3)
-    # An additive mask with finite, huge and -inf entries (the clamp has work to do).
+    # A [0, 1] self-attention weight mask with blocked (0) and fractional entries, and an additive
+    # Prompt-Relay-style cross mask with huge negative entries (the clamp has work to do).
     self_mask = mx.random.uniform(shape=(1, n_video, n_video))
-    self_mask = mx.where(self_mask > 0.8, -1e9, self_mask)
-    self_mask = mx.where(self_mask > 0.75, -mx.inf, self_mask)
-    cross_mask = mx.where(mx.random.uniform(shape=(1, 1, n_video, 6)) > 0.5, -1e6, 0.0)
+    self_mask = mx.where(self_mask > 0.8, 0.0, self_mask)
+    cross_mask = mx.where(mx.random.uniform(shape=(1, 1, n_video, 6)) > 0.5, -1e9, 0.0)
 
     def run() -> tuple[mx.array, mx.array]:
         model = _tiny_model()

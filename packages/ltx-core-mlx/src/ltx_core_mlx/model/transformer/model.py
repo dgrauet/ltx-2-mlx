@@ -87,6 +87,24 @@ def _all_finite(*arrays: mx.array | None) -> bool:
     return all(bool(mx.all(mx.isfinite(a)).item()) for a in arrays if a is not None)
 
 
+def self_attention_bias(mask: mx.array) -> mx.array:
+    """Turn a ``[0, 1]`` self-attention weight mask into the additive bias the attention kernel takes.
+
+    Port of upstream ``TransformerArgsPreprocessor._prepare_self_attention_mask``: ``p > 0`` becomes
+    ``log(max(p, tiny))`` (tiny = smallest normal float32) (``1 -> 0``, no bias; ``0.5 -> -0.69``, which scales the key's attention
+    weight by 0.5 before renormalisation) and ``p <= 0`` becomes the dtype minimum (fully masked, but
+    finite, so a fully masked row still softmaxes to a finite result). A ``(B, N, N)`` mask gets a
+    head axis, ``(B, 1, N, N)``. Boolean masks pass through. Computed in float32; the compute-dtype
+    cast that follows clamps it to that dtype's range.
+    """
+    if mask.dtype == mx.bool_:
+        return mask
+    m = mask.astype(mx.float32)
+    info = mx.finfo(mx.float32)
+    bias = mx.where(m > 0, mx.log(mx.maximum(m, info.smallest_normal)), info.min)
+    return bias[:, None] if bias.ndim == 3 else bias
+
+
 @dataclass
 class BlockPrefix:
     """Hidden states entering block ``index``, shared between two forwards.
@@ -1054,6 +1072,15 @@ class LTXModel(nn.Module):
             )
         # Keep only this forward's tables: memory stays at one forward's worth.
         object.__setattr__(self, "_rope_cache", rope_cache)
+
+        # Self-attention masks arrive as [0, 1] attention weights (conditioning/mask_utils.py:
+        # 1 = attend, 0 = blocked, fractions = attention strength). The attention kernel takes an
+        # additive bias: convert them to log space once per forward, as upstream
+        # TransformerArgsPreprocessor._prepare_self_attention_mask does.
+        if video_attention_mask is not None:
+            video_attention_mask = self_attention_bias(video_attention_mask)
+        if audio_attention_mask is not None:
+            audio_attention_mask = self_attention_bias(audio_attention_mask)
 
         # Additive masks: clamp + cast to the compute dtype once per forward rather than in
         # every block's attention (Attention passes a mask already in its dtype through).
