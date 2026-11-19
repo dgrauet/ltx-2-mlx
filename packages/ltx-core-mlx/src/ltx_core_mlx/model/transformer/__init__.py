@@ -3,7 +3,7 @@
 from ltx_core_mlx.model.transformer.adaln import AdaLayerNormSingle
 from ltx_core_mlx.model.transformer.attention import Attention
 from ltx_core_mlx.model.transformer.feed_forward import FeedForward
-from ltx_core_mlx.model.transformer.model import LTXModel, Modality, X0Model
+from ltx_core_mlx.model.transformer.model import BlockPrefix, LTXModel, Modality, X0Model
 from ltx_core_mlx.model.transformer.rope import (
     apply_rope_interleaved,
     apply_rope_split,
@@ -20,6 +20,7 @@ __all__ = [
     "AdaLayerNormSingle",
     "Attention",
     "BasicAVTransformerBlock",
+    "BlockPrefix",
     "FeedForward",
     "LTXModel",
     "Modality",

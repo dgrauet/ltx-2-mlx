@@ -83,6 +83,26 @@ def _all_finite(*arrays: mx.array | None) -> bool:
     return all(bool(mx.all(mx.isfinite(a)).item()) for a in arrays if a is not None)
 
 
+@dataclass
+class BlockPrefix:
+    """Hidden states entering block ``index``, shared between two forwards.
+
+    Two forwards whose inputs agree everywhere and whose blocks only differ from
+    block ``index`` on (the STG pass against the conditioned pass: STG perturbs
+    the self-attention of ``stg_blocks`` only) compute the same hidden states up
+    to that block. ``LTXModel.__call__(capture_prefix=p)`` stores them;
+    ``LTXModel.__call__(resume_prefix=p)`` then starts the block loop at
+    ``index`` from the stored states instead of recomputing blocks
+    ``0 .. index - 1``. The prelude (patchify, AdaLN, RoPE) and the head run as
+    usual. The caller is responsible for the two forwards' inputs agreeing.
+    """
+
+    index: int
+    video: mx.array | None = None
+    audio: mx.array | None = None
+    captured: bool = False
+
+
 # ---------------------------------------------------------------------------
 # AdaLN per-token dedupe + deferred per-block gather
 # ---------------------------------------------------------------------------
@@ -519,6 +539,10 @@ class LTXModel(nn.Module):
     attention, and adaptive layer norm conditioning.
     """
 
+    # ``capture_prefix`` / ``resume_prefix`` are honoured (see BlockPrefix). Wrappers that
+    # split a forward into several inner forwards (modality tiling) set this to False.
+    supports_block_prefix: bool = True
+
     def __init__(self, config: LTXModelConfig | None = None):
         super().__init__()
         if config is None:
@@ -795,6 +819,8 @@ class LTXModel(nn.Module):
         video_sigma: mx.array | None = None,
         audio_sigma: mx.array | None = None,
         nag: NAGGuidance | None = None,
+        capture_prefix: BlockPrefix | None = None,
+        resume_prefix: BlockPrefix | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Forward pass.
 
@@ -850,10 +876,20 @@ class LTXModel(nn.Module):
                 negative contexts are cast like the positive ones and broadcast to every
                 block's ``attn2`` / ``audio_attn2``. ``None`` (default) is the plain forward.
                 The audio context is unused on the video-only path (no ``audio_attn2`` runs).
+            capture_prefix: Optional :class:`BlockPrefix`; the hidden states entering
+                block ``capture_prefix.index`` are stored in it.
+            resume_prefix: Optional, already captured :class:`BlockPrefix`; the block loop
+                starts at its index from its stored hidden states. Exclusive with ``tap``,
+                ``block_stack_override`` and gradient checkpointing.
 
         Returns:
             Tuple of (video_velocity, audio_velocity), same shapes as inputs.
         """
+        if resume_prefix is not None:
+            if not resume_prefix.captured:
+                raise ValueError("resume_prefix was never captured")
+            if tap is not None or block_stack_override is not None or self.gradient_checkpointing:
+                raise ValueError("resume_prefix cannot be combined with tap, block_stack_override or checkpointing")
         # Arguments kept for the overflow guard's recompute (compute dtype only).
         call_args = {k: v for k, v in locals().items() if k != "self"} if self._compute_dtype is not None else None
         if self._sparse_attention is not None:
@@ -996,7 +1032,14 @@ class LTXModel(nn.Module):
             video_hidden, audio_hidden = block_stack_override(video_hidden, audio_hidden)
         else:
             num_layers = self.config.num_layers if block_provider is not None else len(self.transformer_blocks)
-            for block_idx in range(num_layers):
+            first_block = 0
+            if resume_prefix is not None:
+                first_block = resume_prefix.index
+                video_hidden, audio_hidden = resume_prefix.video, resume_prefix.audio
+            for block_idx in range(first_block, num_layers):
+                if capture_prefix is not None and block_idx == capture_prefix.index:
+                    capture_prefix.video, capture_prefix.audio = video_hidden, audio_hidden
+                    capture_prefix.captured = True
                 block = block_provider(block_idx) if block_provider is not None else self.transformer_blocks[block_idx]
 
                 if self.gradient_checkpointing:
