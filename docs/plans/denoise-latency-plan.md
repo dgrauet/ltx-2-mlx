@@ -10,9 +10,29 @@ Changes that alter pixels are allowed if they pass a quality check against the f
 
 The estimates below come from code reading plus a FLOP model fitted to the timings documented in `CLAUDE.md`. Nothing has been profiled yet, so phase 0 measures before anything else changes.
 
-### Status (2026-11-19 review)
+### Status (2026-11-19, branch `perf/stg-prefix-fp16`)
 
-- **Item 1 (STG prefix sharing): implemented, uncommitted.** `BlockPrefix`, `capture_prefix` / `resume_prefix` on `LTXModel.__call__`, `stg_block_prefix` in `samplers.py` (`:160`, used at `:960` and `:1403`), `LTX2_STG_PREFIX_REUSE`, `tests/test_stg_prefix_reuse.py`. Needs the phase-1 sha256 check and a commit.
+Done on the branch, one commit each, every one bit-identical by unit test. The sha256 e2e check passes: `--distilled`, `--two-stage` (6 stage-1 steps), `--dfr`, `a2v` (6 stage-1 steps) and a float32 `--two-stage` (4 steps), 2.5 q8, 512×768×49, seed 5, write byte-identical mp4s on the branch and on `e0dc64d`. Full suite: 1965 passed, 118 skipped.
+
+`scripts/bench_denoise.py`, M5 Pro 48 GB, 2.5 q8, mean of the timed steps (one warm-up step dropped), `e0dc64d` (STG prefix sharing and float16 default already in) → branch:
+
+| run | tokens | float16 s/step | float32 s/step | peak memory float16 / float32 |
+|---|---:|---:|---:|---:|
+| distilled I2V 512×768×97 | 4,992 | 12.18 → 11.64 (−4 %) | 19.44 → 16.25 (−16 %, baseline possibly inflated by a concurrent test run) | 22.7 → 22.9 / 23.3 → 23.2 GB |
+| distilled I2V 576×1024×121 | 9,216 | 24.66 → 22.71 (−8 %) | 34.05 → 31.28 (−8 %) | 25.4 → 25.7 / 26.0 → 26.2 GB |
+| guided stage 1 (CFG + STG + modality) 192×320×97 | 780 | 7.68 → 6.61 (−14 %) | 9.34 → 8.64 (−8 %) | 20.9 → 23.1 / 21.0 → 25.5 GB (text K/V cache) |
+
+STG prefix sharing alone (baseline, float16): 8.24 → 7.68 s/step (−7 %, half the ~14 % estimate: at 780 tokens the per-pass fixed costs weigh more). Float16 against float32 at baseline: −37 % / −28 % on the distilled shapes, −18 % on guided stage 1. One synchronised forward (float16, 4,992 tokens) splits as video FF 33 %, `attn1` 27 %, `attn2` 12 %, A↔V 10 %, rest 14 % (`attn1` 35 % at 9,216 tokens), so the share table below overstates attention at these sizes. Whole small e2e renders (512×768×49, dominated by load and decode) moved within noise (−5 % to +7 %).
+- Phase 0: `scripts/bench_denoise.py` (real weights, random states/embeddings, `--profile-ops`).
+- Item 1: STG prefix sharing.
+- Item 2: text K/V shared across the guidance passes of one evaluation (`TextKVCache`, `LTX2_TEXT_KV_CACHE`); `tests/test_text_kv_cache.py`.
+- Item 3: RoPE tables reused across forwards (keyed on the positions array's identity; one forward's tables kept); additive masks clamped and cast once per forward.
+- Item 4: gate after the head transpose; in-place LoRA fusions evaluated block by block before the next stage on the float32 path too (the compute-dtype path already did).
+
+Deferred: item 3's AdaLN dedupe grouping cache (touches the exactness-verification code for a few host syncs per I2V pass), item 3's all-ones-mask drop (after the mask correctness fix), item 5 (async eval guard: needs a watchdog test with the display active).
+
+Earlier review notes:
+- **Item 1 (STG prefix sharing): implemented** (now committed). `BlockPrefix`, `capture_prefix` / `resume_prefix` on `LTXModel.__call__`, `stg_block_prefix` in `samplers.py`, `LTX2_STG_PREFIX_REUSE`, `tests/test_stg_prefix_reuse.py`.
 - **Item 6 overtaken: float16 is now the default compute dtype in the working tree** (`LTX2_COMPUTE_DTYPE` unset → float16; `float32` restores the old path). That flip skipped this plan's gate: measured on `--distilled`, `--dfr` and the relay/NAG runs only. Before it ships (as `feat!:`, a 0.y bump), run the quality gate on `--two-stage` stage 1 (CFG + STG), `a2v`, `retake` / `extend`, `ic-lora` and `lipdub`.
 - The share table and finding 1 below were derived at the old float32 default. Re-measure them at float16 in phase 0: with cheaper matmuls and attention, elementwise work and syncs take a larger share.
 
