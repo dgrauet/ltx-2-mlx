@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 import pytest
+from mlx.utils import tree_flatten
 
 from ltx_core_mlx.model.transformer.attention import Attention
 from ltx_core_mlx.model.transformer.rope import apply_rope_interleaved, apply_rope_split
@@ -71,3 +72,121 @@ def test_gate_after_transpose_is_bit_identical_in_float16():
     x = mx.random.normal((1, 32, 64), key=mx.random.key(6)).astype(mx.float16)
     assert mx.array_equal(attn(x), _reference_attention(attn, x))
 
+
+# ---------------------------------------------------------------------------
+# Model-level caches: RoPE tables reused across forwards, masks cast once per forward
+# ---------------------------------------------------------------------------
+
+from ltx_core_mlx.model.transformer import model as model_mod  # noqa: E402
+from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig  # noqa: E402
+from ltx_core_mlx.utils.positions import compute_audio_positions, compute_video_positions  # noqa: E402
+
+
+def _tiny_model() -> LTXModel:
+    mx.random.seed(0)
+    model = LTXModel(
+        LTXModelConfig(
+            num_layers=3,
+            video_dim=128,
+            audio_dim=64,
+            video_num_heads=4,
+            audio_num_heads=4,
+            video_head_dim=32,
+            audio_head_dim=16,
+            av_cross_num_heads=4,
+            av_cross_head_dim=16,
+            video_patch_channels=64,
+            audio_patch_channels=64,
+            ff_mult=2.0,
+            timestep_embedding_dim=64,
+        )
+    )
+    model.set_dtype(mx.bfloat16)
+    for block in model.transformer_blocks:
+        for name in ("scale_shift_table", "audio_scale_shift_table", "prompt_scale_shift_table"):
+            block[name] = 0.05 * mx.random.normal(block[name].shape)
+    mx.eval(model.parameters())
+    return model
+
+
+def _inputs(model: LTXModel, sigma: float = 0.7) -> dict:
+    cfg = model.config
+    mx.random.seed(1)
+    return dict(
+        video_latent=mx.random.normal((1, 2 * 4 * 6, cfg.video_patch_channels)).astype(mx.bfloat16),
+        audio_latent=mx.random.normal((1, 8, cfg.audio_patch_channels)).astype(mx.bfloat16),
+        timestep=mx.array([sigma]),
+        video_text_embeds=mx.random.normal((1, 6, cfg.video_dim)).astype(mx.bfloat16),
+        audio_text_embeds=mx.random.normal((1, 6, cfg.audio_dim)).astype(mx.bfloat16),
+        video_positions=compute_video_positions(2, 4, 6),
+        audio_positions=compute_audio_positions(8),
+    )
+
+
+def test_rope_cache_reuses_tables_for_the_same_positions(monkeypatch):
+    model = _tiny_model()
+    kwargs = _inputs(model)
+    calls = {"n": 0}
+    original = LTXModel._compute_rope_freqs
+
+    def counting(self, *a, **kw):
+        calls["n"] += 1
+        return original(self, *a, **kw)
+
+    monkeypatch.setattr(LTXModel, "_compute_rope_freqs", counting)
+    first = model(**kwargs)
+    assert calls["n"] == 4  # video, audio, and the two cross-modal temporal tables
+    second = model(**{**kwargs, "timestep": mx.array([0.4])})
+    assert calls["n"] == 4  # same positions arrays: all four reused
+    # A new positions array (even with equal values) recomputes: the cache matches on identity.
+    model(**{**kwargs, "video_positions": mx.array(kwargs["video_positions"])})
+    assert calls["n"] == 6  # video self + video cross
+    assert len(model._rope_cache) == 4  # only the last forward's tables are kept
+    mx.eval(first, second)
+
+
+def test_rope_cache_output_is_bit_identical():
+    kwargs = _inputs(_tiny_model())
+    cached = _tiny_model()
+    cached(**kwargs)  # warm the cache
+    got = cached(**{**kwargs, "timestep": mx.array([0.3])})
+    want = _tiny_model()(**{**kwargs, "timestep": mx.array([0.3])})  # fresh model: computed tables
+    assert all(mx.array_equal(g, w) for g, w in zip(got, want, strict=True))
+
+
+def test_rope_cache_is_not_a_module_parameter():
+    model = _tiny_model()
+    before = len(tree_flatten(model.parameters()))
+    model(**_inputs(model))
+    after = len(tree_flatten(model.parameters()))
+    assert before == after
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_mask_cast_once_per_forward_is_bit_identical(monkeypatch, dtype):
+    """Casting the self-attention / cross-attention masks once in LTXModel equals the per-block cast."""
+    n_video = 2 * 4 * 6
+    mx.random.seed(3)
+    # An additive mask with finite, huge and -inf entries (the clamp has work to do).
+    self_mask = mx.random.uniform(shape=(1, n_video, n_video))
+    self_mask = mx.where(self_mask > 0.8, -1e9, self_mask)
+    self_mask = mx.where(self_mask > 0.75, -mx.inf, self_mask)
+    cross_mask = mx.where(mx.random.uniform(shape=(1, 1, n_video, 6)) > 0.5, -1e6, 0.0)
+
+    def run() -> tuple[mx.array, mx.array]:
+        model = _tiny_model()
+        model.set_compute_dtype(dtype)
+        kwargs = _inputs(model)
+        return model(**kwargs, video_attention_mask=self_mask, video_cross_attention_mask=cross_mask)
+
+    got = run()
+    calls = {"n": 0}
+
+    def no_hoist(dt, mask):  # the old path: every Attention call clamps and casts the float32 mask
+        calls["n"] += 1
+        return mask
+
+    monkeypatch.setattr(model_mod, "cast_attention_mask", no_hoist)
+    want = run()
+    assert calls["n"] == 2
+    assert all(mx.array_equal(g, w) for g, w in zip(got, want, strict=True))

@@ -29,6 +29,7 @@ import numpy as _np
 from ltx_core_mlx.guidance.nag import NAGGuidance
 from ltx_core_mlx.guidance.perturbations import BatchedPerturbationConfig
 from ltx_core_mlx.model.transformer.adaln import AdaLayerNormSingle, PerTokenAdaLNParams
+from ltx_core_mlx.model.transformer.attention import cast_attention_mask
 from ltx_core_mlx.model.transformer.sparse_attention import SparseAttentionState
 from ltx_core_mlx.model.transformer.timestep_embedding import get_timestep_embedding
 from ltx_core_mlx.model.transformer.transformer import BasicAVTransformerBlock
@@ -621,6 +622,9 @@ class LTXModel(nn.Module):
 
         # Block-sparse video self-attention (Sol routing); None = dense. See set_sparse_attention.
         self._sparse_attention: SparseAttentionState | None = None
+        # RoPE tables of the last forward, keyed on the positions array they came from (see
+        # _rope_freqs_cached). Set with object.__setattr__ so nn.Module does not treat it as a child.
+        object.__setattr__(self, "_rope_cache", {})
 
     @property
     def compute_dtype(self) -> mx.Dtype | None:
@@ -986,18 +990,25 @@ class LTXModel(nn.Module):
             # Audio prompt AdaLN: always scalar (from the audio sigma)
             audio_prompt_emb, _ = self.audio_prompt_adaln_single(audio_t_emb)
 
-        # RoPE frequencies (per-head, using reference log-spaced grid)
+        # RoPE frequencies (per-head, using reference log-spaced grid). A sampler passes the same
+        # positions arrays to every forward of a stage, so the tables are reused from the last
+        # forward when the positions are the very same array (exact: same inputs, same tables).
+        rope_cache: dict = {}
         video_rope_freqs = None
         audio_rope_freqs = None
         if video_positions is not None:
-            video_rope_freqs = self._compute_rope_freqs(
+            video_rope_freqs = self._rope_freqs_cached(
+                rope_cache,
                 video_positions,
+                False,
                 self.config.video_num_heads,
                 self.config.video_head_dim,
             )
         if audio_latent is not None and audio_positions is not None:
-            audio_rope_freqs = self._compute_rope_freqs(
+            audio_rope_freqs = self._rope_freqs_cached(
+                rope_cache,
                 audio_positions,
+                False,
                 self.config.audio_num_heads,
                 self.config.audio_head_dim,
                 max_pos_override=list(self.config.audio_positional_embedding_max_pos),
@@ -1013,19 +1024,40 @@ class LTXModel(nn.Module):
             self.config.audio_positional_embedding_max_pos[0],
         )
         if audio_latent is not None and video_positions is not None:
-            video_cross_rope_freqs = self._compute_rope_freqs(
-                video_positions[:, :, 0:1],  # temporal dimension only
+            video_cross_rope_freqs = self._rope_freqs_cached(
+                rope_cache,
+                video_positions,
+                True,  # temporal dimension only
                 self.config.av_cross_num_heads,
                 self.config.av_cross_head_dim,
                 max_pos_override=[cross_pe_max_pos],
             )
         if audio_latent is not None and audio_positions is not None:
-            audio_cross_rope_freqs = self._compute_rope_freqs(
-                audio_positions[:, :, 0:1],  # temporal dimension only
+            audio_cross_rope_freqs = self._rope_freqs_cached(
+                rope_cache,
+                audio_positions,
+                True,  # temporal dimension only
                 self.config.av_cross_num_heads,
                 self.config.av_cross_head_dim,
                 max_pos_override=[cross_pe_max_pos],
             )
+        # Keep only this forward's tables: memory stays at one forward's worth.
+        object.__setattr__(self, "_rope_cache", rope_cache)
+
+        # Additive masks: clamp + cast to the compute dtype once per forward rather than in
+        # every block's attention (Attention passes a mask already in its dtype through).
+        if self._compute_dtype is not None:
+            cd = self._compute_dtype
+            video_attention_mask = (
+                None if video_attention_mask is None else cast_attention_mask(cd, video_attention_mask)
+            )
+            audio_attention_mask = (
+                None if audio_attention_mask is None else cast_attention_mask(cd, audio_attention_mask)
+            )
+            if video_cross_attention_mask is not None:
+                video_cross_attention_mask = cast_attention_mask(cd, video_cross_attention_mask)
+            if audio_cross_attention_mask is not None:
+                audio_cross_attention_mask = cast_attention_mask(cd, audio_cross_attention_mask)
 
         # --- Block stack (optionally overridden) ---
         block_input_v = video_hidden
@@ -1183,6 +1215,41 @@ class LTXModel(nn.Module):
         x = mx.fast.layer_norm(x, weight=None, bias=None, eps=self.config.norm_eps)
         x = x * (1.0 + scale) + shift
         return proj(x)
+
+    def _rope_freqs_cached(
+        self,
+        new_cache: dict,
+        positions: mx.array,
+        temporal_only: bool,
+        num_heads: int,
+        head_dim: int,
+        max_pos_override: list[int] | None = None,
+    ) -> tuple:
+        """:meth:`_compute_rope_freqs`, reused from the previous forward for the same positions array.
+
+        The key holds ``id(positions)``; the entry keeps a reference to ``positions`` and a hit
+        requires the very same object (``is``), so a recycled id can never match. The entry is
+        copied into ``new_cache``, which replaces the model's cache at the end of the prelude.
+        """
+        key = (
+            id(positions),
+            temporal_only,
+            num_heads,
+            head_dim,
+            None if max_pos_override is None else tuple(max_pos_override),
+        )
+        hit = self._rope_cache.get(key)
+        if hit is not None and hit[0] is positions:
+            freqs = hit[1]
+        else:
+            freqs = self._compute_rope_freqs(
+                positions[:, :, 0:1] if temporal_only else positions,
+                num_heads,
+                head_dim,
+                max_pos_override=max_pos_override,
+            )
+        new_cache[key] = (positions, freqs)
+        return freqs
 
     def _compute_rope_freqs(
         self,

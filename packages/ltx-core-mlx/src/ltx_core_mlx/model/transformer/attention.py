@@ -24,6 +24,18 @@ from ltx_core_mlx.model.transformer.rope import apply_rope_interleaved, apply_ro
 from ltx_core_mlx.model.transformer.sparse_attention import SparseAttentionState, sparse_self_attention
 
 
+def cast_attention_mask(dtype: mx.Dtype, mask: mx.array) -> mx.array:
+    """Clamp an additive attention mask to ``dtype``'s finite range and cast it (boolean masks unchanged).
+
+    A large negative bias (e.g. -1e9, or -inf) becomes the dtype minimum rather than -inf: a
+    row that is fully masked then still softmaxes to a finite result, as in float32.
+    """
+    if mask.dtype == mx.bool_:
+        return mask
+    info = mx.finfo(dtype)
+    return mx.clip(mask, info.min, info.max).astype(dtype)
+
+
 def _cast_inputs(
     dtype: mx.Dtype,
     x: mx.array,
@@ -33,15 +45,15 @@ def _cast_inputs(
 ) -> tuple[mx.array, mx.array | None, mx.array | None, mx.array | None]:
     """Cast the attention inputs to ``dtype``.
 
-    An additive mask is clamped to the dtype's finite range first, so a large
-    negative bias (e.g. -1e9) becomes the dtype minimum rather than -inf: a row
-    that is fully masked then still softmaxes to a finite result, as in float32.
+    An additive mask is clamped to the dtype's finite range first (see
+    :func:`cast_attention_mask`). A mask already in ``dtype`` is taken as already
+    clamped and passed through: ``LTXModel`` casts its masks once per forward with
+    :func:`cast_attention_mask` instead of once per block.
     """
     if encoder_hidden_states is not None:
         encoder_hidden_states = encoder_hidden_states.astype(dtype)
-    if attention_mask is not None and attention_mask.dtype != mx.bool_:
-        info = mx.finfo(dtype)
-        attention_mask = mx.clip(attention_mask, info.min, info.max).astype(dtype)
+    if attention_mask is not None and attention_mask.dtype != dtype:
+        attention_mask = cast_attention_mask(dtype, attention_mask)
     if perturbation_mask is not None:
         perturbation_mask = perturbation_mask.astype(dtype)
     return x.astype(dtype), encoder_hidden_states, attention_mask, perturbation_mask
