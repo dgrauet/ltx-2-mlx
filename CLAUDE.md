@@ -1769,6 +1769,7 @@ extend / ic-lora sources: a 2.5 `--distilled` render of that prompt):
 | `extend` 2.5 (+2 latent frames) | 1424 → 810 s (−43 %) | 43.3 dB / 0.98 | same render |
 | `ic-lora` 2.3, Union-Control, canny control | 83 → 61 s (−27 %) | 24.8 dB / 0.87 | same layout and person, clean; control edges matched 0.34 / 0.36 |
 | same, `--conditioning-strength 0.7` (self-attention mask path) | 83 → 71 s (−15 %) | 23.4 dB / 0.83 | same layout, clean; control edges matched 0.35 / 0.35 |
+| `lipdub` 2.3, Dub-It 0.9 (reference: the `--two-stage` 2.3 render with new speech muxed in) | 158 → 110 s (−30 %) | 44.8 dB / 0.99 | same render; mouth re-synced the same way in both |
 
 The 30-step CFG paths diverge into a different sample at the same seed (the gap compounds over the guided steps);
 neither dtype shows artifacts, banding, burn or flicker, and brightness, contrast, saturation, sharpness and
@@ -1777,8 +1778,8 @@ four, higher on one). `retake` / `extend` keep most of the clip and differ by ~4
 exists) with a grayscale canny control extracted from the `--two-stage` 2.3 render; "control edges matched" is the share
 of control edge pixels with a render edge within 2 px (the source render itself scores 0.99), and float16 keeps it.
 The 2.5 Pixel-Spatial-Upscaler LoRA (a stage-2 detailing LoRA, used by `--dfr`) gives a grid pattern as an `ic-lora`
-task LoRA in both dtypes and on `main` in float32: not float16's. `lipdub` was not run (no Dub-It LoRA locally). One
-seed per arm.
+task LoRA in both dtypes and on `main` in float32: not float16's. `lipdub`: both dtypes reshape the mouth the same way
+(face crops); the reconstructed audio level matches (−19.8 / −20.6 dB). One seed per arm.
 
 Float16 margin: on every forward of two full renders (I2V 576×1024×121 and a flat-sky T2V
 1024×576×97, all 11 forwards each) the largest value inside any attention/FF op was 2,512, against
