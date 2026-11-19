@@ -402,7 +402,7 @@ def test_streamed_video_only_matches_resident():
 @pytest.mark.parametrize(
     "value, expected",
     [
-        ("", None),
+        ("", mx.float16),  # the default
         ("float32", None),
         ("fp32", None),
         ("float16", mx.float16),
@@ -421,10 +421,10 @@ def test_env_rejects_unknown_value(monkeypatch):
         compute_dtype_from_env()
 
 
-def test_env_unset_leaves_pipeline_dit_untouched(monkeypatch):
+def test_env_float32_leaves_pipeline_dit_untouched(monkeypatch):
     from ltx_pipelines_mlx._base import apply_compute_dtype_from_env
 
-    monkeypatch.delenv("LTX2_COMPUTE_DTYPE", raising=False)
+    monkeypatch.setenv("LTX2_COMPUTE_DTYPE", "float32")
     model = _model()
     assert apply_compute_dtype_from_env(model) is model
     assert model.compute_dtype is None
@@ -433,3 +433,12 @@ def test_env_unset_leaves_pipeline_dit_untouched(monkeypatch):
     monkeypatch.setenv("LTX2_COMPUTE_DTYPE", "float16")
     apply_compute_dtype_from_env(model)
     assert model.compute_dtype == mx.float16
+
+
+def test_env_unset_defaults_pipeline_dit_to_float16(monkeypatch):
+    from ltx_pipelines_mlx._base import apply_compute_dtype_from_env
+
+    monkeypatch.delenv("LTX2_COMPUTE_DTYPE", raising=False)
+    model = apply_compute_dtype_from_env(_model())
+    assert model.compute_dtype == mx.float16
+    assert model.transformer_blocks[0].attn1.to_q.scales.dtype == mx.float16

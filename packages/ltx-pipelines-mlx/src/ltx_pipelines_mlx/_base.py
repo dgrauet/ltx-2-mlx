@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
 
 def apply_compute_dtype_from_env(dit: LTXModel) -> LTXModel:
-    """Apply ``LTX2_COMPUTE_DTYPE`` to a freshly loaded DiT (unset: no change).
+    """Apply ``LTX2_COMPUTE_DTYPE`` to a freshly loaded DiT (unset: float16; ``float32``: no change).
 
     Args:
         dit: The loaded ``LTXModel`` or ``StreamingLTXModel``.

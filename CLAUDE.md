@@ -1711,21 +1711,22 @@ blocks. Both are on by default and bit-identical by construction:
 
 ### DiT compute dtype (`LTX2_COMPUTE_DTYPE`)
 
-The DiT runs in float32 by default, although its weights are bf16: the `scale_shift_table`s are
+Default since 0.19: **float16** (unset). `LTX2_COMPUTE_DTYPE=float32` gives the old path described
+next. Without a compute dtype the DiT runs in float32, although its weights are bf16: the `scale_shift_table`s are
 stored F32 and the per-token AdaLN parameters are F32 (the sinusoidal timestep embedding is
 float32), so `rms(x) * (1 + scale) + shift` promotes the modulated activations, the residual stream
 becomes float32 after block 0, and every projection and attention call follows. Upstream PyTorch
 casts the tables to the timestep dtype and runs the whole block in bf16.
 
-`LTX2_COMPUTE_DTYPE=float16` (Python: `LTXModel.set_compute_dtype(mx.float16)`; pipelines apply the
-variable when they load a DiT, including `--low-ram`, where `BlockStreamer.bind` casts each block as
+`LTX2_COMPUTE_DTYPE=float16` (the default; Python: `LTXModel.set_compute_dtype(mx.float16)` -- a bare
+`LTXModel` stays float32 until it is called; pipelines apply the variable when they load a DiT, including `--low-ram`, where `BlockStreamer.bind` casts each block as
 it is bound) runs the inside of every attention and feed-forward module in float16: projections,
 q/k norms, RoPE and the attention kernel. The residual stream and the AdaLN modulation stay float32,
 and the float32 gate multiply promotes each module output back before the residual add. The modules'
 float parameters (quantization scales/biases, Linear biases, q/k norm weights) are cast at load:
 float16 activations against bf16 scales would promote to float32 inside `quantized_matmul` and gain
-nothing. The AdaLN tables keep their F32 dtype. `bfloat16` gives the upstream precision; unset or
-`float32` is today's path, untouched. In-place LoRA fusion (`dfr`'s detailing LoRA, `ic-lora`, and the
+nothing. The AdaLN tables keep their F32 dtype. `bfloat16` gives the upstream precision; `float32`
+is the pre-0.19 path, untouched. In-place LoRA fusion (`dfr`'s detailing LoRA, `ic-lora`, and the
 distilled-LoRA fusion that starts stage 2 of `--two-stage`, `--two-stages-hq` and `a2v`
 in `TI2VidTwoStagesPipeline._fuse_distilled_lora`) re-quantizes from a float32 weight; `fuse_loras`
 gives the new scales/biases the dtype the old ones had (until that fix they came out float32 on every

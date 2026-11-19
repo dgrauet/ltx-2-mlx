@@ -330,7 +330,7 @@ Notes:
 
 See [docs/PIPELINES.md § Speed](docs/PIPELINES.md#speed) and [§ Memory](docs/PIPELINES.md#memory) for the watchdog / Gemma-length / low-RAM environment variables and their trade-offs.
 
-`LTX2_COMPUTE_DTYPE=float16` runs the DiT's attention and feed-forward in float16 (opt-in; on an M1 Max with the 2.5 q8 pack a 576×1024×241 `--distilled` I2V render went from 701 s to 563 s).
+The DiT's attention and feed-forward run in float16 by default (since 0.19; on an M1 Max with the 2.5 q8 pack a 576×1024×241 `--distilled` I2V render takes 563 s against 701 s in float32). `LTX2_COMPUTE_DTYPE=float32` restores the previous path.
 
 ## Frame Count Reference
 

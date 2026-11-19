@@ -46,14 +46,17 @@ _mx_eval = getattr(mx, "eval")  # noqa: B009
 
 # LTX2_COMPUTE_DTYPE: dtype for the inside of every DiT attention / feed-forward
 # module (projections, q/k norms, RoPE, the attention kernel). Unset or
-# "float32" keeps the default path, which runs the blocks in float32: the F32
-# AdaLN tables promote the modulated activations. "float16" runs those
-# internals in float16 while the residual stream and the AdaLN modulation stay
-# float32 -- on an M1 GPU, which has no native bfloat16, float16 is the fast type.
-# "bfloat16" is the precision upstream PyTorch computes in. Pipelines apply it
-# when they load a DiT; LTXModel.set_compute_dtype is the Python API.
+# "float16" (the default since 0.19) runs those internals in float16 while the
+# residual stream and the AdaLN modulation stay float32: float16 matmuls and
+# attention run ~1.5x faster than float32 on every Apple GPU measured (M1 Max,
+# M4 Pro, M5 Pro). "float32" restores the old path, which runs the blocks in
+# float32 (the F32 AdaLN tables promote the modulated activations). "bfloat16"
+# is the precision upstream PyTorch computes in. Pipelines apply it when they
+# load a DiT; LTXModel.set_compute_dtype is the Python API (a bare LTXModel
+# stays float32 until it is called).
+_DEFAULT_COMPUTE_DTYPE: mx.Dtype = mx.float16
 _COMPUTE_DTYPES: dict[str, mx.Dtype | None] = {
-    "": None,
+    "": _DEFAULT_COMPUTE_DTYPE,
     "float32": None,
     "fp32": None,
     "float16": mx.float16,
@@ -67,7 +70,7 @@ def compute_dtype_from_env() -> mx.Dtype | None:
     """Parse ``LTX2_COMPUTE_DTYPE``.
 
     Returns:
-        The requested dtype, or ``None`` (unset / ``float32``) to leave the DiT as loaded.
+        The requested dtype (unset: float16), or ``None`` (``float32``) to leave the DiT as loaded.
 
     Raises:
         ValueError: On a value other than float32, float16 or bfloat16 (or their short forms).
