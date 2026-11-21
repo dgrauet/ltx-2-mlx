@@ -439,7 +439,13 @@ def kernel_available(dtype: mx.Dtype = mx.float16) -> bool:
                 for i in range(3)
             )
             out = sparse_self_attention(q, k, v, 128**-0.5, tau=-math.inf, check=False)
-            ref = mx.fast.scaled_dot_product_attention(q, k, v, scale=128**-0.5).transpose(0, 2, 1, 3)
+            # Exact fp32 reference on the CPU: MLX >= 0.32 runs fp32 GPU matmuls (dense SDPA included) in TF32 on
+            # newer GPUs (M5), ~1e-3 off, which failed the fp32 check although the kernel itself is exact.
+            with mx.stream(mx.cpu):
+                qf, kf, vf = (x.astype(mx.float32) for x in (q, k, v))
+                scores = (qf @ kf.transpose(0, 1, 3, 2)) * 128**-0.5
+                ref = (mx.softmax(scores, axis=-1) @ vf).transpose(0, 2, 1, 3)
+                mx.eval(ref)
             atol = _PROBE_ATOL.get(dtype, 2e-3)
             ok = bool(mx.allclose(out.astype(mx.float32), ref.astype(mx.float32), atol=atol).item())
             if not ok:
