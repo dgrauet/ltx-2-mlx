@@ -66,3 +66,12 @@ def test_control_aware_refine_keeps_the_stage_1_model(tmp_path, monkeypatch, kw)
     monkeypatch.setattr(ic_mod, "append_ic_lora_reference_video_conditionings", lambda conds, *a, **k: None)
     pipe.generate("a fox", [], height=128, width=128, num_frames=17, frame_rate=24.0, seed=1, **kw)
     assert calls == [("x0", "stage-1 transformer (IC-LoRA fused)")] * 2
+
+
+def test_upsampler_resolves_the_25_file(tmp_path):
+    """A 2.5 pack ships only ``spatial_upscaler_x2_v1_0``: ic-lora loaded ``v1_1`` and, finding none,
+    silently upscaled with an untrained module (stage 2 decoded to a mosaic grid)."""
+    (tmp_path / "embedded_config.json").write_text(json.dumps({"transformer": {"num_layers": 48, "ff_bias": False}}))
+    (tmp_path / "spatial_upscaler_x2_v1_0.safetensors").touch()
+    pipe = ic_mod.ICLoraPipeline(model_dir=str(tmp_path), low_memory=False)
+    assert pipe._resolve_upsampler_path().name == "spatial_upscaler_x2_v1_0.safetensors"
