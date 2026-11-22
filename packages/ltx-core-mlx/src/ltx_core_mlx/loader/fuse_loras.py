@@ -13,7 +13,7 @@ from __future__ import annotations
 import mlx.core as mx
 
 from ltx_core_mlx.loader.primitives import LoraStateDictWithStrength, StateDict
-from ltx_core_mlx.utils.weights import derive_quant_params
+from ltx_core_mlx.utils.weights import derive_quant_params, infer_quant_mode
 
 
 def apply_loras(
@@ -186,40 +186,42 @@ def _fuse_delta_with_quantized(
     scales = model_sd.sd[scales_key] if scales_key else None
     biases = model_sd.sd.get(biases_key) if biases_key else None
 
-    # Infer quantization parameters BEFORE dequantizing. The LoRA delta carries
-    # the true (out, in) weight shape, so the real in_features disambiguates
-    # (bits, group_size) for any group size (32/64/128) and bit width (4/8) —
-    # see derive_quant_params, the single home shared with load-time quantization.
     in_features_packed = weight.shape[-1]
     if scales is not None and scales.ndim > 1:
         num_groups = scales.shape[1]
         in_features_real = deltas.shape[-1]
         bits, group_size = derive_quant_params(in_features_real, in_features_packed, num_groups)
+        mode = infer_quant_mode(
+            bits,
+            group_size,
+            has_biases=biases is not None,
+            scales_dtype=scales.dtype,
+        )
     else:
         group_size = 64
         bits = 8
+        mode = "affine"
 
-    # Dequantize: reconstruct the float weight from quantized representation
     original = mx.dequantize(
         weight,
         scales=scales,
         biases=biases,
         group_size=group_size,
         bits=bits,
+        mode=mode,
     ).astype(mx.float32)
 
-    # Fuse
     new_weight = original + deltas.astype(mx.float32)
 
-    new_quantized, new_scales, new_biases = mx.quantize(new_weight, group_size=group_size, bits=bits)
+    quantized = mx.quantize(new_weight, group_size=group_size, bits=bits, mode=mode)
+    new_quantized = quantized[0]
+    new_scales = quantized[1]
+    new_biases = quantized[2] if len(quantized) > 2 else None
 
-    # mx.quantize takes its scales/biases dtype from the float32 input. Keep the original dtype
-    # (bfloat16 in the q8/q4 packs), or every fused layer feeds float32 scales to quantized_matmul,
-    # which then promotes its activations and output to float32.
     result = {key: new_quantized}
     if scales_key:
         result[scales_key] = new_scales.astype(scales.dtype) if scales is not None else new_scales
-    if biases_key:
+    if biases_key and new_biases is not None:
         result[biases_key] = new_biases.astype(biases.dtype) if biases is not None else new_biases
     return result
 

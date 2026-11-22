@@ -111,6 +111,28 @@ def derive_quant_params(
     return bits, group_size
 
 
+def infer_quant_mode(
+    bits: int,
+    group_size: int,
+    *,
+    has_biases: bool,
+    scales_dtype: mx.Dtype | None = None,
+) -> str:
+    if has_biases:
+        return "affine"
+    if scales_dtype == mx.uint8:
+        if bits == 4 and group_size == 32:
+            return "mxfp4"
+        if bits == 8 and group_size == 32:
+            return "mxfp8"
+        if bits == 4 and group_size == 16:
+            return "nvfp4"
+    raise ValueError(
+        f"cannot infer quantization mode for bits={bits}, group_size={group_size}, "
+        f"has_biases={has_biases}, scales_dtype={scales_dtype}"
+    )
+
+
 def validate_config_matches_weights(transformer_path: Path, config) -> None:
     """Refuse a 2.5-shaped checkpoint driven by a 2.3 config.
 
@@ -144,39 +166,47 @@ def validate_config_matches_weights(transformer_path: Path, config) -> None:
         )
 
 
-def _derive_quant_params(
+def _derive_layer_quant_params(
     model: nn.Module,
     weights: dict[str, mx.array],
     quantized_layers: set[str],
-) -> tuple[int, int] | None:
-    """Derive (bits, group_size) from a representative quantized layer.
-
-    Cross-references the saved packed weight + scales against the model's float
-    weight, whose last dim is the true ``in_features``, via
-    :func:`derive_quant_params`.
-
-    Returns None if no quantized layer can be matched to a *float* model weight
-    (falls back to shape-only detection).
-    """
+) -> dict[str, tuple[int, int, str]]:
     from mlx.utils import tree_flatten
 
     model_params = dict(tree_flatten(model.parameters()))
+    per_layer: dict[str, tuple[int, int, str]] = {}
     for layer in quantized_layers:
         wkey = f"{layer}.weight"
         skey = f"{layer}.scales"
         if wkey not in weights or skey not in weights or wkey not in model_params:
             continue
-        # Skip layers the model already stores quantized: then ``.weight``'s last
-        # dim is the packed column count, not the true in_features, and the
-        # derivation would produce garbage. (e.g. the ic_lora re-quantization
-        # path, where the dit is quantized before fusion runs.)
         if skey in model_params:
             continue
         in_features = int(model_params[wkey].shape[-1])
         packed_cols = int(weights[wkey].shape[-1])
         scales_cols = int(weights[skey].shape[-1])
-        return derive_quant_params(in_features, packed_cols, scales_cols)
-    return None
+        bits, group_size = derive_quant_params(in_features, packed_cols, scales_cols)
+        mode = infer_quant_mode(
+            bits,
+            group_size,
+            has_biases=f"{layer}.biases" in weights,
+            scales_dtype=weights[skey].dtype,
+        )
+        per_layer[layer] = (bits, group_size, mode)
+    return per_layer
+
+
+def _derive_quant_params(
+    model: nn.Module,
+    weights: dict[str, mx.array],
+    quantized_layers: set[str],
+) -> tuple[int, int] | None:
+    """Derive (bits, group_size) from a representative quantized layer."""
+    per_layer = _derive_layer_quant_params(model, weights, quantized_layers)
+    if not per_layer:
+        return None
+    bits, group_size, _mode = next(iter(per_layer.values()))
+    return bits, group_size
 
 
 def apply_quantization(
@@ -187,15 +217,12 @@ def apply_quantization(
 ) -> None:
     """Apply quantization to Linear layers that have quantized weights.
 
-    Detects quantized layers by checking for 'scales' and 'biases' keys
-    in the weight dict and calls nn.quantize on matching layers.
-    Bit width is auto-detected from weight shapes if not specified.
-
-    Args:
-        model: The nn.Module to quantize.
-        weights: Weight dict (may contain scales/biases for quantized layers).
-        group_size: Quantization group size.
-        bits: Quantization bit width. Auto-detected if None.
+    Detects quantized layers by checking for ``.scales`` keys in ``weights``
+    and converts matching ``nn.Linear`` modules to ``nn.QuantizedLinear``
+    using per-layer ``(bits, group_size, mode)`` derived from each layer's
+    unpacked ``in_features`` and saved tensor metadata. Supports uniform and
+    mixed-precision checkpoints across affine (2..8-bit), MXFP4, MXFP8, and
+    NVFP4 formats.
     """
     quantized_layers: set[str] = set()
 
@@ -207,24 +234,27 @@ def apply_quantization(
     if not quantized_layers:
         return
 
-    # Derive bits AND group_size from the model's true in_features. The saved
-    # tensors alone are ambiguous — packed weight cols and scales cols only pin
-    # down (group_size * bits), not the split — so a g32/int4 model is
-    # indistinguishable from g64/int2 without external truth. The model's float
-    # weights still carry the real (out, in) shape, which disambiguates.
-    #
-    # group_size is derived independently of whether an explicit ``bits`` was
-    # passed: otherwise ``bits=4`` on a g32 checkpoint would leave the default
-    # group_size=64 and fail load_weights with a shape mismatch.
-    derived = _derive_quant_params(model, weights, quantized_layers)
-    if derived is not None:
-        derived_bits, group_size = derived
-        if bits is None:
-            bits = derived_bits
-    elif bits is None:
+    per_layer = _derive_layer_quant_params(model, weights, quantized_layers)
+    if per_layer:
+        def _layer_predicate(path: str, module: nn.Module) -> bool | dict:
+            if not isinstance(module, nn.Linear):
+                return False
+            params = per_layer.get(path)
+            if params is None:
+                return False
+            layer_bits, layer_group_size, layer_mode = params
+            return {
+                "bits": bits if bits is not None else layer_bits,
+                "group_size": layer_group_size,
+                "mode": layer_mode,
+            }
+
+        nn.quantize(model, class_predicate=_layer_predicate)
+        return
+
+    if bits is None:
         bits = _detect_quantization_bits(weights, group_size)
 
-    # Build class predicate: only quantize layers that have scales in the weights
     def _should_quantize(path: str, _module: nn.Module) -> bool:
         return path in quantized_layers and isinstance(_module, nn.Linear)
 
