@@ -215,17 +215,19 @@ class Attention(nn.Module):
             out_neg = mx.fast.scaled_dot_product_attention(q, k_neg, v_neg, scale=self.scale)
             out = normalized_attention_guidance(out, out_neg, nag_scale, nag_alpha, nag_tau, axis=(1, 3))
 
-        # STG perturbation: blend attn output with value projection
-        # Reference: out = attn_out * mask + v * (1 - mask)
-        if perturbation_mask is not None:
-            # perturbation_mask: (B, 1, 1, 1) — 1.0=keep attn, 0.0=skip to values
-            out = out * perturbation_mask + v * (1.0 - perturbation_mask)
-
-        # Per-head gating: gate = 2 * sigmoid(logits)
+        # Per-head gating: gate = 2 * sigmoid(logits). It scales the attention output only: the
+        # value projection an STG-perturbed sample falls back to (below) stays ungated, as upstream
+        # since v1.6.0 (the gate used to be applied after the blend, to the bypassed values too).
         if self.to_gate_logits is not None:
             gate_logits = self.to_gate_logits(x)  # (B, N, num_heads)
             gate = 2.0 * mx.sigmoid(gate_logits)
             out = out * gate.transpose(0, 2, 1)[:, :, :, None]  # (B, heads, N, 1)
+
+        # STG perturbation: blend the gated attention output with the value projection
+        # Reference: out = attn_out * mask + v * (1 - mask)
+        if perturbation_mask is not None:
+            # perturbation_mask: (B, 1, 1, 1) — 1.0=keep attn, 0.0=skip to values
+            out = out * perturbation_mask + v * (1.0 - perturbation_mask)
 
         # Reshape back: (B, num_heads, N, head_dim) -> (B, N, inner_dim)
         out = out.transpose(0, 2, 1, 3).reshape(B, -1, self.num_heads * self.head_dim)
