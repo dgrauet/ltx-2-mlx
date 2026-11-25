@@ -84,6 +84,25 @@ def _params_for_sigma_from_sorted_dict(
     return next(p for k, p in params_by_sigma if k == key)
 
 
+def _masked_std(x: mx.array, active: mx.array, count: int) -> mx.array:
+    """Standard deviation of ``x`` over its ``count`` ``active`` elements.
+
+    Mirrors upstream ``_masked_std``: inactive elements are replaced by the masked
+    mean, so they add nothing to the squared deviations, and the variance over all
+    elements is rescaled to ``count``.
+
+    Args:
+        x: Prediction.
+        active: Boolean mask of the elements to keep, same shape as ``x``.
+        count: Number of active elements (at least 1).
+
+    Returns:
+        Scalar population standard deviation over the active elements.
+    """
+    mean = mx.where(active, x, 0.0).sum() / count
+    return mx.sqrt(mx.var(mx.where(active, x, mean)) * (x.size / count))
+
+
 @dataclass(frozen=True)
 class MultiModalGuider:
     """Multi-modal guider with constant params per instance.
@@ -101,6 +120,7 @@ class MultiModalGuider:
         uncond_text: mx.array | float,
         uncond_perturbed: mx.array | float,
         uncond_modality: mx.array | float,
+        denoise_mask: mx.array | None = None,
     ) -> mx.array:
         """Apply multi-modal guidance to compute the guided prediction.
 
@@ -110,12 +130,18 @@ class MultiModalGuider:
                  + (modality_scale - 1) * (cond - uncond_modality)
 
         With optional rescaling to preserve the norm of the conditioned prediction.
+        When ``denoise_mask`` is given, the rescale factor is estimated only over
+        tokens with a non-zero mask, so fixed conditioning and reference tokens do
+        not skew it (upstream since v1.6.0). With no such tokens, no rescaling is
+        applied.
 
         Args:
             cond: Conditioned prediction.
             uncond_text: Unconditional (text-dropped) prediction for CFG.
             uncond_perturbed: Perturbed prediction for STG.
             uncond_modality: Modality-dropped prediction for modality guidance.
+            denoise_mask: Optional per-token denoise mask broadcastable to ``cond``
+                (e.g. ``(B, N, 1)``); ``None`` estimates the factor over all tokens.
 
         Returns:
             Guided prediction.
@@ -128,7 +154,15 @@ class MultiModalGuider:
         )
 
         if self.params.rescale_scale != 0:
-            factor = mx.sqrt(mx.var(cond)) / (mx.sqrt(mx.var(pred)) + 1e-8)
+            active = None if denoise_mask is None else mx.broadcast_to(denoise_mask != 0, cond.shape)
+            count = cond.size if active is None else int(active.sum().item())
+            if count == cond.size:
+                # Every token is denoised: the plain estimate (kept as is, so these renders do not move).
+                factor = mx.sqrt(mx.var(cond)) / (mx.sqrt(mx.var(pred)) + 1e-8)
+            elif count > 1:
+                factor = _masked_std(cond, active, count) / (_masked_std(pred, active, count) + 1e-8)
+            else:
+                factor = mx.array(1.0)
             factor = self.params.rescale_scale * factor + (1 - self.params.rescale_scale)
             pred = pred * factor
 
