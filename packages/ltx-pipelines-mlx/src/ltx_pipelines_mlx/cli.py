@@ -618,10 +618,11 @@ examples:
             "PATH alone defaults to FRAME_IDX=0 STRENGTH=1.0 (legacy single-image I2V). "
             "Repeatable to anchor multiple frames (e.g. --image foo.jpg 0 1.0 "
             "--image foo.jpg 96 1.0 to anchor both ends and preserve identity). "
-            "FRAME_IDX is the pixel frame index (0-based). "
+            "FRAME_IDX is the pixel frame index (0-based). A guide may sit outside the clip, as upstream: "
+            "a negative index is that many frames before frame 0 (-1 for a look still just before the shot), "
+            "an index >= the frame count is after the last frame. "
             "BINDING is auto (default when omitted: FRAME_IDX 0 replaces the first latent, later frames guide), replace (pins the still on a causal latent start: pixel frame 0 or 1 + 8 * k) or guide (a keyframe at any pixel frame); with one trailing token, a binding keyword selects BINDING and an integer selects CRF. "
-            "FRAME_IDX may be 'last' or negative (counted from the end), so an end "
-            "anchor follows the frame count --auto-duration picks. "
+            "FRAME_IDX may be 'last', so an end anchor follows the frame count --auto-duration picks. "
             "CRF (0 = no re-compression) defaults to the model's: 33 before LTX-2.4, 18 from 2.4. "
             "Mirrors upstream LTX_2_3 --image."
         ),
@@ -942,7 +943,7 @@ examples:
         help=(
             "[--distilled only] Image anchor for the new frames. Form: PATH [FRAME_IDX STRENGTH [BINDING] [CRF]], repeatable, "
             "as generate --distilled --image. FRAME_IDX counts the appended frames only: 0 is the first new frame, "
-            "'last' or -1 the last one (8 x --extend-frames new frames). Every anchor is a guide "
+            "'last' the last one (8 x --extend-frames new frames); an index outside them is refused. Every anchor is a guide "
             "(VideoConditionByKeyframeIndex), applied in both stages; BINDING replace is refused off frame 0. PATH alone means FRAME_IDX=0 STRENGTH=1.0."
         ),
     )

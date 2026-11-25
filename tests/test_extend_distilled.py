@@ -428,13 +428,13 @@ def test_stage1_applies_the_video_hook(tmp_path, monkeypatch):
 
 
 def test_image_anchors_count_the_new_frames_and_move_past_the_carry(stubbed):
-    """--image FRAME counts appended frames (0 = first new frame, -1 = last); the window puts them after the carry."""
+    """--image FRAME counts appended frames (0 = first new frame, ``last`` the final one); the window puts them after the carry."""
     from ltx_pipelines_mlx.utils.args import ImageConditioningInput
 
     pipe, record, _ = stubbed
     images = [
         ImageConditioningInput.at("a.png", 0, 0.7),
-        ImageConditioningInput.at("b.png", -1, 0.7),
+        ImageConditioningInput.last("b.png", 0.7),
         ImageConditioningInput.at("c.png", 10, 1.0, 0),
     ]
     pipe.extend_from_video("x", "src.mp4", extend_frames=3, images=images)
@@ -486,10 +486,11 @@ def test_cli_extend_distilled_forwards_image_anchors(monkeypatch, tmp_path):
         _extend_args(tmp_path, "--distilled", "--image", "face.png", "last", "0.7", "--image", "f2.png", "40", "1.0")
     )
 
-    assert [(i.path, i.frame_idx, i.strength) for i in received["images"]] == [
-        ("face.png", -1, 0.7),
-        ("f2.png", 40, 1.0),
+    assert [(i.path, i.from_end, i.strength) for i in received["images"]] == [
+        ("face.png", True, 0.7),
+        ("f2.png", False, 1.0),
     ]
+    assert received["images"][1].frame_idx == 40
 
 
 def test_cli_dev_extend_rejects_image_anchors(monkeypatch, tmp_path):
