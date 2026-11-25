@@ -396,9 +396,9 @@ def _refuse_replace_under_temporal_rounds(
     local guard raises before any model work instead.
 
     Args:
-        images: Image conditioning inputs, ``frame_idx`` possibly negative (counted from the end).
+        images: Image conditioning inputs, possibly with a ``last`` anchor still to be placed.
         num_frames: Requested pixel-frame count, or ``None`` while it is still to be predicted: a
-            negative index is then skipped here and checked again once the length is known.
+            ``last`` anchor is then skipped here and checked again once the length is known.
 
     Raises:
         ValueError: on a ``replace`` binding that does not land on frame 0.
@@ -407,10 +407,10 @@ def _refuse_replace_under_temporal_rounds(
         if not image.replaces:
             continue
         frame_idx = image.frame_idx
-        if frame_idx < 0:
+        if image.from_end:
             if num_frames is None:
                 continue
-            frame_idx += num_frames
+            frame_idx = num_frames - 1
         if frame_idx != 0:
             raise ValueError(
                 f"--image {image.path}: a replace binding off frame 0 is not supported with DFR temporal rounds "
@@ -726,7 +726,7 @@ class DFRPipeline(DistilledPipeline):
             """Pad the resolved clip length to whole keyframe segments (``_stage1`` hook)."""
             nonlocal requested
             if self.temporal_upscalings:
-                _refuse_replace_under_temporal_rounds(images, resolved_frames)  # negative indices, now resolvable
+                _refuse_replace_under_temporal_rounds(images, resolved_frames)  # `last` anchors, now placeable
             canvas_frames, segment, positions = resolve_canvas(resolved_frames)
             requested = resolved_frames
             if self.verbose:

@@ -112,23 +112,32 @@ def test_path_alone_is_the_legacy_first_frame_replace() -> None:
 
 
 def test_last_takes_a_binding() -> None:
-    assert _parse("a.png", "last", "1.0", "guide").binding == ImageGuide(-1)
-    assert _parse("a.png", "last", "1.0").binding == ImageGuide(-1)
+    for image in (_parse("a.png", "last", "1.0", "guide"), _parse("a.png", "last", "1.0")):
+        assert image.from_end
+        assert not image.replaces
+    assert _parse("a.png", "last", "1.0", "replace").replaces
 
 
-# --- negative indices --------------------------------------------------------------------
+# --- last, and indices outside the clip --------------------------------------------------
 
 
-def test_negative_replace_is_checked_once_resolved() -> None:
-    """``num_frames - n`` starts a latent iff ``n % 8 == 0`` (``num_frames`` is ``8m + 1``)."""
-    assert resolve_frame_indices([_parse("a.png", "-8", "1.0", "replace")], 97)[0].binding == ImageReplace(89)
+def test_last_replace_is_refused_once_the_length_is_known() -> None:
+    """The last frame of an ``8m + 1`` clip is ``8m``, which starts no latent."""
     with pytest.raises(ValueError, match=r"--image a\.png: ImageReplace frame_idx must be 0 or 1 \+ 8 \* k, got 96"):
         resolve_frame_indices([_parse("a.png", "last", "1.0", "replace")], 97)
 
 
-def test_auto_minus_num_frames_is_a_guide_at_frame_zero() -> None:
-    """Upstream ``.at`` decides from the literal index, so ``-num_frames`` guides frame 0."""
-    assert resolve_frame_indices([_parse("a.png", "-25", "1.0")], 25)[0].binding == ImageGuide(0)
+def test_a_negative_replace_is_refused_when_parsed() -> None:
+    """Only a guide may sit before the clip (upstream ``assert_image_frames_in_clip``)."""
+    with pytest.raises(ValueError, match=r"ImageReplace frame_idx must be 0 or 1 \+ 8 \* k, got -8"):
+        ImageConditioningInput.replace("a.png", -8, 1.0)
+    with pytest.raises(SystemExit):
+        _parse("a.png", "-8", "1.0", "replace")
+
+
+def test_auto_negative_index_stays_a_guide_before_the_clip() -> None:
+    """Upstream ``.at`` makes every non-zero index a guide; a negative one is not moved into the clip."""
+    assert resolve_frame_indices([_parse("a.png", "-25", "1.0")], 25)[0].binding == ImageGuide(-25)
 
 
 # --- lowering ----------------------------------------------------------------------------
@@ -210,16 +219,16 @@ def test_extend_refuses_a_replace_off_frame_zero() -> None:
     """The window's latent grid starts on the carry, so a replace would silently become a guide."""
     with pytest.raises(ValueError, match="extend --distilled takes every anchor as a guide"):
         _as_guide(ImageConditioningInput.replace("a.png", 9, 1.0))
-    with pytest.raises(ValueError, match="got frame -8"):
-        _as_guide(_parse("a.png", "-8", "1.0", "replace"))
+    assert _as_guide(_parse("a.png", "last", "1.0")).from_end
 
 
-def test_dfr_guard_resolves_negative_replace_indices() -> None:
-    """``-num_frames`` is frame 0; with the length still to be predicted a negative index waits."""
-    _refuse_replace_under_temporal_rounds([_parse("a.png", "-97", "1.0", "replace")], 97)
-    _refuse_replace_under_temporal_rounds([_parse("a.png", "-96", "1.0", "replace")], None)
+def test_dfr_guard_waits_for_the_length_before_judging_a_last_replace() -> None:
+    """A ``last`` replace is frame 0 only on a one-frame clip; with the length still to be predicted it waits."""
+    last_replace = [_parse("a.png", "last", "1.0", "replace")]
+    _refuse_replace_under_temporal_rounds(last_replace, 1)
+    _refuse_replace_under_temporal_rounds(last_replace, None)
     with pytest.raises(ValueError, match="replace binding off frame 0"):
-        _refuse_replace_under_temporal_rounds([_parse("a.png", "-96", "1.0", "replace")], 97)
+        _refuse_replace_under_temporal_rounds(last_replace, 97)
 
 
 def test_refine_audio_is_refused_by_pipelines_without_it() -> None:
