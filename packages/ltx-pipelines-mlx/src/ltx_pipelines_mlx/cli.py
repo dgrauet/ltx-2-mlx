@@ -999,6 +999,24 @@ examples:
     ic.add_argument("--stage1-steps", type=int, default=None, help="Stage 1 denoising steps")
     ic.add_argument("--stage2-steps", type=int, default=None, help="Stage 2 denoising steps")
     ic.add_argument(
+        "--sampler",
+        choices=("euler", "euler_ancestral_cfg_pp"),
+        default="euler",
+        help=(
+            "Stage-1 sampler (default: euler, deterministic). euler_ancestral_cfg_pp is the ancestral CFG++ "
+            "sampler at CFG scale 1: it needs --single-stage and runs a second forward on the negative prompt "
+            "at every step but the last, so a render costs about twice as much."
+        ),
+    )
+    ic.add_argument(
+        "--negative-prompt",
+        default=None,
+        help=(
+            "Negative prompt for --sampler euler_ancestral_cfg_pp (default: the upstream DEFAULT_NEGATIVE_PROMPT). "
+            "Rejected with the euler sampler, which has no negative pass."
+        ),
+    )
+    ic.add_argument(
         "--conditioning-strength",
         type=float,
         default=1.0,
@@ -1843,6 +1861,12 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
 
     from ltx_pipelines_mlx.ic_lora import ICLoraPipeline
 
+    # Refuse the sampler combinations the pipeline rejects before any model loads.
+    if args.sampler != "euler" and not args.single_stage:
+        raise SystemExit(f"--sampler {args.sampler} needs --single-stage.")
+    if args.sampler == "euler" and args.negative_prompt is not None:
+        raise SystemExit("--negative-prompt needs --sampler euler_ancestral_cfg_pp on ic-lora.")
+
     # Parse --lora pairs into (path, strength) tuples
     lora_paths = [(path, float(strength)) for path, strength in args.lora]
 
@@ -1897,6 +1921,8 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         stage2_steps=args.stage2_steps,
         images=args.images,
         conditioning_attention_strength=args.conditioning_strength,
+        sampler=args.sampler,
+        negative_prompt=args.negative_prompt,
         skip_stage_2=args.skip_stage_2,
         single_stage=args.single_stage,
         upsample_only=args.upsample_only,
