@@ -971,8 +971,8 @@ def res2s_denoise_loop(
                 mod_v, mod_a = run_pass("mod", mod_kw)
 
             # 5. Apply guiders
-            v_x0 = video_guider.calculate(cond_v, neg_v, ptb_v, mod_v)
-            a_x0 = audio_guider.calculate(cond_a, neg_a, ptb_a, mod_a)
+            v_x0 = video_guider.calculate(cond_v, neg_v, ptb_v, mod_v, denoise_mask=video_state.denoise_mask)
+            a_x0 = audio_guider.calculate(cond_a, neg_a, ptb_a, mod_a, denoise_mask=audio_state.denoise_mask)
 
         v_x0 = apply_denoise_mask(v_x0, video_state.clean_latent, video_state.denoise_mask)
         a_x0 = apply_denoise_mask(a_x0, audio_state.clean_latent, audio_state.denoise_mask)
@@ -1440,12 +1440,16 @@ def guided_denoise_loop(
         if video_guider.should_skip_step(step_idx) and last_video_x0 is not None:
             video_x0 = last_video_x0
         else:
-            video_x0 = video_guider.calculate(cond_video_x0, neg_video_x0, ptb_video_x0, mod_video_x0)
+            video_x0 = video_guider.calculate(
+                cond_video_x0, neg_video_x0, ptb_video_x0, mod_video_x0, denoise_mask=video_state.denoise_mask
+            )
 
         if audio_guider.should_skip_step(step_idx) and last_audio_x0 is not None:
             audio_x0 = last_audio_x0
         else:
-            audio_x0 = audio_guider.calculate(cond_audio_x0, neg_audio_x0, ptb_audio_x0, mod_audio_x0)
+            audio_x0 = audio_guider.calculate(
+                cond_audio_x0, neg_audio_x0, ptb_audio_x0, mod_audio_x0, denoise_mask=audio_state.denoise_mask
+            )
 
         # Apply denoise mask: blend with clean latent
         video_x0 = apply_denoise_mask(video_x0, video_state.clean_latent, video_state.denoise_mask)
