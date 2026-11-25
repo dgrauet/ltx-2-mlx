@@ -263,11 +263,19 @@ def test_cli_cfg_subcommands_have_negative_prompt_flag(subcommand):
     assert "--negative-prompt" in parser_flags(subcommand)
 
 
-@pytest.mark.parametrize("subcommand", ["ic-lora", "hdr-ic-lora", "lipdub"])
+@pytest.mark.parametrize("subcommand", ["hdr-ic-lora", "lipdub"])
 def test_cli_distilled_sampler_subcommands_lack_negative_prompt_flag(subcommand):
     from tests.test_docs_flags import parser_flags
 
     assert "--negative-prompt" not in parser_flags(subcommand)
+
+
+def test_cli_ic_lora_takes_a_negative_prompt_for_cfg_pp_only():
+    """``ic-lora`` has the flag for ``--sampler euler_ancestral_cfg_pp``; the default Euler path refuses it
+    (``tests/test_iclora_cfgpp.py``)."""
+    from tests.test_docs_flags import parser_flags
+
+    assert {"--negative-prompt", "--sampler"} <= parser_flags("ic-lora")
 
 
 def _argv(tmp_path, *extra):
