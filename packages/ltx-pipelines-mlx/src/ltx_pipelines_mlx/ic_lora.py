@@ -45,9 +45,10 @@ from ltx_pipelines_mlx.iclora_utils import (
 )
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS, shorten_schedule
 from ltx_pipelines_mlx.utils.blocks import snap_num_frames
+from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.media_io import decode_video_by_frame, video_preprocess
-from ltx_pipelines_mlx.utils.samplers import denoise_loop
+from ltx_pipelines_mlx.utils.samplers import denoise_loop, euler_cfg_pp_denoising_loop
 from ltx_pipelines_mlx.utils.types import ImageConditioningInput
 
 logger = logging.getLogger(__name__)
@@ -433,7 +434,7 @@ class ICLoraPipeline(BasePipeline):
         upsample_only: bool = False,
         refine_steps: int | None = None,
         sampler: str = "euler",
-        negative_prompt: str = "",
+        negative_prompt: str | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Generate video with IC-LoRA reference conditioning.
 
@@ -465,10 +466,15 @@ class ICLoraPipeline(BasePipeline):
                 is encoded at half res, so fine-detail adherence sits between
                 two-stage and native single-stage. Ignored if ``single_stage`` or
                 ``skip_stage_2`` is set.
-            sampler: "euler" (default) or "euler_ancestral_cfg_pp" at CFG 1.
-                CFG++ currently requires single_stage and evaluates a negative
-                prediction at every nonterminal step.
-            negative_prompt: Negative text for CFG++, empty by default.
+            sampler: ``"euler"`` (default, deterministic) or
+                ``"euler_ancestral_cfg_pp"``: the ancestral CFG++ sampler of
+                :func:`euler_cfg_pp_denoising_loop` at CFG scale 1, with the
+                ancestral noise seeded from ``seed``. Requires ``single_stage``
+                and runs a second forward on the negative prompt at every
+                non-terminal step.
+            negative_prompt: Negative prompt for ``"euler_ancestral_cfg_pp"``
+                (``None``: the upstream ``DEFAULT_NEGATIVE_PROMPT``). Refused
+                with ``"euler"``, which has no negative pass.
             refine_steps: Only meaningful with ``upsample_only``. When > 0, run a
                 *control-aware* refine after the upsample instead of decoding raw:
                 the control reference is re-encoded at full resolution and re-appended
@@ -491,8 +497,8 @@ class ICLoraPipeline(BasePipeline):
             raise ValueError(f"Unsupported IC-LoRA sampler: {sampler}")
         if sampler != "euler" and not single_stage:
             raise ValueError("IC-LoRA CFG++ currently requires single_stage=True")
-        if sampler == "euler" and negative_prompt:
-            raise ValueError("IC-LoRA negative_prompt requires euler_ancestral_cfg_pp")
+        if sampler == "euler" and negative_prompt is not None:
+            raise ValueError("IC-LoRA negative_prompt requires sampler='euler_ancestral_cfg_pp'")
         num_frames = snap_num_frames(num_frames)
 
         # Load text encoder, encode, free, then load generation components
@@ -501,16 +507,10 @@ class ICLoraPipeline(BasePipeline):
         video_embeds, audio_embeds = self._encode_text(prompt)
         # NOTE: mx.eval is MLX graph evaluation, NOT Python eval()
         mx.eval(video_embeds, audio_embeds)
-        sampler_kwargs = {}
+        negative_embeds: tuple[mx.array, mx.array] | None = None
         if sampler == "euler_ancestral_cfg_pp":
-            negative_video, negative_audio = self._encode_text(negative_prompt)
-            mx.eval(negative_video, negative_audio)
-            sampler_kwargs = dict(
-                cfg_pp=EulerCfgPpDiffusionStep(),
-                uncond_video_text_embeds=negative_video,
-                uncond_audio_text_embeds=negative_audio,
-                noise_seed=seed,
-            )
+            negative_embeds = self._encode_text(DEFAULT_NEGATIVE_PROMPT if negative_prompt is None else negative_prompt)
+            mx.eval(*negative_embeds)
         if self.low_memory:
             self.prompt_encoder.free()
             aggressive_cleanup()
@@ -589,16 +589,32 @@ class ICLoraPipeline(BasePipeline):
         x0_model = X0Model(self.dit)
 
         self._pre_denoise_flush(video_state, audio_state)
-        output_1 = denoise_loop(
-            model=x0_model,
-            video_state=video_state,
-            audio_state=audio_state,
-            video_text_embeds=video_embeds,
-            audio_text_embeds=audio_embeds,
-            sigmas=sigmas_1,
-            on_step=self._stepwise_hook(F, H_half, W_half, stage=1),
-            **sampler_kwargs,
-        )
+        on_step_1 = self._stepwise_hook(F, H_half, W_half, stage=1)
+        if negative_embeds is None:
+            output_1 = denoise_loop(
+                model=x0_model,
+                video_state=video_state,
+                audio_state=audio_state,
+                video_text_embeds=video_embeds,
+                audio_text_embeds=audio_embeds,
+                sigmas=sigmas_1,
+                on_step=on_step_1,
+            )
+        else:
+            # Upstream's CFG++ loop (#239); the reference and first-frame tokens are re-pinned
+            # after each noise injection by the shared ancestral driver.
+            output_1 = euler_cfg_pp_denoising_loop(
+                sigmas_1,
+                video_state,
+                audio_state,
+                EulerCfgPpDiffusionStep(),
+                x0_model,
+                video_embeds,
+                audio_embeds,
+                *negative_embeds,
+                noise_seed=seed,
+                on_step=on_step_1,
+            )
         if self.low_memory:
             aggressive_cleanup()
 
@@ -799,7 +815,7 @@ class ICLoraPipeline(BasePipeline):
         upsample_only: bool = False,
         refine_steps: int | None = None,
         sampler: str = "euler",
-        negative_prompt: str = "",
+        negative_prompt: str | None = None,
     ) -> str:
         """Generate IC-LoRA conditioned video+audio and save to file.
 
@@ -821,7 +837,7 @@ class ICLoraPipeline(BasePipeline):
             refine_steps: With upsample_only, run an N-step control-aware refine
                 after the upsample (full-res control re-applied, IC-LoRA fused).
             sampler: Single-stage sampler, as in generate().
-            negative_prompt: Negative text for CFG++, empty by default.
+            negative_prompt: Negative prompt for CFG++, as in generate().
 
         Returns:
             Path to the output video file.

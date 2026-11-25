@@ -1001,9 +1001,20 @@ examples:
         "--sampler",
         choices=("euler", "euler_ancestral_cfg_pp"),
         default="euler",
-        help="Single-stage sampler. CFG++ uses an extra negative prediction at each nonterminal step.",
+        help=(
+            "Stage-1 sampler (default: euler, deterministic). euler_ancestral_cfg_pp is the ancestral CFG++ "
+            "sampler at CFG scale 1: it needs --single-stage and runs a second forward on the negative prompt "
+            "at every step but the last, so a render costs about twice as much."
+        ),
     )
-    ic.add_argument("--negative-prompt", default="", help="Negative prompt for single-stage CFG++ (default: empty)")
+    ic.add_argument(
+        "--negative-prompt",
+        default=None,
+        help=(
+            "Negative prompt for --sampler euler_ancestral_cfg_pp (default: the upstream DEFAULT_NEGATIVE_PROMPT). "
+            "Rejected with the euler sampler, which has no negative pass."
+        ),
+    )
     ic.add_argument(
         "--conditioning-strength",
         type=float,
@@ -1848,6 +1859,12 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
     t0 = time.time()
 
     from ltx_pipelines_mlx.ic_lora import ICLoraPipeline
+
+    # Refuse the sampler combinations the pipeline rejects before any model loads.
+    if args.sampler != "euler" and not args.single_stage:
+        raise SystemExit(f"--sampler {args.sampler} needs --single-stage.")
+    if args.sampler == "euler" and args.negative_prompt is not None:
+        raise SystemExit("--negative-prompt needs --sampler euler_ancestral_cfg_pp on ic-lora.")
 
     # Parse --lora pairs into (path, strength) tuples
     lora_paths = [(path, float(strength)) for path, strength in args.lora]

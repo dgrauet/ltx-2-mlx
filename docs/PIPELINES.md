@@ -98,7 +98,7 @@ On 2.5 packs, `generate --distilled --image start.png 0 1.0 --image end.png last
 - **Produces:** control-conditioned video from a control clip (canny, depth, pose, motion tracks) plus an official Lightricks IC-LoRA.
 - **Packs:** 2.3, and 2.5 with the IC-LoRAs Lightricks has published for it (`Lightricks/LTX-2.5-22b-IC-LoRA-*`: Refine-Details, Restore, Deblur, Colorization, Ingredients, …); on 2.5 run end to end with Refine-Details (768 × 512 × 49, two stages, see #220 for the clean stage 2). Workflows that keep the IC-LoRA in stage 2 (upstream's `stage_2_ic_lora=True` plans) are not ported. **Tier:** Stable.
 - **Required:** `--prompt`, `--output`, `--frame-rate`, `--lora PATH STRENGTH`, `--video-conditioning PATH STRENGTH`.
-- **Own flags:** `--frames` (97), `--conditioning-strength` (1.0), `--skip-stage-2`, `--upsample-only`, `--refine-steps`, `--single-stage`, `--stage1-steps`, `--stage2-steps`, `--dev-transformer`, `--distilled-lora`, `--distilled-lora-strength` (0.5 in dev mode), `--image`.
+- **Own flags:** `--frames` (97), `--conditioning-strength` (1.0), `--skip-stage-2`, `--upsample-only`, `--refine-steps`, `--single-stage`, `--stage1-steps`, `--stage2-steps`, `--dev-transformer`, `--distilled-lora`, `--distilled-lora-strength` (0.5 in dev mode), `--image`, `--sampler {euler,euler_ancestral_cfg_pp}` (euler), `--negative-prompt` (with `--sampler euler_ancestral_cfg_pp` only).
 - **Example:**
   ```
   ltx-2-mlx ic-lora -p "a person walking" \
@@ -108,6 +108,7 @@ On 2.5 packs, `generate --distilled --image start.png 0 1.0 --image end.png last
   ```
 - **Cost (M2 Pro 32 GB, q8, `--low-ram`):** 1280 × 704, 97 frames ≈ 15 min.
 - **Topologies:** the default is half-res generation then a control-blind stage-2 refine. `--single-stage` generates at full resolution in one pass and tracks the control most tightly. `--upsample-only` skips the refine for a fast draft, and adding `--refine-steps N` runs a control-aware refine instead. `--skip-stage-2` stops at half resolution.
+- **Sampler:** `--sampler euler_ancestral_cfg_pp` (with `--single-stage` only) swaps the deterministic Euler steps for the ancestral CFG++ sampler at CFG scale 1, the sampler the official LTX-2.3 motion-track workflow selects. Every step but the last runs a second forward on the negative prompt (`--negative-prompt`, default: the upstream `DEFAULT_NEGATIVE_PROMPT`), so the render costs about twice as much, and the injected noise is seeded from `--seed`. Experimental.
 - **Notes:** `--dev-transformer` switches on dev mode, which fuses the distilled LoRA alongside the task LoRA. This is also the recipe that preserves a source image's identity across a whole clip. [Details](../CLAUDE.md#ic-lora-pipeline) · [static-scene recipe](../CLAUDE.md#static-scene-i2v-recipe-preserve-identity).
 
 ### `hdr-ic-lora`

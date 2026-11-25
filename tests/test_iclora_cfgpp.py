@@ -1,14 +1,16 @@
-"""CFG++ must use negative predictions and preserve visual control tokens."""
+"""IC-LoRA ``--sampler euler_ancestral_cfg_pp``: stepper equations, pipeline dispatch and CLI wiring.
+
+The loop itself (negative pass at CFG 1, seeded noise, re-pinned conditioning tokens) is covered with
+``euler_cfg_pp_denoising_loop`` in ``tests/test_euler_cfg_pp.py``."""
 
 import mlx.core as mx
 import numpy as np
 import pytest
 
 from ltx_core_mlx.components.diffusion_steps import EulerCfgPpDiffusionStep
-from ltx_core_mlx.conditioning.types.latent_cond import LatentState
 from ltx_pipelines_mlx.cli import _build_parser
 from ltx_pipelines_mlx.ic_lora import ICLoraPipeline
-from ltx_pipelines_mlx.utils.samplers import denoise_loop
+from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
 
 
 @pytest.mark.parametrize("sigma,next_sigma", [(1.0, 0.99375), (0.975, 0.909375), (0.725, 0.421875), (0.421875, 0.0)])
@@ -32,89 +34,6 @@ def test_cfgpp_matches_independent_comfy_flow_equations(sigma, next_sigma, eta):
         noise=mx.array([noise]),
     )
     assert actual.item() == pytest.approx(expected, abs=1e-6)
-
-
-def state(masked=False, frozen=False):
-    mask = mx.array([[[0.0], [1.0], [0.0]]]) if masked else mx.ones((1, 3, 1))
-    if frozen:
-        mask = mx.zeros_like(mask)
-    clean = mx.full((1, 3, 4), 7.0)
-    return LatentState(latent=mask * 0.8 + (1 - mask) * clean, clean_latent=clean, denoise_mask=mask, frozen=frozen)
-
-
-class Model:
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, **kw):
-        self.calls.append(kw)
-        # Output depends on the latent so stochastic and unconditional effects
-        # remain visible after the last step, instead of a constant-x0 false pass.
-        v = 0.4 * kw["video_latent"] + kw["video_text_embeds"].mean()
-        a = None if kw["audio_latent"] is None else 0.4 * kw["audio_latent"] + kw["audio_text_embeds"].mean()
-        return v, a
-
-
-def run(model=None, seed=42, negative=-0.3, video=None, audio=True, **kwargs):
-    return denoise_loop(
-        model=model or Model(),
-        video_state=video or state(),
-        audio_state=state() if audio is True else (None if audio is False else audio),
-        video_text_embeds=mx.array([0.2]),
-        audio_text_embeds=mx.array([0.2]) if audio is not False else None,
-        uncond_video_text_embeds=mx.array([negative]),
-        uncond_audio_text_embeds=mx.array([negative]) if audio is not False else None,
-        cfg_pp=EulerCfgPpDiffusionStep(),
-        noise_seed=seed,
-        sigmas=[1.0, 0.725, 0.421875, 0.0],
-        show_progress=False,
-        **kwargs,
-    )
-
-
-def test_unconditional_pass_is_used_even_at_cfg_one():
-    m = Model()
-    a = run(model=m)
-    b = run(negative=-2.0)
-    assert [round(c["video_text_embeds"].item(), 1) for c in m.calls] == [0.2, -0.3, 0.2, -0.3, 0.2]
-    assert not mx.allclose(a.video_latent, b.video_latent).item()
-    assert not mx.allclose(a.audio_latent, b.audio_latent).item()
-
-
-def test_seed_reproduces_both_streams_and_changes_output():
-    a, b, c = run(seed=42), run(seed=42), run(seed=43)
-    for name in ("video_latent", "audio_latent"):
-        assert mx.array_equal(getattr(a, name), getattr(b, name)).item()
-        assert not mx.allclose(getattr(a, name), getattr(c, name)).item()
-    assert not mx.array_equal(a.video_latent, a.audio_latent).item()
-
-
-def test_control_tokens_and_frozen_audio_stay_clean_at_every_forward():
-    m = Model()
-    v, a = state(masked=True), state(frozen=True)
-    out = run(model=m, video=v, audio=a)
-    for call in m.calls:
-        assert mx.array_equal(call["video_latent"][:, [0, 2]], v.clean_latent[:, [0, 2]]).item()
-        assert mx.array_equal(call["audio_latent"], a.clean_latent).item()
-        assert mx.array_equal(call["video_timesteps"][:, [0, 2]], mx.zeros((1, 2))).item()
-        assert call["audio_sigma"].item() == 0.0
-    assert mx.array_equal(out.video_latent[:, [0, 2]], v.clean_latent[:, [0, 2]]).item()
-    assert mx.array_equal(out.audio_latent, a.clean_latent).item()
-
-
-def test_video_only_and_negative_pass_without_positive_relay_mask():
-    m = Model()
-    out = run(model=m, audio=False, video_cross_attention_mask=mx.zeros((1, 1)))
-    assert out.audio_latent is None
-    assert "video_cross_attention_mask" in m.calls[0]
-    assert "video_cross_attention_mask" not in m.calls[1]
-
-
-def test_missing_negative_fails_before_model():
-    m = Model()
-    with pytest.raises(ValueError, match="negative text embeddings"):
-        denoise_loop(m, state(), None, mx.zeros((1,)), None, cfg_pp=EulerCfgPpDiffusionStep())
-    assert not m.calls
 
 
 @pytest.mark.parametrize(
@@ -147,7 +66,8 @@ def test_cli_explicit_sampler_and_unchanged_default():
         "--frame-rate",
         "24",
     ]
-    assert _build_parser().parse_args(args).sampler == "euler"
+    default = _build_parser().parse_args(args)
+    assert (default.sampler, default.negative_prompt) == ("euler", None)
     parsed = _build_parser().parse_args(
         args + ["--single-stage", "--sampler", "euler_ancestral_cfg_pp", "--negative-prompt", "blur"]
     )
@@ -155,7 +75,8 @@ def test_cli_explicit_sampler_and_unchanged_default():
     assert parsed.negative_prompt == "blur"
 
 
-def test_pipeline_encodes_negative_and_routes_cfgpp_to_generation(tmp_path, monkeypatch):
+def _routed_pipeline(tmp_path, monkeypatch):
+    """An ``ICLoraPipeline`` whose model parts are stubbed; records prompts and the loop each stage-1 run takes."""
     from ltx_pipelines_mlx import ic_lora as ic_mod
     from ltx_pipelines_mlx.utils.samplers import DenoiseOutput
 
@@ -167,13 +88,18 @@ def test_pipeline_encodes_negative_and_routes_cfgpp_to_generation(tmp_path, monk
         value = 2.0 if prompt == "positive" else -3.0
         return mx.full((1, 8, 4), value), mx.full((1, 8, 4), value)
 
-    def loop(**kw):
-        calls.append(kw)
+    def euler(**kw):
+        calls.append(("euler", kw))
         return DenoiseOutput(kw["video_state"].latent, kw["audio_state"].latent)
+
+    def cfg_pp(sigmas, video_state, audio_state, stepper, transformer, v_pos, a_pos, v_neg, a_neg, **kw):
+        calls.append(("cfg_pp", dict(kw, stepper=stepper, positive=(v_pos, a_pos), negative=(v_neg, a_neg))))
+        return DenoiseOutput(video_state.latent, audio_state.latent)
 
     monkeypatch.setattr(type(pipe), "vae_encoder", property(lambda self: object()))
     monkeypatch.setattr(ic_mod, "X0Model", lambda dit: dit)
-    monkeypatch.setattr(ic_mod, "denoise_loop", loop)
+    monkeypatch.setattr(ic_mod, "denoise_loop", euler)
+    monkeypatch.setattr(ic_mod, "euler_cfg_pp_denoising_loop", cfg_pp)
     pipe._load_text_encoder = lambda: None
     pipe._encode_text = encode
     pipe.load = lambda: None
@@ -181,43 +107,57 @@ def test_pipeline_encodes_negative_and_routes_cfgpp_to_generation(tmp_path, monk
     pipe._fuse_loras = lambda: None
     pipe._create_conditionings = lambda **kw: []
     pipe._pre_denoise_flush = lambda *args: None
-    pipe.generate(
-        "positive",
-        [],
-        height=64,
-        width=64,
-        num_frames=9,
-        frame_rate=24,
-        single_stage=True,
-        sampler="euler_ancestral_cfg_pp",
-        negative_prompt="negative",
-        seed=123,
-    )
+    return pipe, prompts, calls
+
+
+_RUN = dict(height=64, width=64, num_frames=9, frame_rate=24, single_stage=True, seed=123)
+
+
+def test_cfgpp_runs_the_upstream_loop_on_the_encoded_negative(tmp_path, monkeypatch):
+    pipe, prompts, calls = _routed_pipeline(tmp_path, monkeypatch)
+    pipe.generate("positive", [], sampler="euler_ancestral_cfg_pp", negative_prompt="negative", **_RUN)
     assert prompts == ["positive", "negative"]
-    assert len(calls) == 1
-    assert isinstance(calls[0]["cfg_pp"], EulerCfgPpDiffusionStep)
-    assert calls[0]["noise_seed"] == 123
-    assert calls[0]["uncond_video_text_embeds"].mean().item() == -3.0
-    assert calls[0]["uncond_audio_text_embeds"].mean().item() == -3.0
+    assert [name for name, _ in calls] == ["cfg_pp"]
+    kw = calls[0][1]
+    assert isinstance(kw["stepper"], EulerCfgPpDiffusionStep)
+    assert kw["noise_seed"] == 123
+    assert [e.mean().item() for e in kw["positive"]] == [2.0, 2.0]
+    assert [e.mean().item() for e in kw["negative"]] == [-3.0, -3.0]
 
 
-def test_work_estimate_counts_the_extra_negative_predictions(monkeypatch):
-    from ltx_pipelines_mlx.utils import samplers
-
-    original = samplers.StepEstimator
-    counts = []
-
-    def estimator(work, **kw):
-        counts.append(work)
-        return original(work, **kw)
-
-    monkeypatch.setattr(samplers, "StepEstimator", estimator)
-    run()
-    assert counts[0].passes_per_step == (2, 2, 1)
-    assert counts[0].forwards == 5
+def test_cfgpp_without_a_negative_prompt_uses_the_upstream_default(tmp_path, monkeypatch):
+    pipe, prompts, _ = _routed_pipeline(tmp_path, monkeypatch)
+    pipe.generate("positive", [], sampler="euler_ancestral_cfg_pp", **_RUN)
+    assert prompts == ["positive", DEFAULT_NEGATIVE_PROMPT]
 
 
-@pytest.mark.parametrize("sampler,negative", [("euler", ""), ("euler_ancestral_cfg_pp", "blur")])
+def test_default_sampler_stays_on_the_euler_loop_with_one_prompt(tmp_path, monkeypatch):
+    pipe, prompts, calls = _routed_pipeline(tmp_path, monkeypatch)
+    pipe.generate("positive", [], **_RUN)
+    assert prompts == ["positive"]
+    assert [name for name, _ in calls] == ["euler"]
+
+
+@pytest.mark.parametrize(
+    "extra,message",
+    [
+        (["--sampler", "euler_ancestral_cfg_pp"], "needs --single-stage"),
+        (["--single-stage", "--negative-prompt", "blur"], "needs --sampler"),
+    ],
+)
+def test_cli_refuses_unsupported_combinations_before_building_the_pipeline(monkeypatch, extra, message):
+    from ltx_pipelines_mlx.cli import _cmd_ic_lora
+
+    monkeypatch.setattr(ICLoraPipeline, "__init__", lambda self, **kw: pytest.fail("pipeline was built"))
+    args = _build_parser().parse_args(
+        ["ic-lora", "-p", "scene", "-o", "unused.mp4", "--lora", "c.safetensors", "1"]
+        + ["--video-conditioning", "motion.mp4", "1", "--frame-rate", "24", *extra]
+    )
+    with pytest.raises(SystemExit, match=message):
+        _cmd_ic_lora(args)
+
+
+@pytest.mark.parametrize("sampler,negative", [("euler", None), ("euler_ancestral_cfg_pp", "blur")])
 def test_real_cli_export_wrapper_forwards_sampler_to_inference(tmp_path, monkeypatch, sampler, negative):
     from ltx_pipelines_mlx.cli import _cmd_ic_lora
 
@@ -253,8 +193,7 @@ def test_real_cli_export_wrapper_forwards_sampler_to_inference(tmp_path, monkeyp
             "--single-stage",
             "--sampler",
             sampler,
-            "--negative-prompt",
-            negative,
+            *([] if negative is None else ["--negative-prompt", negative]),
         ]
     )
     _cmd_ic_lora(args)
