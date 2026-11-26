@@ -141,6 +141,12 @@ def append_ic_lora_reference_video_conditionings(
         video = video_preprocess(
             decode_video_by_frame(video_path, frame_cap=vae_compatible_frames), ref_height, ref_width
         )
+        if video.shape[2] == 1:
+            # A still image (a reference sheet, a layout frame): loop it over the clip
+            # rather than encode a single latent frame at t=0, as ComfyUI's IC-LoRA
+            # workflows do (RepeatImageBatch -> LTXAddVideoICLoRAGuide). Local extension:
+            # upstream's reference loader takes videos only.
+            video = mx.repeat(video, 1 + 8 * ((num_frames - 1) // 8), axis=2)
         encoded_video = video_encoder.encode(video)
         _mx_eval(encoded_video)
 
