@@ -73,7 +73,7 @@ def test_stage_2_uses_the_reloaded_transformer(tmp_path, monkeypatch):
     assert [c["model"] for c in calls] == [("x0", "stage-1 transformer (IC-LoRA fused)"), ("x0", "clean transformer")]
 
 
-@pytest.mark.parametrize("kw", [dict(upsample_only=True, refine_steps=2)])
+@pytest.mark.parametrize("kw", [dict(upsample_only=True, refine_steps=2), dict(stage_2_ic_lora=True)])
 def test_control_aware_refine_keeps_the_stage_1_model(tmp_path, monkeypatch, kw):
     pipe, calls = _pipe(tmp_path, monkeypatch)
 
@@ -97,3 +97,50 @@ def test_stage_2_strips_image_guide_tokens_before_unpatchify(tmp_path, monkeypat
     # 128 px -> 4x4 latent cells, F=3: 48 generated tokens plus one 16-token guide frame.
     assert calls[1]["video_state"].latent.shape == (1, 64, 128)
     assert video.shape == (1, 128, 3, 4, 4)
+
+
+def _spy_reference_appends(monkeypatch):
+    seen: list[dict] = []
+    real = ic_mod.append_ic_lora_reference_video_conditionings
+
+    def spy(conds, video_conditioning, **kw):
+        seen.append(kw)
+        real(conds, video_conditioning, **kw)
+
+    monkeypatch.setattr(ic_mod, "append_ic_lora_reference_video_conditionings", spy)
+    return seen
+
+
+def test_stage_2_ic_lora_appends_the_full_res_reference(tmp_path, monkeypatch):
+    """Upstream ``--stage-2-ic-lora``: the reference is re-encoded at stage-2 resolution and appended."""
+    pipe, calls = _pipe(tmp_path, monkeypatch)
+    pipe._reload_clean_transformer = lambda: pytest.fail("stage_2_ic_lora keeps the IC-LoRA: no reload")
+    seen = _spy_reference_appends(monkeypatch)
+    monkeypatch.setattr(
+        "ltx_pipelines_mlx.iclora_utils.probe_video_info", lambda path: type("Info", (), {"num_frames": 17})()
+    )
+    monkeypatch.setattr(
+        "ltx_pipelines_mlx.iclora_utils.decode_video_by_frame",
+        lambda path, frame_cap: [np.full((64, 64, 3), 128, dtype=np.uint8)] * frame_cap,
+    )
+
+    video, _ = pipe.generate(
+        "a fox", [("control.mp4", 1.0)], height=128, width=128, num_frames=17, frame_rate=24.0, stage_2_ic_lora=True
+    )
+
+    assert [(kw["height"], kw["width"]) for kw in seen] == [(128, 128)]
+    # 48 generated tokens + 48 reference tokens at full res, sliced back to the 3x4x4 grid.
+    assert calls[1]["video_state"].latent.shape == (1, 96, 128)
+    assert calls[1]["model"] == ("x0", "stage-1 transformer (IC-LoRA fused)")
+    assert video.shape == (1, 128, 3, 4, 4)
+
+
+@pytest.mark.parametrize("kw", [dict(), dict(stage_2_ic_lora=True, upsample_only=True)])
+def test_stage_2_without_ic_lora_appends_no_reference(tmp_path, monkeypatch, kw):
+    pipe, calls = _pipe(tmp_path, monkeypatch)
+    pipe._reload_clean_transformer = lambda: None
+    seen = _spy_reference_appends(monkeypatch)
+
+    pipe.generate("a fox", [("control.mp4", 1.0)], height=128, width=128, num_frames=17, frame_rate=24.0, **kw)
+
+    assert seen == []

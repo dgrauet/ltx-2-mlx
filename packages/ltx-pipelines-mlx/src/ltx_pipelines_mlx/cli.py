@@ -1054,6 +1054,15 @@ examples:
             "Tracks the control signal more tightly than two-stage; slower at large res."
         ),
     )
+    ic.add_argument(
+        "--stage-2-ic-lora",
+        action="store_true",
+        help=(
+            "Keep the IC-LoRA and the reference video (re-encoded at full resolution) on stage 2 "
+            "instead of refining on the bare checkpoint, as upstream. Stage 2 attends over up to twice "
+            "the tokens. Ignored with --single-stage, --skip-stage-2 and --upsample-only."
+        ),
+    )
 
     ic.add_argument(
         "--dev-transformer",
@@ -1880,6 +1889,8 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
             topology = f"upsample + {args.refine_steps}-step control-aware refine (half-res gen + 2x upsample)"
         elif args.upsample_only:
             topology = "upsample-only (half-res gen + 2x upsample, no refine)"
+        elif args.stage_2_ic_lora and not args.skip_stage_2:
+            topology = "two-stage, IC-LoRA kept on stage 2"
         else:
             topology = "two-stage"
         print(f"Mode: IC-LoRA ({topology})")
@@ -1925,6 +1936,7 @@ def _cmd_ic_lora(args: argparse.Namespace) -> None:
         negative_prompt=args.negative_prompt,
         skip_stage_2=args.skip_stage_2,
         single_stage=args.single_stage,
+        stage_2_ic_lora=args.stage_2_ic_lora,
         upsample_only=args.upsample_only,
         refine_steps=args.refine_steps,
     )
