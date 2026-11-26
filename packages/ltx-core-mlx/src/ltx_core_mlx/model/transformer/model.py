@@ -512,6 +512,37 @@ def apply_keyframes_absolute_embedding(
     return hidden_states + mask * embedding.astype(hidden_states.dtype)
 
 
+def prepare_self_attention_mask(
+    attention_mask: mx.array | None,
+    dtype: mx.Dtype = mx.bfloat16,
+) -> mx.array | None:
+    """Turn a ``[0, 1]`` self-attention mask into the additive bias SDPA expects.
+
+    Port of upstream ``TransformerArgsPreprocessor._prepare_self_attention_mask``
+    (``ltx_core/model/transformer/transformer_args.py``). The conditioning items
+    (:mod:`ltx_core_mlx.conditioning.mask_utils`) build a ``(B, T_q, T_k)`` mask of
+    multiplicative weights; ``mx.fast.scaled_dot_product_attention`` adds a float
+    mask to the logits, so the weights must go to log space first:
+
+    - ``1.0`` -> ``0.0`` (full attention)
+    - ``w in (0, 1)`` -> ``log(w)`` (softmax weight scaled by ``w``)
+    - ``<= 0.0`` -> ``finfo(dtype).min`` (blocked)
+
+    The result is ``(B, 1, T_q, T_k)`` (head axis inserted). A boolean mask only gets
+    the head axis; a 4-D mask is taken to be a prepared bias and returned unchanged.
+    """
+    if attention_mask is None or attention_mask.ndim == 4:
+        return attention_mask
+    if attention_mask.ndim != 3:
+        raise ValueError(f"self-attention mask must be (B, T_q, T_k), got shape {tuple(attention_mask.shape)}")
+    if attention_mask.dtype == mx.bool_:
+        return attention_mask[:, None]
+    info = mx.finfo(dtype)
+    mask = attention_mask.astype(mx.float32)
+    bias = mx.where(mask > 0, mx.log(mx.maximum(mask, info.smallest_normal)), info.min)
+    return bias.astype(dtype)[:, None]
+
+
 class LTXModel(nn.Module):
     """LTX-2.3 Diffusion Transformer for joint audio+video generation.
 
@@ -874,6 +905,10 @@ class LTXModel(nn.Module):
                 video_text_embeds=nag.video_text_embeds.astype(mx.bfloat16),
                 audio_text_embeds=None if nag_audio is None else nag_audio.astype(mx.bfloat16),
             )
+
+        # [0, 1] conditioning masks -> additive log-space bias (upstream TransformerArgsPreprocessor).
+        video_attention_mask = prepare_self_attention_mask(video_attention_mask, dtype=mx.bfloat16)
+        audio_attention_mask = prepare_self_attention_mask(audio_attention_mask, dtype=mx.bfloat16)
 
         # Embed patches
         video_hidden = self.patchify_proj(video_latent)
