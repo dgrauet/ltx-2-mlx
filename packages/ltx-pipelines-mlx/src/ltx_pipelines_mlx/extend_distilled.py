@@ -97,7 +97,7 @@ def _as_guide(image: ImageConditioningInput) -> ImageConditioningInput:
     frame 0, the binding ``auto`` (and ``ImageConditioningInput.at``) gives that frame.
 
     Args:
-        image: An anchor on the new frames, ``frame_idx`` possibly negative (counted from the end).
+        image: An anchor on the new frames, possibly a ``last`` one still to be placed.
 
     Returns:
         The anchor bound as a guide, same path, frame, strength and CRF.
@@ -111,6 +111,8 @@ def _as_guide(image: ImageConditioningInput) -> ImageConditioningInput:
             f"--image {image.path}: extend --distilled takes every anchor as a guide; "
             f"a replace binding is not supported (got frame {image.frame_idx}), use guide"
         )
+    if image.from_end:
+        return ImageConditioningInput.last(image.path, image.strength, image.crf)
     return ImageConditioningInput.guide(image.path, image.frame_idx, image.strength, image.crf)
 
 
@@ -216,10 +218,15 @@ class ExtendDistilledPipeline(DistilledPipeline):
             raise ValueError(f"extend_frames must be >= 1, got {extend_frames}")
         # Anchors are given on the new frames; in the window they come after the carried ones.
         # Every anchor guides (the window starts with the pinned carry), whatever its binding.
-        window_images = [
-            image.with_frame_idx(image.frame_idx + EXTEND_CARRY_PIXEL_FRAMES)
-            for image in resolve_frame_indices([_as_guide(image) for image in images or []], 8 * extend_frames)
-        ]
+        new_frames = 8 * extend_frames
+        anchors = resolve_frame_indices([_as_guide(image) for image in images or []], new_frames)
+        for image in anchors:
+            # A guide may sit outside a clip, but here "before the new frames" is the source video.
+            if not 0 <= image.frame_idx < new_frames:
+                raise ValueError(
+                    f"--image {image.path}: frame index {image.frame_idx} is outside the {new_frames} new frames"
+                )
+        window_images = [image.with_frame_idx(image.frame_idx + EXTEND_CARRY_PIXEL_FRAMES) for image in anchors]
         video_path = str(video_path)
         info = probe_video_info(video_path)
         height, width, frame_rate = info.height, info.width, info.fps
