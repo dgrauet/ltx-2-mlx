@@ -123,8 +123,7 @@ def resolve_stage1_frames(
 ) -> tuple[int, int | Sequence[int], list[ImageConditioningInput]]:
     """Resolve the I2V anchors on the requested clip, then let ``canvas_for`` pad it.
 
-    ``last`` and negative ``frame_idx`` values count back from the end of the clip that was
-    asked for. :class:`DFRPipeline`'s ``canvas_for`` pads that clip to whole keyframe segments
+    A ``last`` anchor lands on the final frame of the clip that was asked for. :class:`DFRPipeline`'s ``canvas_for`` pads that clip to whole keyframe segments
     and the padding is trimmed off after stage 2, so resolving against the padded canvas would
     put an end anchor on a frame that never reaches the output.
 
