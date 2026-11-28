@@ -8,6 +8,7 @@ text-to-video pipelines (``ImageAction``) and re-exports
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from typing import NamedTuple
 
 # Re-export for legacy import paths. Single source of truth lives in
@@ -35,42 +36,42 @@ def _append_to_dest(namespace: argparse.Namespace, dest: str, item: object) -> N
 
 
 def resolve_frame_indices(images: list[ImageConditioningInput], num_frames: int) -> list[ImageConditioningInput]:
-    """Turn negative ``frame_idx`` values into pixel-frame positions counted from the end.
+    """Place ``last`` anchors and check every index against the clip length.
 
-    ``-1`` becomes ``num_frames - 1`` (the last pixel frame), ``-2`` the one
-    before it, and so on. Non-negative indices pass through unchanged. The
-    binding is kept: a negative index parsed without a binding (``auto``) is a
-    guide, as upstream ``ImageConditioningInput.at`` makes every non-zero index,
-    so ``-num_frames`` resolves to a guide at frame 0. A ``replace`` is checked
-    against the latent grid once resolved (``0`` or ``1 + 8 * k``).
+    Mirrors upstream ``assert_image_frames_in_clip`` (v1.6.2): a guide may sit anywhere,
+    including before frame 0 (``-1`` is one frame before the clip) or past the last frame,
+    because its index only sets the keyframe's position in time; a ``replace`` must lie
+    inside the clip. On top of that, the local ``last`` marker
+    (:attr:`ImageConditioningInput.from_end`) becomes ``num_frames - 1``.
+
+    Until 0.18 a negative index counted back from the end (``-1`` was the last frame).
+    Use ``last`` for that.
 
     Args:
         images: Conditioning inputs as parsed from ``--image``.
         num_frames: Concrete pixel-frame count of the clip being generated.
 
     Returns:
-        The inputs with every ``frame_idx`` in ``[0, num_frames)``.
+        The inputs with every ``last`` anchor placed (``from_end`` cleared).
 
     Raises:
-        ValueError: If an index lies outside the clip, before its first frame or
-            past its last (upstream ``assert_image_frames_in_clip`` checks the
-            same range), or if a resolved ``replace`` does not start a latent.
+        ValueError: If a ``replace`` lies outside ``[0, num_frames)``, or if a ``last``
+            anchor asks for a ``replace`` on a frame that does not start a latent.
     """
     resolved = []
     for image in images:
-        frame_idx = num_frames + image.frame_idx if image.frame_idx < 0 else image.frame_idx
-        if frame_idx < 0:
+        if image.from_end:
+            try:
+                resolved.append(replace(image.with_frame_idx(num_frames - 1), from_end=False))
+            except ValueError as e:
+                raise ValueError(f"--image {image.path}: {e}") from e
+        elif image.replaces and image.frame_idx >= num_frames:
             raise ValueError(
-                f"--image {image.path}: frame index {image.frame_idx} is before the first of {num_frames} frames"
+                f"--image {image.path}: replace frame index {image.frame_idx} is outside the clip "
+                f"[0, {num_frames}); only a guide may sit outside it"
             )
-        if frame_idx >= num_frames:
-            raise ValueError(
-                f"--image {image.path}: frame index {image.frame_idx} is past the last of {num_frames} frames"
-            )
-        try:
-            resolved.append(image.with_frame_idx(frame_idx))
-        except ValueError as e:
-            raise ValueError(f"--image {image.path}: {e}") from e
+        else:
+            resolved.append(image)
     return resolved
 
 
@@ -78,13 +79,14 @@ _IMAGE_BINDING_KEYWORDS = frozenset({"auto", "replace", "guide"})
 
 
 def image_conditioning_input(
-    path: str, frame_idx: int, strength: float, binding_mode: str = "auto", crf: int | None = None
+    path: str, frame_idx: int | None, strength: float, binding_mode: str = "auto", crf: int | None = None
 ) -> ImageConditioningInput:
     """Build an :class:`ImageConditioningInput` from a ``BINDING`` keyword (upstream ``ImageAction``'s ``match``).
 
     Args:
         path: Image path.
-        frame_idx: Pixel frame index (negative counts back from the end, resolved later).
+        frame_idx: Pixel frame index; a guide may sit before the clip (negative) or after it.
+            ``None`` anchors the last frame, whatever the clip length (``last`` on the CLI).
         strength: Conditioning strength.
         binding_mode: ``auto`` (replace on frame 0, guide elsewhere), ``replace`` or ``guide``.
         crf: H.264 CRF of the re-compression, ``None`` to resolve it from the checkpoint.
@@ -95,6 +97,10 @@ def image_conditioning_input(
     Raises:
         ValueError: on an unknown keyword, or a ``replace`` off the latent grid (frame 0 or ``1 + 8k``).
     """
+    if binding_mode not in _IMAGE_BINDING_KEYWORDS:
+        raise ValueError(f"BINDING must be auto, replace, or guide, got {binding_mode!r}")
+    if frame_idx is None:
+        return ImageConditioningInput.last(path, strength, crf, replaces=binding_mode == "replace")
     match binding_mode:
         case "auto":
             return ImageConditioningInput.at(path, frame_idx, strength, crf)
@@ -121,9 +127,9 @@ class ImageAction(argparse.Action):
 
     Local extensions: ``--image PATH`` alone is accepted and defaults to
     ``frame_idx=0, strength=1.0`` (the prior single-arg API). ``FRAME_IDX``
-    may also be ``last`` (or ``end``), or a negative number counting back from
-    the end: ``--image end.png last 1.0`` anchors the final frame even when
-    ``--auto-duration`` picks the length.
+    may also be ``last`` (or ``end``): ``--image end.png last 1.0`` anchors the
+    final frame even when ``--auto-duration`` picks the length. A negative
+    number is upstream's (v1.6.2): a guide that many frames before the clip.
     """
 
     def __call__(  # type: ignore[override]
@@ -150,7 +156,7 @@ class ImageAction(argparse.Action):
         if len(values) == 5 and values[3] not in _IMAGE_BINDING_KEYWORDS:
             parser.error(f"{option_string} BINDING must be auto, replace, or guide, got {values[3]!r}")
         try:
-            frame_idx = -1 if str(values[1]).lower() in ("last", "end") else int(values[1])
+            frame_idx = None if str(values[1]).lower() in ("last", "end") else int(values[1])
             strength = float(values[2])
             if len(values) == 4:
                 if values[3] in _IMAGE_BINDING_KEYWORDS:

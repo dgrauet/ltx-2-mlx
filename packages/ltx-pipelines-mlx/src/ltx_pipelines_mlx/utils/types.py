@@ -45,21 +45,24 @@ class ImageReplace:
     video VAE is causal, valid values are frame 0 and the first pixel frame of each later latent:
     ``1 + 8 * k`` (1, 9, 17, ...). Mirrors upstream ``ltx_pipelines.utils.types.ImageReplace``.
 
-    Local extension: a negative ``frame_idx`` counts back from the end of the clip and is
-    validated once :func:`~ltx_pipelines_mlx.utils.args.resolve_frame_indices` knows the frame
-    count (upstream rejects negative indices).
+    A replacement must lie inside the clip: :func:`~ltx_pipelines_mlx.utils.args.resolve_frame_indices`
+    checks the upper bound once the frame count is known (upstream ``assert_image_frames_in_clip``).
     """
 
     frame_idx: int
 
     def __post_init__(self) -> None:
-        if self.frame_idx >= 0:
-            _assert_replacement_frame_idx(self.frame_idx)
+        _assert_replacement_frame_idx(self.frame_idx)
 
 
 @dataclass(frozen=True)
 class ImageGuide:
-    """Guide the clip with a keyframe at a zero-based decoded pixel-frame index."""
+    """Guide the clip with a keyframe at a zero-based decoded pixel-frame index.
+
+    The index may lie outside the clip (upstream v1.6.2): negative values place the keyframe
+    before frame 0 (``-1`` for a look still just before the shot) and values ``>= num_frames``
+    place it after the last frame. It only sets the keyframe's position in time.
+    """
 
     frame_idx: int
 
@@ -78,14 +81,20 @@ class ImageConditioningInput:
 
     How the still binds is ``binding``: :class:`ImageReplace` (lowered to a
     ``VideoConditionByLatentIndex``) or :class:`ImageGuide` (a ``VideoConditionByKeyframeIndex``).
-    Construct with :meth:`at` (frame 0 replaces, later frames guide), :meth:`replace`, or
-    :meth:`guide`.
+    Construct with :meth:`at` (frame 0 replaces, every other frame guides), :meth:`replace`,
+    :meth:`guide`, or :meth:`last`.
+
+    Local extension: ``from_end`` marks an anchor on the last frame of a clip whose length is not
+    known yet (``--image end.png last 1.0`` with ``--auto-duration``). Its binding's ``frame_idx``
+    is a placeholder until :func:`~ltx_pipelines_mlx.utils.args.resolve_frame_indices` sets it to
+    ``num_frames - 1`` and clears the flag. Upstream has no such marker.
     """
 
     path: str
     strength: float
     binding: ImageBinding
     crf: int | None = None
+    from_end: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.binding, ImageReplace | ImageGuide):
@@ -93,7 +102,7 @@ class ImageConditioningInput:
 
     @classmethod
     def at(cls, path: str, frame_idx: int, strength: float, crf: int | None = None) -> ImageConditioningInput:
-        """Bind at a pixel frame, replacing frame 0 and guiding at every later frame."""
+        """Bind at a pixel frame, replacing frame 0 and guiding at every other frame."""
         if frame_idx == 0:
             return cls.replace(path, 0, strength, crf)
         return cls.guide(path, frame_idx, strength, crf)
@@ -107,6 +116,22 @@ class ImageConditioningInput:
     def guide(cls, path: str, frame_idx: int, strength: float, crf: int | None = None) -> ImageConditioningInput:
         """Guide generation with a still at a pixel-frame index."""
         return cls(path=path, strength=strength, binding=ImageGuide(frame_idx), crf=crf)
+
+    @classmethod
+    def last(
+        cls, path: str, strength: float, crf: int | None = None, *, replaces: bool = False
+    ) -> ImageConditioningInput:
+        """Anchor the last frame of the clip, whatever its length (local extension, see ``from_end``).
+
+        Args:
+            path: Image path.
+            strength: Conditioning strength.
+            crf: H.264 CRF of the re-compression, ``None`` to resolve it from the checkpoint.
+            replaces: Ask for a replace binding. The last frame (``8 * k``) never starts a latent on
+                clips longer than one frame, so this is refused once the length is known.
+        """
+        binding: ImageBinding = ImageReplace(0) if replaces else ImageGuide(0)
+        return cls(path=path, strength=strength, binding=binding, crf=crf, from_end=True)
 
     @property
     def frame_idx(self) -> int:

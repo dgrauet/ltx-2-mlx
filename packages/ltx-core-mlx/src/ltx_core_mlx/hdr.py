@@ -43,8 +43,14 @@ def to_acescct_working_space(rgb: np.ndarray, source_primaries: Primaries = Prim
 
 
 def to_hdr_linear(working: np.ndarray, out_primaries: Primaries = Primaries.REC709) -> np.ndarray:
-    """ACEScct ``[0, 1]`` -> scene-linear channel-last RGB in ``out_primaries`` (clamped at 0)."""
-    return np.maximum(Primaries.AP1.to(out_primaries, _acescct_decompress(working)), 0.0)
+    """ACEScct ``[0, 1]`` -> scene-linear channel-last RGB in ``out_primaries`` (clamped at 0).
+
+    Codes under the ACEScct toe intercept decompress to negative AP1 values. They are clamped at 0
+    in AP1 before the primaries matrix (upstream v1.6.1), so one channel's undershoot does not mix
+    into the others; the result is clamped again after the matrix.
+    """
+    linear_acescg = np.maximum(_acescct_decompress(working), 0.0)
+    return np.maximum(Primaries.AP1.to(out_primaries, linear_acescg), 0.0)
 
 
 def srgb_eotf_to_linear(srgb: np.ndarray) -> np.ndarray:
