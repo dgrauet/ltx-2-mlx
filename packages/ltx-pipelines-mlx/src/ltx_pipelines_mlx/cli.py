@@ -980,7 +980,10 @@ examples:
         nargs=2,
         metavar=("PATH", "STRENGTH"),
         required=True,
-        help="Reference control video and strength (repeatable). Example: --video-conditioning depth.mp4 1.0",
+        help=(
+            "Reference control video and strength (repeatable); a still image is looped over the clip. "
+            "Example: --video-conditioning depth.mp4 1.0"
+        ),
     )
     ic.add_argument(
         "--image",

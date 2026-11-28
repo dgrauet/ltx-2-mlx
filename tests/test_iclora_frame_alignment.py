@@ -147,3 +147,35 @@ def test_reference_positions_follow_the_target_frame_rate(captured_load, monkeyp
         expected = compute_video_positions(ref_f, ref_h, ref_w, frame_rate=fps)
         assert cond.reference_positions.shape == expected.shape
         assert mx.array_equal(cond.reference_positions, expected), fps
+
+
+@pytest.mark.parametrize(("num_frames", "looped"), [(25, 25), (30, 25), (1, 1)])
+def test_still_image_reference_loops_over_the_clip(tmp_path, num_frames, looped):
+    """A still decodes to one frame; it is repeated to the clip's (1 + 8k) length (ComfyUI RepeatImageBatch)."""
+    import numpy as np
+    from PIL import Image
+
+    still = tmp_path / "sheet.png"
+    Image.fromarray(np.full((64, 96, 3), 200, dtype=np.uint8)).save(still)
+    encoded: list[mx.array] = []
+
+    class _Spy(_FakeEncoder):
+        def encode(self, video: mx.array) -> mx.array:
+            encoded.append(video)
+            return super().encode(video)
+
+    conds: list = []
+    iclora_utils.append_ic_lora_reference_video_conditionings(
+        conds,
+        [(str(still), 1.0)],
+        height=128,
+        width=192,
+        num_frames=num_frames,
+        video_encoder=_Spy(),
+        reference_downscale_factor=1,
+        frame_rate=24.0,
+    )
+
+    (video,) = encoded
+    assert video.shape == (1, 3, looped, 128, 192)
+    assert mx.array_equal(video, mx.repeat(video[:, :, :1], looped, axis=2)).item()
