@@ -772,12 +772,9 @@ class ICLoraPipeline(BasePipeline):
         if self.low_memory:
             aggressive_cleanup()
 
-        # Control-aware refine appended reference tokens — strip them before
-        # unpatchify (mirrors the Stage 1 gen-token extraction). Legacy two-stage
-        # has no appended tokens, so its full latent unpatchifies as-is.
-        video_out = output_2.video_latent
-        if control_aware_refine:
-            video_out = video_out[:, : F * H_full * W_full, :]
+        # Strip the tokens appended to stage 2 (image-guide keyframes, the control-aware
+        # refine's reference) before unpatchify, as stage 1 does.
+        video_out = output_2.video_latent[:, : F * H_full * W_full, :]
         video_latent = self.video_patchifier.unpatchify(video_out, (F, H_full, W_full))
         audio_latent = self.audio_patchifier.unpatchify(output_2.audio_latent)
 
