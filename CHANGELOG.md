@@ -10,6 +10,32 @@ version: breaking changes bump `y`, additive changes bump `z`. See
 [`docs/PIPELINE_MATURITY.md`](docs/PIPELINE_MATURITY.md) for per-pipeline
 stability guarantees.
 
+## [0.19.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.18.0...v0.19.0) (2026-11-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **pipelines:** a negative --image FRAME_IDX (and a negative frame index passed from Python, including tuples given to ic-lora / lipdub) no longer counts back from the end. -1 is now a guide one frame before the clip; use `last` for the final frame. A negative replace is refused.
+
+### Features
+
+* **iclora:** support opt-in ancestral CFG++ sampling ([#236](https://github.com/dgrauet/ltx-2-mlx/issues/236)) ([e5db9dd](https://github.com/dgrauet/ltx-2-mlx/commit/e5db9dd6935d3a2ff00108853d3ccc0f919154f6))
+* **pipelines:** let image guides sit outside the clip, as upstream ([#251](https://github.com/dgrauet/ltx-2-mlx/issues/251)) ([9b0b63b](https://github.com/dgrauet/ltx-2-mlx/commit/9b0b63baa2c0add62d72a82b41cb47ba94ee395d))
+* **pipelines:** port euler_cfg_pp_denoising_loop ([#239](https://github.com/dgrauet/ltx-2-mlx/issues/239)) ([895201d](https://github.com/dgrauet/ltx-2-mlx/commit/895201df379b079c2154738bcf92005b7a371923))
+
+
+### Bug Fixes
+
+* **core:** apply resident LoRA weights during block streaming ([#235](https://github.com/dgrauet/ltx-2-mlx/issues/235)) ([f14dbf9](https://github.com/dgrauet/ltx-2-mlx/commit/f14dbf930626eafd86b9f29030ac7a23b4e914b8))
+* **core:** check the sparse attention kernel against exact fp32 ([#245](https://github.com/dgrauet/ltx-2-mlx/issues/245)) ([e3ba669](https://github.com/dgrauet/ltx-2-mlx/commit/e3ba6690f3712b5e9103369ace2b5683322fbc70))
+* **core:** clamp sub-black ACEScct values in AP1 before the primaries matrix ([#250](https://github.com/dgrauet/ltx-2-mlx/issues/250)) ([86cf7b7](https://github.com/dgrauet/ltx-2-mlx/commit/86cf7b7067eee461753854b42010793adcfda4a1))
+* **core:** convert [0, 1] self-attention masks to a log-space bias before SDPA ([#252](https://github.com/dgrauet/ltx-2-mlx/issues/252)) ([5f3447d](https://github.com/dgrauet/ltx-2-mlx/commit/5f3447d663a2ce2a0c033e322f019ce4bd1b83a1))
+* **core:** estimate the guidance rescale over denoised tokens only ([#249](https://github.com/dgrauet/ltx-2-mlx/issues/249)) ([8ee9f8c](https://github.com/dgrauet/ltx-2-mlx/commit/8ee9f8c6c2a6b0734f3598dca8936ce81804d4cf))
+* **core:** keep the STG bypass values out of the per-head gate ([#248](https://github.com/dgrauet/ltx-2-mlx/issues/248)) ([90442dd](https://github.com/dgrauet/ltx-2-mlx/commit/90442dd598fc6b00eb7bc8b91498605902132290))
+* **ic-lora:** load the LTX-2.5 spatial upsampler for stage 2 ([#244](https://github.com/dgrauet/ltx-2-mlx/issues/244)) ([0a541a7](https://github.com/dgrauet/ltx-2-mlx/commit/0a541a77d285772a621c74bda4d2ab6d88383b6b))
+* **pipelines:** load the distilled resident weights in the --low-ram stage-2 swap ([#238](https://github.com/dgrauet/ltx-2-mlx/issues/238)) ([598b842](https://github.com/dgrauet/ltx-2-mlx/commit/598b842f056e3cde52bfbf9841080bebe1fdf45f))
+* **pipelines:** strip image-guide tokens before the ic-lora stage-2 unpatchify ([#255](https://github.com/dgrauet/ltx-2-mlx/issues/255)) ([6a25c29](https://github.com/dgrauet/ltx-2-mlx/commit/6a25c29131bb5a99720f1d3a668b5bd435188a00))
+
 ## [0.18.0](https://github.com/dgrauet/ltx-2-mlx/compare/v0.17.0...v0.18.0) (2026-10-22)
 
 
