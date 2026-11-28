@@ -577,7 +577,7 @@ class BasePipeline:
         if self._is_25:
             stems.insert(0, "spatial_upscaler_x2_v1_0")
 
-        # Try new v1.1+ naming, then old naming
+        # First existing file in ``stems`` order; the v1_1 name is only the path reported when none exists.
         weights_path = self.model_dir / "spatial_upscaler_x2_v1_1.safetensors"
         for stem in stems:
             resolved = self._resolve_safetensors(self.model_dir, stem)
@@ -587,14 +587,14 @@ class BasePipeline:
 
         if not weights_path.exists():
             expected = "spatial_upscaler_x2_v1_0.safetensors" if self._is_25 else "spatial_upscaler_x2_v1_1.safetensors"
+            repo = "dgrauet/ltx-2.5-mlx-q8" if self._is_25 else "dgrauet/ltx-2.3-mlx-q8"
             raise FileNotFoundError(
                 f"Spatial upsampler weights not found in {self.model_dir} "
                 f"(looked for {', '.join(f'{s}*.safetensors' for s in stems)}). "
-                "The two-stage and "
-                "distilled pipelines require it for stage-2 upscaling; without "
+                "Stage-2 upscaling requires it; without "
                 "it the latent is upscaled by an untrained module and the "
                 "output degrades into a periodic 'mosaic' grid. Download it, "
-                "e.g.: hf download dgrauet/ltx-2.3-mlx-q8 "
+                f"e.g.: hf download {repo} "
                 f"{expected} --local-dir {self.model_dir}"
             )
         return weights_path
