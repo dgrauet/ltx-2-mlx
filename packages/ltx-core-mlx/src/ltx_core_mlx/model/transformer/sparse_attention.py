@@ -389,7 +389,7 @@ _SUM_BODY = r"""
 _KERNELS: dict[str, Callable[..., Any]] = {}
 #: Probe result per dtype: ``mx.fast.metal_kernel`` builds a separate kernel for each ``T``.
 _AVAILABLE: dict[mx.Dtype, bool] = {}
-#: Probe tolerance against ``mx.fast.scaled_dot_product_attention``, per dtype.
+#: Probe tolerance against exact fp32 attention computed on the CPU, per dtype.
 _PROBE_ATOL = {mx.float16: 2e-3, mx.bfloat16: 1.6e-2, mx.float32: 1e-4}
 #: Probe length: 9 blocks, the last one partial. ``mx.fast.metal_kernel`` passes inputs with fewer than 8 elements in
 #: ``constant`` memory, which builds a different kernel; with 9 blocks every array input but ``ip`` and ``sc`` (always
@@ -430,7 +430,8 @@ def kernel_available(dtype: mx.Dtype = mx.float16) -> bool:
     The check runs the kernel variant a real call in ``dtype`` runs: q, k, v laid out as in ``attn1`` (heads transposed
     out of ``(B, N, H, D)``) and long enough that every array input is in device memory (see ``_PROBE_TOKENS``).
     False when the installed MLX lacks the steel headers this module compiles against, or the kernel errors or does
-    not match dense attention; callers then stay on the dense kernel and a warning is printed once per dtype.
+    not match exact fp32 attention computed on the CPU (not the GPU dense kernel, whose fp32 rounding depends on the
+    GPU); callers then stay on the dense kernel and a warning is printed once per dtype.
     """
     if dtype not in _AVAILABLE:
         try:
@@ -439,7 +440,13 @@ def kernel_available(dtype: mx.Dtype = mx.float16) -> bool:
                 for i in range(3)
             )
             out = sparse_self_attention(q, k, v, 128**-0.5, tau=-math.inf, check=False)
-            ref = mx.fast.scaled_dot_product_attention(q, k, v, scale=128**-0.5).transpose(0, 2, 1, 3)
+            # Exact fp32 reference on the CPU: MLX >= 0.32 runs fp32 GPU matmuls (dense SDPA included) in TF32 on
+            # newer GPUs (M5), ~1e-3 off, which failed the fp32 check although the kernel itself is exact.
+            with mx.stream(mx.cpu):
+                qf, kf, vf = (x.astype(mx.float32) for x in (q, k, v))
+                scores = (qf @ kf.transpose(0, 1, 3, 2)) * 128**-0.5
+                ref = (mx.softmax(scores, axis=-1) @ vf).transpose(0, 2, 1, 3)
+                mx.eval(ref)
             atol = _PROBE_ATOL.get(dtype, 2e-3)
             ok = bool(mx.allclose(out.astype(mx.float32), ref.astype(mx.float32), atol=atol).item())
             if not ok:
