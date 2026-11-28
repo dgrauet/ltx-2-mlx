@@ -323,7 +323,42 @@ class BlockStreamer:
                 for name, w in weights
             ]
 
+        self._reconcile_quant_layers(block, weights)
         block.load_weights(weights, strict=True)
+
+    @staticmethod
+    def _reconcile_quant_layers(
+        block: nn.Module,
+        weights: list[tuple[str, mx.array]],
+    ) -> None:
+        from ltx_core_mlx.utils.weights import derive_quant_params, infer_quant_mode
+
+        wdict = dict(weights)
+        for path, module in block.named_modules():
+            if not isinstance(module, nn.QuantizedLinear):
+                continue
+            wkey = f"{path}.weight"
+            skey = f"{path}.scales"
+            bkey = f"{path}.biases"
+            if wkey not in wdict or skey not in wdict:
+                continue
+            new_w = wdict[wkey]
+            new_s = wdict[skey]
+            has_biases = bkey in wdict
+            in_features = int(module.weight.shape[1]) * 32 // module.bits
+            new_bits, new_gs = derive_quant_params(in_features, int(new_w.shape[1]), int(new_s.shape[1]))
+            new_mode = infer_quant_mode(new_bits, new_gs, has_biases=has_biases, scales_dtype=new_s.dtype)
+            if (new_bits, new_gs, new_mode) == (module.bits, module.group_size, module.mode):
+                continue
+            module.bits = new_bits
+            module.group_size = new_gs
+            module.mode = new_mode
+            module["weight"] = new_w
+            module["scales"] = new_s
+            if has_biases:
+                module["biases"] = wdict[bkey]
+            elif "biases" in module:
+                del module["biases"]
 
     @staticmethod
     def _fuse_lora_into_block(
