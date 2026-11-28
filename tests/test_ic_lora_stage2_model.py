@@ -1,14 +1,22 @@
-"""ic-lora's stage 2 runs on the reloaded clean transformer, not on stage 1's (with the IC-LoRA fused)."""
+"""ic-lora's stage 2: which transformer it runs on and which tokens it carries.
+
+Stage 2 runs on the reloaded clean transformer unless the IC-LoRA stays on for it (the
+control-aware refine, ``stage_2_ic_lora``); tokens appended to it (image guides, the
+re-encoded reference) are stripped before the unpatchify.
+"""
 
 from __future__ import annotations
 
 import json
 
 import mlx.core as mx
+import numpy as np
 import pytest
+from PIL import Image
 
 from ltx_pipelines_mlx import ic_lora as ic_mod
 from ltx_pipelines_mlx.utils.samplers import DenoiseOutput
+from ltx_pipelines_mlx.utils.types import ImageConditioningInput
 
 
 class _Enc:
@@ -18,6 +26,10 @@ class _Enc:
     def normalize_latent(self, x):
         return x
 
+    def encode(self, video: mx.array) -> mx.array:
+        b, _c, f_pix, h_pix, w_pix = video.shape
+        return mx.zeros((b, 128, (f_pix - 1) // 8 + 1, h_pix // 32, w_pix // 32), dtype=mx.bfloat16)
+
 
 def _pipe(tmp_path, monkeypatch):
     (tmp_path / "embedded_config.json").write_text(json.dumps({"transformer": {"num_layers": 48, "ff_bias": False}}))
@@ -25,7 +37,7 @@ def _pipe(tmp_path, monkeypatch):
     calls: list = []
 
     def loop(**kw):
-        calls.append(kw["model"])
+        calls.append(kw)
         return DenoiseOutput(video_latent=kw["video_state"].latent, audio_latent=kw["audio_state"].latent)
 
     def load():
@@ -44,6 +56,12 @@ def _pipe(tmp_path, monkeypatch):
     return pipe, calls
 
 
+def _still(tmp_path, name="still.png"):
+    path = tmp_path / name
+    Image.fromarray(np.full((64, 64, 3), 128, dtype=np.uint8)).save(path)
+    return str(path)
+
+
 def test_stage_2_uses_the_reloaded_transformer(tmp_path, monkeypatch):
     pipe, calls = _pipe(tmp_path, monkeypatch)
 
@@ -52,10 +70,10 @@ def test_stage_2_uses_the_reloaded_transformer(tmp_path, monkeypatch):
 
     pipe._reload_clean_transformer = reload
     pipe.generate("a fox", [], height=128, width=128, num_frames=17, frame_rate=24.0, seed=1)
-    assert calls == [("x0", "stage-1 transformer (IC-LoRA fused)"), ("x0", "clean transformer")]
+    assert [c["model"] for c in calls] == [("x0", "stage-1 transformer (IC-LoRA fused)"), ("x0", "clean transformer")]
 
 
-@pytest.mark.parametrize("kw", [dict(upsample_only=True, refine_steps=2)])
+@pytest.mark.parametrize("kw", [dict(upsample_only=True, refine_steps=2), dict(stage_2_ic_lora=True)])
 def test_control_aware_refine_keeps_the_stage_1_model(tmp_path, monkeypatch, kw):
     pipe, calls = _pipe(tmp_path, monkeypatch)
 
@@ -65,4 +83,64 @@ def test_control_aware_refine_keeps_the_stage_1_model(tmp_path, monkeypatch, kw)
     pipe._reload_clean_transformer = reload
     monkeypatch.setattr(ic_mod, "append_ic_lora_reference_video_conditionings", lambda conds, *a, **k: None)
     pipe.generate("a fox", [], height=128, width=128, num_frames=17, frame_rate=24.0, seed=1, **kw)
-    assert calls == [("x0", "stage-1 transformer (IC-LoRA fused)")] * 2
+    assert [c["model"] for c in calls] == [("x0", "stage-1 transformer (IC-LoRA fused)")] * 2
+
+
+def test_stage_2_strips_image_guide_tokens_before_unpatchify(tmp_path, monkeypatch):
+    """A guide appends keyframe tokens to stage 2; the output keeps the generated grid only."""
+    pipe, calls = _pipe(tmp_path, monkeypatch)
+    pipe._reload_clean_transformer = lambda: None
+    guide = ImageConditioningInput.guide(_still(tmp_path), 8, 1.0, crf=0)
+
+    video, _ = pipe.generate("a fox", [], height=128, width=128, num_frames=17, frame_rate=24.0, images=[guide])
+
+    # 128 px -> 4x4 latent cells, F=3: 48 generated tokens plus one 16-token guide frame.
+    assert calls[1]["video_state"].latent.shape == (1, 64, 128)
+    assert video.shape == (1, 128, 3, 4, 4)
+
+
+def _spy_reference_appends(monkeypatch):
+    seen: list[dict] = []
+    real = ic_mod.append_ic_lora_reference_video_conditionings
+
+    def spy(conds, video_conditioning, **kw):
+        seen.append(kw)
+        real(conds, video_conditioning, **kw)
+
+    monkeypatch.setattr(ic_mod, "append_ic_lora_reference_video_conditionings", spy)
+    return seen
+
+
+def test_stage_2_ic_lora_appends_the_full_res_reference(tmp_path, monkeypatch):
+    """Upstream ``--stage-2-ic-lora``: the reference is re-encoded at stage-2 resolution and appended."""
+    pipe, calls = _pipe(tmp_path, monkeypatch)
+    pipe._reload_clean_transformer = lambda: pytest.fail("stage_2_ic_lora keeps the IC-LoRA: no reload")
+    seen = _spy_reference_appends(monkeypatch)
+    monkeypatch.setattr(
+        "ltx_pipelines_mlx.iclora_utils.probe_video_info", lambda path: type("Info", (), {"num_frames": 17})()
+    )
+    monkeypatch.setattr(
+        "ltx_pipelines_mlx.iclora_utils.decode_video_by_frame",
+        lambda path, frame_cap: [np.full((64, 64, 3), 128, dtype=np.uint8)] * frame_cap,
+    )
+
+    video, _ = pipe.generate(
+        "a fox", [("control.mp4", 1.0)], height=128, width=128, num_frames=17, frame_rate=24.0, stage_2_ic_lora=True
+    )
+
+    assert [(kw["height"], kw["width"]) for kw in seen] == [(128, 128)]
+    # 48 generated tokens + 48 reference tokens at full res, sliced back to the 3x4x4 grid.
+    assert calls[1]["video_state"].latent.shape == (1, 96, 128)
+    assert calls[1]["model"] == ("x0", "stage-1 transformer (IC-LoRA fused)")
+    assert video.shape == (1, 128, 3, 4, 4)
+
+
+@pytest.mark.parametrize("kw", [dict(), dict(stage_2_ic_lora=True, upsample_only=True)])
+def test_stage_2_without_ic_lora_appends_no_reference(tmp_path, monkeypatch, kw):
+    pipe, calls = _pipe(tmp_path, monkeypatch)
+    pipe._reload_clean_transformer = lambda: None
+    seen = _spy_reference_appends(monkeypatch)
+
+    pipe.generate("a fox", [("control.mp4", 1.0)], height=128, width=128, num_frames=17, frame_rate=24.0, **kw)
+
+    assert seen == []

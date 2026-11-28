@@ -431,6 +431,7 @@ class ICLoraPipeline(BasePipeline):
         conditioning_attention_mask: mx.array | None = None,
         skip_stage_2: bool = False,
         single_stage: bool = False,
+        stage_2_ic_lora: bool = False,
         upsample_only: bool = False,
         refine_steps: int | None = None,
         sampler: str = "euler",
@@ -458,6 +459,11 @@ class ICLoraPipeline(BasePipeline):
                 pose/reference conditioning applied throughout (matches the Comfy
                 single-stage IC-LoRA workflows, e.g. Union Control). No upsampler,
                 no Stage 2 refine. Takes precedence over ``skip_stage_2``.
+            stage_2_ic_lora: Keep the IC-LoRA on for Stage 2 and append the reference
+                video re-encoded at full resolution, instead of refining on the bare
+                checkpoint (upstream ``--stage-2-ic-lora``). Stage 2 then attends over up to
+                twice the tokens. Ignored with ``single_stage``, ``skip_stage_2`` or
+                ``upsample_only``.
             upsample_only: Run the half-res generative stage (conditioning applied
                 throughout, same as Stage 1), upscale the latent 2x with the
                 LatentUpsampler, and decode directly — skipping the Stage 2 refine
@@ -628,7 +634,7 @@ class ICLoraPipeline(BasePipeline):
             audio_latent = self.audio_patchifier.unpatchify(output_1.audio_latent)
             return video_half, audio_latent
 
-        # --- Stage 2: Upscale + refine (no IC-LoRA, clean distilled model) ---
+        # --- Stage 2: Upscale + refine (clean distilled model unless the IC-LoRA stays on) ---
         # Upscale with denormalize/renormalize wrapping (matching reference).
         # Reference: un_normalize -> upsampler -> normalize using VAE encoder stats.
         # Without this, the upsampler produces garbage for Stage 2.
@@ -651,6 +657,10 @@ class ICLoraPipeline(BasePipeline):
         # res — cleaning upsampler artifacts without the adherence drift of the
         # legacy two-stage Stage 2.
         control_aware_refine = upsample_only and bool(refine_steps)
+        # Upstream ``--stage-2-ic-lora``: the plain two-stage path keeps the IC-LoRA and
+        # its reference for stage 2, as the control-aware refine does.
+        stage_2_ic_lora = stage_2_ic_lora and not upsample_only
+        keep_ic_lora = stage_2_ic_lora or control_aware_refine
         if upsample_only and not control_aware_refine:
             audio_latent = self.audio_patchifier.unpatchify(output_1.audio_latent)
             if self.low_memory:
@@ -693,13 +703,14 @@ class ICLoraPipeline(BasePipeline):
                 )
             )
 
-        # Control-aware refine: re-encode the control reference at full resolution
-        # and append it (with the IC-LoRA still fused, below) so the refine tracks
-        # the control — the whole point of this path. Stage 1 only saw the control
-        # at half res; here it gets the full-res signal to recover fine detail
-        # (e.g. fast-moving limbs). Legacy two-stage skips this, which is why its
-        # Stage 2 drifts off the conditioning.
-        if control_aware_refine:
+        # IC-LoRA kept for stage 2: re-encode the control reference at full resolution
+        # and append it (with the IC-LoRA still fused, below) so stage 2 tracks the
+        # control. Stage 1 only saw the control at half res; here it gets the full-res
+        # signal to recover fine detail (e.g. fast-moving limbs). Upstream builds the
+        # stage's reference conditionings from the stage-resolution chunk the same way
+        # (``ICLoraPipeline._video_conditionings``). The bare-checkpoint stage 2 skips
+        # this, which is why it drifts off the conditioning.
+        if keep_ic_lora:
             append_ic_lora_reference_video_conditionings(
                 conditionings_2,
                 video_conditioning,
@@ -719,10 +730,10 @@ class ICLoraPipeline(BasePipeline):
             self.upsampler = None
         # Dev mode keeps both LoRAs fused across stages (matches Comfy two-stage
         # IC-LoRA workflows, which never reload a clean model). Legacy distilled
-        # mode reloads the clean transformer (separate model ledgers). The
-        # control-aware refine also keeps the fused model — the IC-LoRA must stay
-        # present to consume the re-appended reference tokens.
-        if not self.dev_mode and not control_aware_refine:
+        # mode reloads the clean transformer (separate model ledgers), unless the
+        # IC-LoRA stays on for stage 2: it must be present to consume the re-appended
+        # reference tokens (upstream ``with_loras(self._loras if apply_ic_lora else ())``).
+        if not self.dev_mode and not keep_ic_lora:
             self._reload_clean_transformer()
             # Stage 1's X0Model still wraps the transformer it was built on, which a reload (fused LoRAs on a
             # resident model) replaces: stage 2 has to run on the reloaded one, or it keeps the IC-LoRA.
@@ -747,7 +758,9 @@ class ICLoraPipeline(BasePipeline):
         # change) so Stage 2 stays bit-exact. The control-aware refine additionally
         # appends the reference tokens here (same shape-change / RNG-shift pattern
         # as Stage 1's reference append), so it is intentionally not bit-exact with
-        # the legacy path.
+        # the legacy path. stage_2_ic_lora has no legacy baseline and takes upstream's
+        # order (init -> conditionings -> mask-aware noise), so a reference with
+        # strength < 1 is noised to its denoise mask as in stage 1.
         video_state_2 = create_noised_state(
             base_shape=video_tokens_up.shape,
             conditionings=conditionings_2,
@@ -756,7 +769,7 @@ class ICLoraPipeline(BasePipeline):
             seed=seed + 2,
             sigma=start_sigma,
             initial_latent=video_tokens_up,
-            legacy_scalar_blend=True,
+            legacy_scalar_blend=not stage_2_ic_lora,
         )
 
         # Audio refined in stage 2
@@ -784,12 +797,9 @@ class ICLoraPipeline(BasePipeline):
         if self.low_memory:
             aggressive_cleanup()
 
-        # Control-aware refine appended reference tokens — strip them before
-        # unpatchify (mirrors the Stage 1 gen-token extraction). Legacy two-stage
-        # has no appended tokens, so its full latent unpatchifies as-is.
-        video_out = output_2.video_latent
-        if control_aware_refine:
-            video_out = video_out[:, : F * H_full * W_full, :]
+        # Strip the tokens appended to stage 2 (image-guide keyframes, the control-aware
+        # refine's reference) before unpatchify, as stage 1 does.
+        video_out = output_2.video_latent[:, : F * H_full * W_full, :]
         video_latent = self.video_patchifier.unpatchify(video_out, (F, H_full, W_full))
         audio_latent = self.audio_patchifier.unpatchify(output_2.audio_latent)
 
@@ -812,6 +822,7 @@ class ICLoraPipeline(BasePipeline):
         conditioning_attention_strength: float = 1.0,
         skip_stage_2: bool = False,
         single_stage: bool = False,
+        stage_2_ic_lora: bool = False,
         upsample_only: bool = False,
         refine_steps: int | None = None,
         sampler: str = "euler",
@@ -833,6 +844,7 @@ class ICLoraPipeline(BasePipeline):
             conditioning_attention_strength: Attention strength for conditioning.
             skip_stage_2: Skip upscale + refine.
             single_stage: Full-res one-pass generation (Union Control topology).
+            stage_2_ic_lora: Keep the IC-LoRA and the full-res reference in Stage 2.
             upsample_only: Half-res gen + latent upsample, no refine (full-res output).
             refine_steps: With upsample_only, run an N-step control-aware refine
                 after the upsample (full-res control re-applied, IC-LoRA fused).
@@ -856,6 +868,7 @@ class ICLoraPipeline(BasePipeline):
             conditioning_attention_strength=conditioning_attention_strength,
             skip_stage_2=skip_stage_2,
             single_stage=single_stage,
+            stage_2_ic_lora=stage_2_ic_lora,
             upsample_only=upsample_only,
             refine_steps=refine_steps,
             sampler=sampler,
