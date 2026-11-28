@@ -25,6 +25,7 @@ from ltx_core_mlx.model.audio_vae.audio_vae import AudioVAEDecoder
 from ltx_core_mlx.model.audio_vae.bwe import VocoderWithBWE
 from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig, compute_dtype_from_env
 from ltx_core_mlx.model.transformer.sparse_attention import sol_taus_from_env
+from ltx_core_mlx.model.upsampler import LatentUpsampler
 from ltx_core_mlx.model.video_vae.video_vae import VideoDecoder, VideoEncoder
 from ltx_core_mlx.text_encoders.gemma.encoders.base_encoder import GemmaLanguageModel
 from ltx_core_mlx.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorV2
@@ -555,6 +556,80 @@ class BasePipeline:
         if versioned:
             return versioned[-1]
         return model_dir / f"{stem}.safetensors"
+
+    def _resolve_upsampler_path(self) -> Path:
+        """Return the spatial-upscaler weights file to load for stage 2.
+
+        LTX-2.5 packs ship ``spatial_upscaler_x2_v1_0.safetensors``; the 2.3
+        packs ship ``spatial_upscaler_x2_v1_1.safetensors`` (or the older
+        ``ltx-2.3-spatial-upscaler-x2`` name). The 2.5 name is only consulted
+        on 2.5 packs, so the 2.3 resolution order is untouched.
+
+        Raises:
+            FileNotFoundError: when no upsampler weights file is present in the
+                model dir. Stage 2 upscales the latent through this module
+                unconditionally; with a randomly-initialised ``LatentUpsampler``
+                the output decodes into a periodic pixel-shuffle grid ("mosaic")
+                with no other error. A missing file must therefore fail loud
+                rather than silently degrade.
+        """
+        stems = ["ltx-2.3-spatial-upscaler-x2", "spatial_upscaler_x2_v1_1"]
+        if self._is_25:
+            stems.insert(0, "spatial_upscaler_x2_v1_0")
+
+        # First existing file in ``stems`` order; the v1_1 name is only the path reported when none exists.
+        weights_path = self.model_dir / "spatial_upscaler_x2_v1_1.safetensors"
+        for stem in stems:
+            resolved = self._resolve_safetensors(self.model_dir, stem)
+            if resolved.exists():
+                weights_path = resolved
+                break
+
+        if not weights_path.exists():
+            expected = "spatial_upscaler_x2_v1_0.safetensors" if self._is_25 else "spatial_upscaler_x2_v1_1.safetensors"
+            repo = "dgrauet/ltx-2.5-mlx-q8" if self._is_25 else "dgrauet/ltx-2.3-mlx-q8"
+            raise FileNotFoundError(
+                f"Spatial upsampler weights not found in {self.model_dir} "
+                f"(looked for {', '.join(f'{s}*.safetensors' for s in stems)}). "
+                "Stage-2 upscaling requires it; without "
+                "it the latent is upscaled by an untrained module and the "
+                "output degrades into a periodic 'mosaic' grid. Download it, "
+                f"e.g.: hf download {repo} "
+                f"{expected} --local-dir {self.model_dir}"
+            )
+        return weights_path
+
+    def _build_upsampler(self, weights_path: Path) -> LatentUpsampler:
+        """Build a :class:`LatentUpsampler` from ``<stem>_config.json`` and load ``weights_path``."""
+        import json
+
+        config_path = weights_path.parent / f"{weights_path.stem}_config.json"
+        if config_path.exists():
+            raw_config = json.loads(config_path.read_text())
+            # Old format nests fields under a "config" key; newer conversions
+            # (e.g. LTX-2.5) emit the fields flat at the top level.
+            config = raw_config.get("config", raw_config)
+            upsampler = LatentUpsampler.from_config(config)
+        else:
+            upsampler = LatentUpsampler()
+
+        raw = load_split_safetensors(weights_path)
+        # Old format keys are prefixed with the stem; new format uses bare keys.
+        stem_prefix = weights_path.stem + "."
+        if raw and all(k.startswith(stem_prefix) for k in raw):
+            raw = {k[len(stem_prefix) :]: v for k, v in raw.items()}
+        upsampler.load_weights(list(raw.items()))
+        return upsampler
+
+    def _load_upsampler(self) -> None:
+        """Load the spatial upsampler from config and weights.
+
+        Raises:
+            FileNotFoundError: propagated from :meth:`_resolve_upsampler_path`
+                when no upsampler weights file is present in the model dir.
+        """
+        self.upsampler = self._build_upsampler(self._resolve_upsampler_path())
+        aggressive_cleanup()
 
     @classmethod
     def _resolve_distilled_transformer(cls, model_dir: Path) -> Path:

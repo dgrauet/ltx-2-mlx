@@ -37,7 +37,7 @@ from ltx_core_mlx.model.transformer.model import X0Model
 from ltx_core_mlx.model.upsampler import LatentUpsampler
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_core_mlx.utils.weights import apply_quantization, load_split_safetensors
+from ltx_core_mlx.utils.weights import apply_quantization
 from ltx_pipelines_mlx._base import BasePipeline, streamed_lora_fuse, unfused_loras_requested
 from ltx_pipelines_mlx.iclora_utils import (
     append_ic_lora_reference_video_conditionings,
@@ -46,6 +46,7 @@ from ltx_pipelines_mlx.iclora_utils import (
 from ltx_pipelines_mlx.scheduler import DISTILLED_SIGMAS, STAGE_2_SIGMAS, shorten_schedule
 from ltx_pipelines_mlx.utils.blocks import snap_num_frames
 from ltx_pipelines_mlx.utils.constants import DEFAULT_NEGATIVE_PROMPT
+from ltx_pipelines_mlx.utils.generation import is_ltx25_pack
 from ltx_pipelines_mlx.utils.helpers import create_noised_state
 from ltx_pipelines_mlx.utils.media_io import decode_video_by_frame, video_preprocess
 from ltx_pipelines_mlx.utils.samplers import denoise_loop, euler_cfg_pp_denoising_loop
@@ -88,6 +89,7 @@ class ICLoraPipeline(BasePipeline):
         # `vae_encoder` is provided as a property by BasePipeline (proxies
         # to the ImageConditioner block). Only `upsampler` is unique here.
         self.upsampler: LatentUpsampler | None = None
+        self._is_25 = is_ltx25_pack(self.model_dir)
 
         # Resolve LoRA paths (download from HuggingFace if needed)
         self._lora_paths = [(_resolve_lora_path(p), s) for p, s in (lora_paths or [])]
@@ -127,10 +129,13 @@ class ICLoraPipeline(BasePipeline):
         self.distilled_lora_strength = distilled_lora_strength
 
     def load(self) -> None:
-        """Load generation components: DiT, VAE encoder, upsampler.
+        """Load generation components: DiT, VAE encoder.
 
         Does NOT load decoders (VAE decoder, audio decoder, vocoder) to save
-        memory. Those are loaded on-demand in generate_and_save().
+        memory. Those are loaded on-demand in generate_and_save(). The spatial
+        upsampler is loaded by ``generate()`` only when the run upscales, so the
+        single-stage and ``skip_stage_2`` topologies work on a model directory
+        without the upscaler file.
         """
         if self._loaded:
             return
@@ -147,27 +152,6 @@ class ICLoraPipeline(BasePipeline):
 
         # VAE encoder (for encoding control videos and I2V images)
         self._load_vae_encoder()
-
-        # Upsampler (for Stage 2)
-        if self.upsampler is None:
-            import json
-
-            name = "spatial_upscaler_x2_v1_1"
-            config_path = model_dir / f"{name}_config.json"
-            weights_path = model_dir / f"{name}.safetensors"
-            if config_path.exists():
-                raw_config = json.loads(config_path.read_text())
-                # Old format nests fields under a "config" key; newer
-                # conversions (e.g. LTX-2.5) emit the fields flat at the
-                # top level.
-                config = raw_config.get("config", raw_config)
-                self.upsampler = LatentUpsampler.from_config(config)
-            else:
-                self.upsampler = LatentUpsampler()
-            if weights_path.exists():
-                weights = load_split_safetensors(weights_path, prefix=f"{name}.")
-                self.upsampler.load_weights(list(weights.items()))
-            aggressive_cleanup()
 
         self._loaded = True
 
@@ -515,8 +499,12 @@ class ICLoraPipeline(BasePipeline):
             self.prompt_encoder.free()
             aggressive_cleanup()
 
-        # Load DiT + VAE encoder + upsampler (no decoders)
+        # Load DiT + VAE encoder (no decoders)
         self.load()
+        # Upsampler, only when this run upscales: 2.5 packs ship v1_0, 2.3 packs v1_1. A missing file
+        # fails loud here, before stage 1, and not at all for single_stage / skip_stage_2.
+        if not (single_stage or skip_stage_2) and self.upsampler is None:
+            self._load_upsampler()
 
         assert self.dit is not None
         assert self.vae_encoder is not None

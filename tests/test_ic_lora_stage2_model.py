@@ -97,3 +97,64 @@ def test_stage_2_strips_image_guide_tokens_before_unpatchify(tmp_path, monkeypat
     # 128 px -> 4x4 latent cells, F=3: 48 generated tokens plus one 16-token guide frame.
     assert calls[1]["video_state"].latent.shape == (1, 64, 128)
     assert video.shape == (1, 128, 3, 4, 4)
+
+
+def test_upsampler_resolves_the_25_file(tmp_path):
+    """A 2.5 pack ships only ``spatial_upscaler_x2_v1_0``: ic-lora loaded ``v1_1`` and, finding none,
+    silently upscaled with an untrained module (stage 2 decoded to a mosaic grid)."""
+    (tmp_path / "embedded_config.json").write_text(json.dumps({"transformer": {"num_layers": 48, "ff_bias": False}}))
+    (tmp_path / "spatial_upscaler_x2_v1_0.safetensors").touch()
+    pipe = ic_mod.ICLoraPipeline(model_dir=str(tmp_path), low_memory=False)
+    assert pipe._resolve_upsampler_path().name == "spatial_upscaler_x2_v1_0.safetensors"
+
+
+def _pipe_without_upscaler(tmp_path, monkeypatch):
+    """``_pipe`` on a pack with no upscaler file, where ``load()`` (as the real one) leaves the upsampler out."""
+    pipe, calls = _pipe(tmp_path, monkeypatch)
+    pipe.load = lambda: setattr(pipe, "dit", "stage-1 transformer (IC-LoRA fused)")
+    monkeypatch.setattr(ic_mod, "append_ic_lora_reference_video_conditionings", lambda conds, *a, **k: None)
+    return pipe, calls
+
+
+@pytest.mark.parametrize("kw", [{"single_stage": True}, {"skip_stage_2": True}])
+def test_no_upscaler_needed_without_stage_2(tmp_path, monkeypatch, kw):
+    """single_stage and skip_stage_2 never upscale: they must run on a pack that has no upscaler file."""
+    pipe, calls = _pipe_without_upscaler(tmp_path, monkeypatch)
+    pipe.generate("a fox", [], height=128, width=128, num_frames=17, frame_rate=24.0, seed=1, **kw)
+    assert len(calls) == 1
+    assert pipe.upsampler is None
+
+
+def test_missing_upscaler_fails_before_stage_1(tmp_path, monkeypatch):
+    """A two-stage run on a pack without the upscaler fails loud, and before spending stage 1."""
+    pipe, calls = _pipe_without_upscaler(tmp_path, monkeypatch)
+    with pytest.raises(FileNotFoundError, match="Spatial upsampler weights not found"):
+        pipe.generate("a fox", [], height=128, width=128, num_frames=17, frame_rate=24.0, seed=1)
+    assert calls == []
+
+
+def test_load_leaves_the_upsampler_out(tmp_path, monkeypatch):
+    """``load()`` itself must not need the upscaler file."""
+    (tmp_path / "embedded_config.json").write_text(json.dumps({"transformer": {"num_layers": 48, "ff_bias": False}}))
+    pipe = ic_mod.ICLoraPipeline(model_dir=str(tmp_path), low_memory=False)
+    monkeypatch.setattr(pipe, "_load_transformer_with_optional_streaming", lambda path: "dit")
+    monkeypatch.setattr(pipe, "_load_vae_encoder", lambda: None)
+    pipe.load()
+    assert pipe.upsampler is None
+
+
+@pytest.mark.parametrize(
+    ("is_25", "repo", "name"),
+    [
+        (True, "dgrauet/ltx-2.5-mlx-q8", "spatial_upscaler_x2_v1_0.safetensors"),
+        (False, "dgrauet/ltx-2.3-mlx-q8", "spatial_upscaler_x2_v1_1.safetensors"),
+    ],
+)
+def test_missing_upscaler_message_names_the_pack_repo(tmp_path, is_25, repo, name):
+    """The download hint must point at the repo that has the expected file."""
+    config = {"transformer": {"num_layers": 48, "ff_bias": False}} if is_25 else {}
+    (tmp_path / "embedded_config.json").write_text(json.dumps(config))
+    pipe = ic_mod.ICLoraPipeline(model_dir=str(tmp_path), low_memory=False)
+    assert pipe._is_25 is is_25
+    with pytest.raises(FileNotFoundError, match=f"hf download {repo} {name}"):
+        pipe._resolve_upsampler_path()
