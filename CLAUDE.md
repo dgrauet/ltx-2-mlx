@@ -1673,7 +1673,7 @@ noise), matching upstream.
 - `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/distilled.py` — `DistilledPipeline` (2.3/2.5 dispatch), `ANCESTRAL_*` constants.
 - `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/utils/generation.py` — `is_ltx25_pack()`.
 - `packages/ltx-core-mlx/src/ltx_core_mlx/text_encoders/gemma/encoders/encoder_configurator.py` — `select_text_encoder()`, `check_gemma_version()`.
-- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/ti2vid_two_stages.py` — `_resolve_upsampler_path()` (`_is_25` resolved in `__init__` via `is_ltx25_pack`; the `_is_25: bool = False` class attribute lives on `BasePipeline`).
+- `packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/_base.py` — `BasePipeline._resolve_upsampler_path()` / `_load_upsampler()`, shared by the two-stage, distilled, ic-lora and lipdub pipelines (`_is_25: bool = False` class attribute; each pipeline sets it in `__init__` via `is_ltx25_pack`). `ICLoraPipeline` loads the upsampler in `generate()` only when the run upscales.
 - `tests/test_ltx25_distilled.py` — routing, sigma-table, TeaCache-guard, upsampler-resolution tests.
 
 ---

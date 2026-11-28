@@ -616,7 +616,7 @@ class DFRPipeline(DistilledPipeline):
                 is missing (``_build_upsampler`` then falls back to a default *spatial*
                 ``LatentUpsampler()``) or because it names a spatial variant. A spatial
                 upsampler silently wrecks the video exactly like the untrained-module case
-                :meth:`TI2VidTwoStagesPipeline._resolve_upsampler_path` guards against.
+                :meth:`BasePipeline._resolve_upsampler_path` guards against.
         """
         with phase("Loading the temporal upsampler", verbose=self.verbose):
             path = self._resolve_temporal_upsampler_path()

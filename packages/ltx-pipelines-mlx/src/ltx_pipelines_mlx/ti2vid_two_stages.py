@@ -35,7 +35,6 @@ from ltx_core_mlx.model.transformer.model import LTXModel, X0Model
 from ltx_core_mlx.model.upsampler import LatentUpsampler
 from ltx_core_mlx.utils.memory import aggressive_cleanup
 from ltx_core_mlx.utils.positions import compute_audio_positions, compute_audio_token_count, compute_video_positions
-from ltx_core_mlx.utils.weights import load_split_safetensors
 from ltx_pipelines_mlx._base import BasePipeline
 from ltx_pipelines_mlx.scheduler import STAGE_2_SIGMAS, ltx2_schedule, shorten_schedule
 from ltx_pipelines_mlx.utils.generation import is_ltx25_pack
@@ -280,48 +279,6 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         object.__setattr__(self.dit, "_lora_sources", existing)
         aggressive_cleanup()
 
-    def _resolve_upsampler_path(self) -> Path:
-        """Return the spatial-upscaler weights file to load for stage 2.
-
-        LTX-2.5 packs ship ``spatial_upscaler_x2_v1_0.safetensors``; the 2.3
-        packs ship ``spatial_upscaler_x2_v1_1.safetensors`` (or the older
-        ``ltx-2.3-spatial-upscaler-x2`` name). The 2.5 name is only consulted
-        on 2.5 packs, so the 2.3 resolution order is untouched.
-
-        Raises:
-            FileNotFoundError: when no upsampler weights file is present in the
-                model dir. Stage 2 upscales the latent through this module
-                unconditionally; with a randomly-initialised ``LatentUpsampler``
-                the output decodes into a periodic pixel-shuffle grid ("mosaic")
-                with no other error. A missing file must therefore fail loud
-                rather than silently degrade.
-        """
-        stems = ["ltx-2.3-spatial-upscaler-x2", "spatial_upscaler_x2_v1_1"]
-        if self._is_25:
-            stems.insert(0, "spatial_upscaler_x2_v1_0")
-
-        # Try new v1.1+ naming, then old naming
-        weights_path = self.model_dir / "spatial_upscaler_x2_v1_1.safetensors"
-        for stem in stems:
-            resolved = self._resolve_safetensors(self.model_dir, stem)
-            if resolved.exists():
-                weights_path = resolved
-                break
-
-        if not weights_path.exists():
-            expected = "spatial_upscaler_x2_v1_0.safetensors" if self._is_25 else "spatial_upscaler_x2_v1_1.safetensors"
-            raise FileNotFoundError(
-                f"Spatial upsampler weights not found in {self.model_dir} "
-                f"(looked for {', '.join(f'{s}*.safetensors' for s in stems)}). "
-                "The two-stage and "
-                "distilled pipelines require it for stage-2 upscaling; without "
-                "it the latent is upscaled by an untrained module and the "
-                "output degrades into a periodic 'mosaic' grid. Download it, "
-                "e.g.: hf download dgrauet/ltx-2.3-mlx-q8 "
-                f"{expected} --local-dir {self.model_dir}"
-            )
-        return weights_path
-
     def _make_stage1_teacache(
         self, enable_teacache: bool, stage1_steps: int, teacache_thresh: float | None
     ) -> TeaCacheController | None:
@@ -344,38 +301,6 @@ class TI2VidTwoStagesPipeline(BasePipeline):
         controller = _build_teacache_controller(stage1_steps, teacache_thresh)
         controller.reset()
         return controller
-
-    def _build_upsampler(self, weights_path: Path) -> LatentUpsampler:
-        """Build a :class:`LatentUpsampler` from ``<stem>_config.json`` and load ``weights_path``."""
-        import json
-
-        config_path = weights_path.parent / f"{weights_path.stem}_config.json"
-        if config_path.exists():
-            raw_config = json.loads(config_path.read_text())
-            # Old format nests fields under a "config" key; newer conversions
-            # (e.g. LTX-2.5) emit the fields flat at the top level.
-            config = raw_config.get("config", raw_config)
-            upsampler = LatentUpsampler.from_config(config)
-        else:
-            upsampler = LatentUpsampler()
-
-        raw = load_split_safetensors(weights_path)
-        # Old format keys are prefixed with the stem; new format uses bare keys.
-        stem_prefix = weights_path.stem + "."
-        if raw and all(k.startswith(stem_prefix) for k in raw):
-            raw = {k[len(stem_prefix) :]: v for k, v in raw.items()}
-        upsampler.load_weights(list(raw.items()))
-        return upsampler
-
-    def _load_upsampler(self) -> None:
-        """Load the spatial upsampler from config and weights.
-
-        Raises:
-            FileNotFoundError: propagated from :meth:`_resolve_upsampler_path`
-                when no upsampler weights file is present in the model dir.
-        """
-        self.upsampler = self._build_upsampler(self._resolve_upsampler_path())
-        aggressive_cleanup()
 
     def load(self) -> None:
         """Load DiT + VAE encoder + upsampler (skip decoders for memory).

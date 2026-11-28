@@ -201,6 +201,9 @@ class LipDubPipeline(ICLoraPipeline):
             aggressive_cleanup()
 
         self.load()
+        # ICLoraPipeline.load() leaves the upsampler out; lipdub always upscales.
+        if self.upsampler is None:
+            self._load_upsampler()
         assert self.dit is not None
         assert self.vae_encoder is not None
 
